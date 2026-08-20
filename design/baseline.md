@@ -20,7 +20,7 @@ The implementation uses PI and the PI SDK as the conversational harness, Ollama 
 - Support a comma-separated configuration list of Discord users allowed to converse with the model, with a blank list authorizing no users.
 - Let any Discord user run `/ping` and receive exactly `pong` without touching the AI or conversation state.
 - Make the model and runtime settings configurable without code changes.
-- Let the model fetch user-provided HTTP or HTTPS pages through an explicitly allowlisted, Ollama-backed `web_fetch` tool while keeping built-in coding tools disabled.
+- Let the model fetch web pages and, when configured, operate on GitHub through explicitly allowlisted custom tools while keeping built-in coding tools disabled.
 - Show a typing indicator while generating and attach every guild response to its triggering question with a Discord reply.
 - Record enough activity, errors, chat history, and available model diagnostics for operators to debug conversations.
 - Make the project approachable for community members to run and learn from locally.
@@ -86,7 +86,9 @@ flowchart LR
         Sessions --> Store[(SQLite<br/>sessions and chat logs)]
         Sessions --> PI[PI harness SDK]
         PI --> WebFetch[web_fetch tool<br/>sanitized external content]
+        PI --> GitHub[GitHub tools<br/>token-gated and sanitized]
         WebFetch --> Ollama
+        GitHub --> GitHubAPI[GitHub API]
         PI --> Ollama[Ollama container]
         Ollama --> Model[deepseek-v4-flash<br/>configurable model]
         Model --> Ollama
@@ -110,6 +112,7 @@ Configuration is loaded once at startup, parsed into a typed runtime object, and
 - An optional comma-separated list of authorized Discord user IDs, with no built-in default. A blank list authorizes no users.
 - Comma-separated allowed guild channel IDs. Threads are matched by parent channel ID.
 - Ollama endpoint and model, with `deepseek-v4-flash:0731-cloud` as the default model.
+- Optional GitHub API token and a comma-separated repository allowlist defaulting to `mbrooks/artemis,HSV-AI/artemis`. A blank token or blank repository allowlist disables all GitHub tools.
 - SQLite database path.
 - Log level and other non-secret runtime controls.
 
@@ -150,7 +153,7 @@ Work for the same conversation is serialized so two rapidly arriving messages ca
 
 PI is the base conversational harness and owns interaction with the configured model through Ollama. Application code supplies the isolated conversation session and user message, then consumes the assistant response plus any available reasoning or diagnostic metadata.
 
-Only the custom `web_fetch` tool is enabled. It accepts an HTTP or HTTPS URL, calls Ollama's web-fetch endpoint, labels the returned page as untrusted external content, neutralizes common role-delimiter and instruction-override patterns, and returns the sanitized page to the model. PI's built-in read, write, edit, shell, and search tools remain disabled. Tool failures follow the normal generation-failure path and produce no Discord response.
+Only explicitly allowlisted custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, calls Ollama's web-fetch endpoint, and sanitizes the returned page. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers `github_search`, `github_list`, `github_fetch`, `github_create`, `github_update`, and `github_upload_image`. Every operation resolves its repository against that case-insensitive allowlist before making a request; repository-scoped calls require explicit `owner` and `repo` arguments. Searches may omit them to run separately within every allowed repository and never perform a global GitHub search. The tools sanitize GitHub read results as untrusted content. Write tools may act only on an explicit mutation request from the current Discord user. CASE-specific watch creation and git-origin discovery are intentionally not ported. PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Tool failures follow the normal generation-failure path and produce no Discord response.
 
 The model name is configuration, not a conditional embedded in application logic. Changing from the default `deepseek-v4-flash:0731-cloud` therefore requires a configuration update and restart, not a code change. Ollama-specific calls remain behind a narrow boundary so unit tests can substitute a deterministic fake.
 
@@ -216,7 +219,7 @@ If configuration, migration, or required model setup fails, startup exits with a
 4. Check the author ID against the configured user allowlist; silently stop if it is not authorized.
 5. Derive the conversation key from the DM channel or the parent guild channel and serialize work behind that conversation's queue.
 6. Silently stop if the Discord message ID has already been processed.
-7. Start Discord's typing indicator and refresh it while generation remains active.
+7. Start Discord's typing indicator and refresh it every five seconds while generation remains active.
 8. For a thread reply, fetch the complete thread in Discord order, including the new message.
 9. Restore or create the durable PI session and persist any new inbound messages.
 10. Submit the current message, or the complete thread snapshot for a thread reply, to PI through the configured Ollama model.
@@ -281,7 +284,7 @@ Required tests include:
 - Configuration defaults and validation behave as documented, including the default model.
 - Persistence transactions, migrations, and error paths preserve the last valid session state.
 - PI or Ollama failures are logged without creating an assistant turn or sending a Discord response.
-- `web_fetch` is the only enabled tool, rejects non-HTTP(S) URLs, calls the configured Ollama service, sanitizes fetched content, and never enables built-in coding tools.
+- Only `web_fetch` and token-gated GitHub custom tools are enabled; they sanitize external content and never enable built-in coding tools.
 - Discord reconnect lifecycle events are handled without losing durable context.
 
 `npm run guardrail` is the completion gate and runs all required checks, including the Vitest suite with coverage. A change is not complete until that command passes.

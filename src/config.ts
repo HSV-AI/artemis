@@ -1,6 +1,7 @@
 export const DEFAULT_OLLAMA_MODEL = "deepseek-v4-flash:0731-cloud";
 export const DEFAULT_OLLAMA_BASE_URL = "http://ollama:11434/v1";
 export const DEFAULT_SQLITE_PATH = "/data/artemis.sqlite";
+export const DEFAULT_GITHUB_ALLOWED_REPOSITORIES = ["mbrooks/artemis", "HSV-AI/artemis"] as const;
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -11,6 +12,8 @@ export interface ArtemisConfig {
   ollamaBaseUrl: string;
   ollamaModel: string;
   ollamaApiKey: string;
+  githubToken: string;
+  githubAllowedRepositories: readonly string[];
   sqlitePath: string;
   logLevel: LogLevel;
 }
@@ -31,6 +34,23 @@ function valueOrDefault(env: Environment, name: string, defaultValue: string): s
 
 function parseCommaSeparatedIds(value: string | undefined): string[] {
   return [...new Set((value ?? "").split(",").map((id) => id.trim()))].filter(Boolean);
+}
+
+function parseAllowedRepositories(value: string | undefined): string[] {
+  const source = value === undefined ? DEFAULT_GITHUB_ALLOWED_REPOSITORIES.join(",") : value;
+  const repositories = source.split(",").map((repository) => repository.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  return repositories.filter((repository) => {
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(repository)) {
+      throw new Error(
+        "Invalid configuration: GITHUB_ALLOWED_REPOSITORY must contain comma-separated owner/repository values"
+      );
+    }
+    const normalized = repository.toLowerCase();
+    if (seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
 }
 
 function parseUrl(value: string, name: string): string {
@@ -64,6 +84,8 @@ export function parseConfig(env: Environment = process.env): ArtemisConfig {
     ),
     ollamaModel: valueOrDefault(env, "OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
     ollamaApiKey: valueOrDefault(env, "OLLAMA_API_KEY", "ollama"),
+    githubToken: env.GITHUB_TOKEN?.trim() ?? "",
+    githubAllowedRepositories: parseAllowedRepositories(env.GITHUB_ALLOWED_REPOSITORY),
     sqlitePath: valueOrDefault(env, "SQLITE_PATH", DEFAULT_SQLITE_PATH),
     logLevel: parseLogLevel(valueOrDefault(env, "LOG_LEVEL", "info"))
   };

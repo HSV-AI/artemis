@@ -20,6 +20,7 @@ import type {
   PiGenerationResult,
   StoredMessage
 } from "./domain.js";
+import { createGitHubTools } from "./github-tools.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
 
 const SYSTEM_PROMPT =
@@ -89,10 +90,11 @@ export class PiSdkGateway implements PiGateway {
   private resourceLoader: DefaultResourceLoader | undefined;
 
   public constructor(
-    private readonly config: Pick<
-      ArtemisConfig,
-      "ollamaBaseUrl" | "ollamaModel" | "ollamaApiKey"
-    >,
+    private readonly config: Pick<ArtemisConfig, "ollamaBaseUrl" | "ollamaModel" | "ollamaApiKey"> &
+      Partial<Pick<
+        ArtemisConfig,
+        "githubToken" | "githubAllowedRepositories"
+      >>,
     private readonly fetchImplementation: typeof fetch = fetch
   ) {}
 
@@ -131,17 +133,23 @@ export class PiSdkGateway implements PiGateway {
     for (const message of input.history) {
       sessionManager.appendMessage(storedToPiMessage(message, this.config.ollamaModel));
     }
+    const customTools = [
+      createWebFetchTool({
+        ollamaBaseUrl: this.config.ollamaBaseUrl,
+        ollamaApiKey: this.config.ollamaApiKey,
+        fetchImplementation: this.fetchImplementation
+      }),
+      ...createGitHubTools({
+        token: this.config.githubToken ?? "",
+        allowedRepositories: this.config.githubAllowedRepositories ?? [],
+        fetchImplementation: this.fetchImplementation
+      })
+    ];
     const { session } = await createAgentSession({
       modelRuntime,
       model,
-      tools: ["web_fetch"],
-      customTools: [
-        createWebFetchTool({
-          ollamaBaseUrl: this.config.ollamaBaseUrl,
-          ollamaApiKey: this.config.ollamaApiKey,
-          fetchImplementation: this.fetchImplementation
-        })
-      ],
+      tools: customTools.map((tool) => tool.name),
+      customTools,
       resourceLoader,
       sessionManager,
       settingsManager: SettingsManager.inMemory()

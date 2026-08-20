@@ -12,6 +12,8 @@ const config: ArtemisConfig = {
   ollamaBaseUrl: "http://ollama:11434/v1",
   ollamaModel: "model",
   ollamaApiKey: "ollama",
+  githubToken: "",
+  githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
   sqlitePath: ":memory:",
   logLevel: "info"
 };

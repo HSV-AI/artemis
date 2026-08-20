@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_OLLAMA_BASE_URL,
+  DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
   DEFAULT_OLLAMA_MODEL,
   DEFAULT_SQLITE_PATH,
   parseConfig
 } from "../src/config.js";
 
 describe("parseConfig", () => {
-  it("loads required values and empty allowlists by default", () => {
+  it("loads required values, empty Discord allowlists, and safe defaults", () => {
     expect(
       parseConfig({
         DISCORD_TOKEN: "token"
@@ -19,6 +20,8 @@ describe("parseConfig", () => {
       ollamaBaseUrl: DEFAULT_OLLAMA_BASE_URL,
       ollamaModel: DEFAULT_OLLAMA_MODEL,
       ollamaApiKey: "ollama",
+      githubToken: "",
+      githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
       sqlitePath: DEFAULT_SQLITE_PATH,
       logLevel: "info"
     });
@@ -32,6 +35,8 @@ describe("parseConfig", () => {
       OLLAMA_BASE_URL: "https://ollama.example/v1/",
       OLLAMA_MODEL: "custom",
       OLLAMA_API_KEY: "secret",
+      GITHUB_TOKEN: " github-secret ",
+      GITHUB_ALLOWED_REPOSITORY: " mbrooks/artemis, HSV-AI/artemis, MBROOKS/ARTEMIS ",
       SQLITE_PATH: ":memory:",
       LOG_LEVEL: "debug"
     });
@@ -42,6 +47,8 @@ describe("parseConfig", () => {
       ollamaBaseUrl: "https://ollama.example/v1",
       ollamaModel: "custom",
       ollamaApiKey: "secret",
+      githubToken: "github-secret",
+      githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
       sqlitePath: ":memory:",
       logLevel: "debug"
     });
@@ -83,5 +90,20 @@ describe("parseConfig", () => {
         LOG_LEVEL: "verbose"
       })
     ).toThrow("Invalid configuration: LOG_LEVEL");
+  });
+
+  it("allows a blank GitHub repository allowlist and rejects malformed entries", () => {
+    expect(parseConfig({
+      DISCORD_TOKEN: "token",
+      GITHUB_ALLOWED_REPOSITORY: ""
+    }).githubAllowedRepositories).toEqual([]);
+    expect(() => parseConfig({
+      DISCORD_TOKEN: "token",
+      GITHUB_ALLOWED_REPOSITORY: "artemis"
+    })).toThrow("GITHUB_ALLOWED_REPOSITORY");
+    expect(() => parseConfig({
+      DISCORD_TOKEN: "token",
+      GITHUB_ALLOWED_REPOSITORY: "owner/repo?ref=main"
+    })).toThrow("GITHUB_ALLOWED_REPOSITORY");
   });
 });

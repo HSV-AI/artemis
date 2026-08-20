@@ -169,11 +169,11 @@ describe("Discord helpers", () => {
 
     await indicator.start();
     expect(sendTyping).toHaveBeenCalledOnce();
-    await vi.advanceTimersByTimeAsync(100);
-    expect(sendTyping).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(sendTyping).toHaveBeenCalledTimes(4);
     indicator.stop();
     await vi.advanceTimersByTimeAsync(100);
-    expect(sendTyping).toHaveBeenCalledTimes(2);
+    expect(sendTyping).toHaveBeenCalledTimes(4);
   });
 
   it("logs a typing failure without scheduling refreshes", async () => {

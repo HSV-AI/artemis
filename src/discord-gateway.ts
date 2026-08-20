@@ -13,7 +13,7 @@ import type { InboundMessage, Logger, ResponseIndicator, SourceMessage } from ".
 import { safeError } from "./logger.js";
 
 const DISCORD_MESSAGE_LIMIT = 2_000;
-const TYPING_REFRESH_INTERVAL_MS = 8_000;
+const TYPING_REFRESH_INTERVAL_MS = 5_000;
 
 export function splitDiscordMessage(content: string, limit = DISCORD_MESSAGE_LIMIT): string[] {
   if (content.length <= limit) {
@@ -159,7 +159,6 @@ export function createTypingIndicator(
           }
         });
       }, refreshIntervalMs);
-      timer.unref?.();
     },
     stop
   };

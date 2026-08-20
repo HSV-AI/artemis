@@ -21,7 +21,7 @@ The following behavior is fixed:
 - Every Discord message event is logged to the console and SQLite before filtering, including DMs, bot messages, unauthorized messages, unmentioned messages, and messages from disallowed channels.
 - Accepted conversations retain their history in SQLite across restarts. There is no automatic retention or deletion.
 - Model or harness failures are logged and persisted, but produce no Discord response.
-- The model may use one explicitly allowlisted tool named `web_fetch` to retrieve an HTTP or HTTPS page through Ollama. Fetched content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled.
+- The model may use explicitly allowlisted custom tools: `web_fetch`, plus six GitHub tools when a token is configured. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled.
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Ollama runs as a separate Docker Compose service. It is not installed in the Artemis application image.
 
@@ -48,7 +48,9 @@ flowchart LR
     Sessions --> Harness[Harness adapter]
     Harness --> Model[Model adapter]
     Harness --> WebFetch[web_fetch tool]
+    Harness --> GitHubTools[Token-gated GitHub tools]
     WebFetch --> Ollama
+    GitHubTools --> GitHubAPI[GitHub API]
     Model --> Ollama[Ollama service]
     Ping --> Discord
     Sessions --> Discord
@@ -96,7 +98,7 @@ Do not detect mentions with string matching alone. Use the Discord SDK's structu
 
 Normal assistant output is sent in the same DM, channel, or thread that triggered generation. Guild and guild-thread chunks are Discord replies to the triggering message so the answered question is explicit. DM chunks remain ordinary channel messages.
 
-After a normal message passes all authorization and duplicate checks, send a typing indicator immediately and refresh it before Discord's indicator expires while generation is active. Stop refreshing on success or failure. Ignored and duplicate messages must never show typing. A typing-indicator API failure is logged but does not prevent generation.
+After a normal message passes all authorization and duplicate checks, send a typing indicator immediately and refresh it every five seconds while generation is active, safely inside Discord's expiry window. Keep the heartbeat active until success or failure, then stop it. Ignored and duplicate messages must never show typing. A typing-indicator API failure is logged but does not prevent generation.
 
 Discord limits message content to 2,000 characters. Split longer responses into ordered chunks, preferring a newline or space in the latter half of each chunk. Persist the assistant response as one logical message even when Discord receives multiple chunks.
 
@@ -222,7 +224,7 @@ The model-facing implementation must:
 - Use the configured model rather than hard-coding a conditional model choice.
 - Supply the complete stored history for the logical session in order.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
-- Enable only the `web_fetch` custom tool. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
+- Enable only `web_fetch` and, when configured, the six GitHub custom tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply a system instruction equivalent to: Artemis is a helpful conversational Discord assistant, should answer the latest message directly, and must not claim Discord capabilities it was not given.
 - Return final assistant text separately from optional reasoning and diagnostics.
 - Treat aborted, errored, absent, and blank final responses as failures.
@@ -252,6 +254,10 @@ Expect a response containing a title, page content, and links. Return the title,
 - Redact common instruction-override phrases and add a security notice when any content was changed.
 
 This is a defense-in-depth transformation, not a claim that arbitrary web content is safe. Tool errors follow the generation-failure path and send nothing to Discord.
+
+### GitHub tool contract
+
+When `GITHUB_TOKEN` or `GITHUB_ALLOWED_REPOSITORY` is blank, register no GitHub tools. Otherwise register `github_search`, `github_list`, `github_fetch`, `github_create`, `github_update`, and `github_upload_image`. These cover repository, issue, pull-request, branch, code, commit, contents, comment, and image operations through the GitHub REST API. Before any request, case-insensitively match the target `owner/repository` against the configured comma-separated allowlist. Require explicit `owner` and `repo` arguments for repository-scoped operations. A search may omit them to run once per allowed repository and merge its bounded results; never issue a global search. Do not require a local git checkout. Sanitize and label GitHub read results as untrusted external data using the same defenses as `web_fetch`. Mutations require an explicit request from the current Discord user. Do not recreate CASE-specific issue watches.
 
 ### Using a language without a PI SDK
 
@@ -363,6 +369,8 @@ Load local configuration from `.env` or the process environment. Trim scalar val
 | `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | OpenAI-compatible model endpoint. |
 | `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Selected model. |
 | `OLLAMA_API_KEY` | No | `ollama` | Placeholder or bearer-token credential. |
+| `GITHUB_TOKEN` | No | Empty | GitHub API token; blank disables all GitHub tools. |
+| `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` | Comma-separated GitHub repository allowlist; blank disables GitHub tools. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
 | `LOG_LEVEL` | No | `info` | Minimum routine level: `debug`, `info`, `warn`, or `error`. |
 
@@ -420,7 +428,7 @@ Each stage should finish with tests before the next begins.
 
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
-- Register and allowlist only `web_fetch`, disable every built-in tool, and apply the Artemis system instruction.
+- Register and allowlist `web_fetch` plus token-gated GitHub tools, disable every built-in tool, and apply the Artemis system instruction.
 - Add Ollama health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
 
@@ -468,6 +476,7 @@ At minimum, prove all of the following:
 - Typing appears only for accepted, non-duplicate messages, refreshes until generation ends, and a typing API failure does not cancel generation.
 - Every guild and guild-thread response chunk replies to the triggering message; DM chunks use ordinary sends.
 - `web_fetch` rejects non-HTTP(S) targets, uses the configured Ollama host and authentication, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
+- GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and prevent implicit mutations.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Console logs continue when SQLite log persistence fails, without recursive failures.
 - Startup fails before Discord login when configuration, database migration, or model health validation fails.

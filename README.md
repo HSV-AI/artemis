@@ -15,8 +15,8 @@ The product and implementation baseline is documented in [design/baseline.md](de
 - In guild channels and threads, the authorized user must mention the bot user or its Discord-managed bot role (`@Artemis`) in the triggering message. `@everyone`, `@here`, unrelated roles, and reply-only mentions do not trigger Artemis. DMs do not require a mention.
 - DMs have independent sessions. Guild threads share their parent channel's session.
 - An authorized thread reply submits the complete ordered thread, including the new message, to PI.
-- After accepting a normal message, Artemis shows and refreshes Discord's typing indicator while generating. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary direct messages.
-- PI may use the explicitly allowlisted `web_fetch` tool to read a user-provided HTTP or HTTPS page through Ollama. Fetched content is labeled as untrusted and sanitized before it reaches the model; built-in coding tools remain disabled.
+- After accepting a normal message, Artemis shows and refreshes Discord's typing indicator every five seconds until generation finishes. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary direct messages.
+- PI may use the explicitly allowlisted `web_fetch` tool to read a user-provided HTTP or HTTPS page through Ollama. When `GITHUB_TOKEN` is configured, PI may also search, list, fetch, create, and update GitHub resources and upload issue images, but only within `GITHUB_ALLOWED_REPOSITORY`. External content is labeled as untrusted and sanitized before it reaches the model; built-in coding tools remain disabled.
 - PI and Ollama failures are written to operator logs and SQLite; nothing is sent to Discord.
 - Sessions, chat content, reasoning, and diagnostics are retained in SQLite until an operator removes them.
 - Every newly received Discord message is logged with its raw content and metadata before filtering, regardless of `LOG_LEVEL`. This includes DMs, guild messages, bot messages, unauthorized messages, and unmentioned messages.
@@ -54,12 +54,16 @@ cp .env.example .env
 | `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | Ollama's OpenAI-compatible endpoint. Compose enforces this internal URL. |
 | `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Model selected by PI. |
 | `OLLAMA_API_KEY` | No | `ollama` | Placeholder for local Ollama, or bearer token for a compatible remote endpoint. |
+| `GITHUB_TOKEN` | No | Empty | GitHub API token. A blank value disables every GitHub tool. Grant only the repository permissions needed for the desired read or write operations. |
+| `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` | Comma-separated `owner/repository` allowlist. A blank list disables every GitHub tool. Matching is case-insensitive. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error`. |
 
 When upgrading an existing `.env`, remove `DISCORD_GUILD_ID`, replace `AUTHORIZED_USER_ID` with `DISCORD_ALLOWED_USER_ID`, and add `DISCORD_ALLOWED_CHANNEL_ID`. Separate multiple IDs with commas; surrounding whitespace and duplicate IDs are removed. Either allowlist may be blank, which allows no matching users or channels.
 
-Never commit `.env`, the SQLite database, or Ollama credentials.
+Never commit `.env`, the SQLite database, Ollama credentials, or GitHub tokens. Artemis rejects every GitHub operation outside the repository allowlist. GitHub mutations are available only when the current Discord request explicitly asks for the specific mutation.
+
+GitHub repository-scoped operations require both `owner` and `repo`, and both must match an allowlist entry. A search may omit them to search every allowed repository.
 
 ## Ollama cloud sign-in
 

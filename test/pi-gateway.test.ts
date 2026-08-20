@@ -226,6 +226,30 @@ describe("PiSdkGateway", () => {
     expect(result).toMatchObject({ text: "answer", model: "model" });
   });
 
+  it("allowlists the GitHub tools when a token is configured", async () => {
+    const gateway = new PiSdkGateway(
+      {
+        ollamaBaseUrl: "http://ollama/v1",
+        ollamaModel: "model",
+        ollamaApiKey: "ollama",
+        githubToken: "github-token",
+        githubAllowedRepositories: ["owner/repo", "other/repo"]
+      },
+      vi.fn()
+    );
+    await gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt" });
+    expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      tools: [
+        "web_fetch", "github_search", "github_list", "github_fetch",
+        "github_create", "github_update", "github_upload_image"
+      ],
+      customTools: expect.arrayContaining([
+        expect.objectContaining({ name: "github_search" }),
+        expect.objectContaining({ name: "github_upload_image" })
+      ])
+    }));
+  });
+
   it("rejects a missing configured model and a missing assistant response", async () => {
     const gateway = new PiSdkGateway(
       { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
