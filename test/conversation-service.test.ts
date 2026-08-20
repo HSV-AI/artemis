@@ -70,7 +70,7 @@ describe("ConversationService", () => {
     return { service: new ConversationService(options, repository, pi, logger), pi, logger };
   }
 
-  it("silently ignores bots, empty messages, disallowed channels, unmentioned guild messages, and unauthorized users", async () => {
+  it("silently ignores bots, empty messages, disallowed channels, unmentioned guild messages, and unauthorized DMs", async () => {
     const { service, pi, logger } = createService();
     await expect(service.handleMessage(inbound({ isBot: true }))).resolves.toBeNull();
     await expect(service.handleMessage(inbound({ content: " " }))).resolves.toBeNull();
@@ -94,7 +94,7 @@ describe("ConversationService", () => {
     );
   });
 
-  it("responds to a mentioned guild message without changing DM behavior", async () => {
+  it("allows any user in an allowed guild channel while keeping the user allowlist on DMs", async () => {
     const { service, pi } = createService(createPiMock({ text: "Hello group" }));
     const guildIndicator = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
     const dmIndicator = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
@@ -103,6 +103,7 @@ describe("ConversationService", () => {
       service.handleMessage(
         inbound({
           discordMessageId: "guild-message",
+          authorId: "not-in-dm-user-allowlist",
           guildId: "another-guild",
           channelId: "group-2",
           mentionsBot: true,
@@ -185,7 +186,7 @@ describe("ConversationService", () => {
     );
   });
 
-  it("loads and resubmits the complete thread after authorization", async () => {
+  it("loads and resubmits the complete thread for any user in an allowed guild channel", async () => {
     const { service, pi } = createService();
     const loadThread = vi.fn().mockResolvedValue([
       {
@@ -209,6 +210,7 @@ describe("ConversationService", () => {
     ] satisfies SourceMessage[]);
     await service.handleMessage(
       inbound({
+        authorId: "not-in-dm-user-allowlist",
         guildId: "guild-1",
         channelId: "thread",
         parentChannelId: "group-1",
@@ -232,7 +234,7 @@ describe("ConversationService", () => {
     expect(repository?.getHistory(session?.id ?? "").filter((message) => message.role === "user")).toHaveLength(2);
   });
 
-  it("does not load a thread for an unmentioned or unauthorized trigger", async () => {
+  it("does not load a thread for an unmentioned guild trigger", async () => {
     const { service } = createService();
     const loadThread = vi.fn().mockResolvedValue([]);
     await service.handleMessage(
@@ -241,17 +243,6 @@ describe("ConversationService", () => {
         channelId: "thread",
         parentChannelId: "group-1",
         mentionsBot: false,
-        loadThread
-      })
-    );
-    await service.handleMessage(
-      inbound({
-        discordMessageId: "unauthorized",
-        authorId: "other",
-        guildId: "guild-1",
-        channelId: "thread",
-        parentChannelId: "group-1",
-        mentionsBot: true,
         loadThread
       })
     );

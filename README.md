@@ -1,6 +1,6 @@
 # Artemis
 
-Artemis is a small, community-run Discord chatbot built with TypeScript, the PI SDK, Ollama, and SQLite. It supports direct messages and selected channels across Discord guilds, keeps each conversation isolated across restarts, and restricts conversations to a configured user allowlist.
+Artemis is a small, community-run Discord chatbot built with TypeScript, the PI SDK, Ollama, and SQLite. It supports allowlisted users in direct messages and any user in selected channels across Discord guilds, while keeping each conversation isolated across restarts.
 
 The product and implementation baseline is documented in [design/baseline.md](design/baseline.md). Coding agents can reproduce Artemis in another language or with another conversational harness by following the [clean-room rebuild guide](design/rebuild-guide.md).
 
@@ -8,13 +8,13 @@ The product and implementation baseline is documented in [design/baseline.md](de
 
 - Any Discord user can run `/ping` in an allowed guild channel. In DMs, `/ping` and normal conversation are restricted to users in `DISCORD_ALLOWED_USER_ID`.
 - `/ping` never accesses SQLite, PI, or Ollama.
-- `DISCORD_ALLOWED_USER_ID` supplies the comma-separated user allowlist. A blank list authorizes no users.
+- `DISCORD_ALLOWED_USER_ID` supplies the comma-separated DM user allowlist. A blank list disables DM responses.
 - DMs produce no response for users outside `DISCORD_ALLOWED_USER_ID`.
 - Other normal messages are silently ignored.
 - Guild responses across all connected guilds are limited to the comma-separated channel IDs in `DISCORD_ALLOWED_CHANNEL_ID`; threads inherit permission from their parent channel.
-- In guild channels and threads, the authorized user must mention the bot user or its Discord-managed bot role (`@Artemis`) in the triggering message. `@everyone`, `@here`, unrelated roles, and reply-only mentions do not trigger Artemis. DMs do not require a mention.
+- In allowed guild channels and threads, any user can converse by mentioning the bot user or its Discord-managed bot role (`@Artemis`) in the triggering message. `@everyone`, `@here`, unrelated roles, and reply-only mentions do not trigger Artemis. DMs do not require a mention.
 - DMs have independent sessions. Guild threads share their parent channel's session.
-- An authorized thread reply submits the complete ordered thread, including the new message, to PI.
+- An accepted thread reply submits the complete ordered thread, including the new message, to PI.
 - After accepting a normal message, Artemis shows and refreshes Discord's typing indicator every five seconds until generation finishes. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary direct messages.
 - PI may use the explicitly allowlisted `web_fetch` tool to read a user-provided HTTP or HTTPS page through Ollama. When `GITHUB_TOKEN` is configured, PI may also search, list, fetch, create, and update GitHub resources and upload issue images, but only within `GITHUB_ALLOWED_REPOSITORY`. External content is labeled as untrusted and sanitized before it reaches the model; built-in coding tools remain disabled.
 - PI and Ollama failures are written to operator logs and SQLite; nothing is sent to Discord.
@@ -50,7 +50,7 @@ cp .env.example .env
 | --- | --- | --- | --- |
 | `DISCORD_TOKEN` | Yes | — | Discord bot token. |
 | `DISCORD_ALLOWED_CHANNEL_ID` | No | Empty | Comma-separated guild channel IDs where Artemis may respond. A blank list disables guild responses. Threads use their parent channel ID. |
-| `DISCORD_ALLOWED_USER_ID` | No | Empty | Comma-separated Discord user IDs allowed to converse with Artemis. A blank list authorizes no users. |
+| `DISCORD_ALLOWED_USER_ID` | No | Empty | Comma-separated Discord user IDs allowed to converse with Artemis in DMs. A blank list disables DM responses. This setting does not govern guild messages. |
 | `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | Ollama's OpenAI-compatible endpoint. Compose enforces this internal URL. |
 | `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Model selected by PI. |
 | `OLLAMA_API_KEY` | No | `ollama` | Placeholder for local Ollama, or bearer token for a compatible remote endpoint. |
@@ -59,7 +59,7 @@ cp .env.example .env
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error`. |
 
-When upgrading an existing `.env`, remove `DISCORD_GUILD_ID`, replace `AUTHORIZED_USER_ID` with `DISCORD_ALLOWED_USER_ID`, and add `DISCORD_ALLOWED_CHANNEL_ID`. Separate multiple IDs with commas; surrounding whitespace and duplicate IDs are removed. Either allowlist may be blank, which allows no matching users or channels.
+When upgrading an existing `.env`, remove `DISCORD_GUILD_ID`, replace `AUTHORIZED_USER_ID` with `DISCORD_ALLOWED_USER_ID`, and add `DISCORD_ALLOWED_CHANNEL_ID`. Separate multiple IDs with commas; surrounding whitespace and duplicate IDs are removed. A blank user allowlist disables DMs, while a blank channel allowlist disables guild responses.
 
 Never commit `.env`, the SQLite database, Ollama credentials, or GitHub tokens. Artemis rejects every GitHub operation outside the repository allowlist. GitHub mutations are available only when the current Discord request explicitly asks for the specific mutation.
 

@@ -8,7 +8,7 @@ Last updated: 2026-08-19
 
 ## Summary
 
-Artemis is a community-run Discord bot that supports AI-assisted conversations in direct messages and selected guild chats. The first release allows a configured list of users to converse with the model in configured channels across guilds, exposes a context-aware `/ping` health command, and preserves each chat's context across restarts.
+Artemis is a community-run Discord bot that supports AI-assisted conversations in direct messages and selected guild chats. The first release allows configured users to converse with the model in DMs and any user to converse in configured channels across guilds, exposes a context-aware `/ping` health command, and preserves each chat's context across restarts.
 
 The implementation uses PI and the PI SDK as the conversational harness, Ollama as the initial model provider, SQLite for durable sessions and chat logs, and Docker Compose for local operation. Configuration and credentials are supplied through an uncommitted `.env` file.
 
@@ -17,7 +17,7 @@ The implementation uses PI and the PI SDK as the conversational harness, Ollama 
 - Connect reliably to Discord and operate in configured channels across guilds.
 - Support conversations in direct messages and allowed guild channels, treating threads as part of their parent guild channel.
 - Keep every Discord conversation isolated and durable.
-- Support a comma-separated configuration list of Discord users allowed to converse with the model, with a blank list authorizing no users.
+- Support a comma-separated configuration list of Discord users allowed to converse with the model in DMs, with a blank list authorizing no DM users.
 - Let any Discord user run `/ping` and receive exactly `pong` without touching the AI or conversation state.
 - Make the model and runtime settings configurable without code changes.
 - Let the model fetch web pages and, when configured, operate on GitHub through explicitly allowlisted custom tools while keeping built-in coding tools disabled.
@@ -39,7 +39,7 @@ The implementation uses PI and the PI SDK as the conversational harness, Ollama 
 | --- | --- |
 | Multiple Discord guilds | Scope guild responses by globally unique channel IDs rather than by a single guild ID. Direct messages remain supported. |
 | Context-aware `/ping` | Handle `/ping` in the Discord adapter before persistence or PI invocation. Reply with exactly `pong` for allowlisted users in DMs and for any user in allowed guild channels. |
-| Authorized conversational users | Parse `DISCORD_ALLOWED_USER_ID` as a comma-separated allowlist and compare the message author's Discord user ID before loading a conversation or invoking PI. Unauthorized normal messages receive no response. |
+| Authorized DM users | Parse `DISCORD_ALLOWED_USER_ID` as a comma-separated allowlist and compare the message author's Discord user ID before loading a DM conversation or invoking PI. Unauthorized DMs receive no response. This allowlist does not govern guild conversations. |
 | Allowed guild channels | Parse `DISCORD_ALLOWED_CHANNEL_ID` as a comma-separated channel allowlist. Accept a guild message only when its channel ID, or a thread's parent channel ID, is present. DMs remain supported independently. |
 | Explicit guild invocation | Require the triggering message in a guild channel or thread to mention the Artemis bot user or its Discord-managed bot role (`@Artemis`). `@everyone`, `@here`, unrelated roles, and reply-only mentions do not qualify. Direct messages do not require a mention. |
 | Direct-message and guild conversations | Derive a stable conversation key from the Discord context. Direct messages use the DM channel ID. Guild messages, including thread replies, use the guild ID plus the parent channel ID. |
@@ -76,13 +76,15 @@ flowchart LR
         Bot[Artemis bot<br/>TypeScript container]
         Bot --> Ping{Ping command?}
         Ping -- Yes, allowed DM user or any user in allowed channel --> Pong[Direct protocol response]
-        Ping -- No --> Auth{User ID in configured allowlist?}
+        Ping -- No --> Group{DM or guild?}
+        Group -- DM --> Auth{User ID in DM allowlist?}
         Auth -- No --> Ignore[Silently ignore message]
-        Auth -- Yes --> Group{DM or allowed guild channel?}
-        Group -- No --> Ignore
-        Group -- Yes --> Mention{DM or bot mentioned?}
+        Auth -- Yes --> Sessions[Session router<br/>One PI session per DM or guild group chat]
+        Group -- Guild --> Channel{Channel allowed?}
+        Channel -- No --> Ignore
+        Channel -- Yes --> Mention{Bot mentioned?}
         Mention -- No --> Ignore
-        Mention -- Yes --> Sessions[Session router<br/>One PI session per DM or guild group chat]
+        Mention -- Yes --> Sessions
         Sessions --> Store[(SQLite<br/>sessions and chat logs)]
         Sessions --> PI[PI harness SDK]
         PI --> WebFetch[web_fetch tool<br/>sanitized external content]
@@ -109,7 +111,7 @@ flowchart LR
 Configuration is loaded once at startup, parsed into a typed runtime object, and validated before any network connection or database mutation. At minimum it includes:
 
 - Discord bot token and an optional comma-separated list of allowed channel IDs across guilds. A blank list disables guild responses.
-- An optional comma-separated list of authorized Discord user IDs, with no built-in default. A blank list authorizes no users.
+- An optional comma-separated list of authorized Discord DM user IDs, with no built-in default. A blank list authorizes no DM users and has no effect on guild conversations.
 - Comma-separated allowed guild channel IDs. Threads are matched by parent channel ID.
 - Ollama endpoint and model, with `deepseek-v4-flash:0731-cloud` as the default model.
 - Optional GitHub API token and a comma-separated repository allowlist defaulting to `mbrooks/artemis,HSV-AI/artemis`. A blank token or blank repository allowlist disables all GitHub tools.
@@ -130,9 +132,9 @@ The ping path is independent of the conversational path. It performs no authoriz
 
 #### Conversation authorization
 
-Normal chat is accepted only when the author's Discord ID appears in the configured user allowlist. Rejected messages are not sent to PI and do not create or alter conversation records. They produce no Discord response.
+Direct-message chat is accepted only when the author's Discord ID appears in the configured user allowlist. Rejected DMs are not sent to PI and do not create or alter conversation records. They produce no Discord response.
 
-Within a guild, an authorized message must originate in one of the configured channels and mention either the Artemis bot user or the Discord-managed role whose `botId` belongs to Artemis. A thread is allowed when its parent channel is configured. Reply metadata, unrelated roles, `@everyone`, and `@here` do not count as a bot mention. Direct messages retain their normal conversational behavior and never require a channel match or mention.
+Within a guild, any user's message may trigger Artemis when it originates in one of the configured channels and mentions either the Artemis bot user or the Discord-managed role whose `botId` belongs to Artemis. A thread is allowed when its parent channel is configured. Reply metadata, unrelated roles, `@everyone`, and `@here` do not count as a bot mention. `DISCORD_ALLOWED_USER_ID` does not govern guild messages. Direct messages never require a channel match or mention.
 
 #### Conversation coordinator
 
@@ -145,7 +147,7 @@ Conversation keys are namespaced by context:
 
 Discord channel IDs are immutable identifiers. Human-readable names are stored only as optional metadata and never used as keys. A Discord thread belongs to its parent guild channel and therefore uses that parent channel's conversation key rather than creating an independent conversation.
 
-When an authorized user replies in a thread, the coordinator fetches the complete thread in Discord order, including the new message, and submits that thread snapshot to PI for the current turn. The snapshot preserves author and message identity so the model can follow the discussion. Messages from other users may appear in this snapshot as context, but only a new message from the authorized user can trigger model generation. Repeated snapshots do not create duplicate SQLite message rows because source Discord message IDs are deduplicated.
+When any user invokes Artemis in an allowed thread, the coordinator fetches the complete thread in Discord order, including the new message, and submits that thread snapshot to PI for the current turn. The snapshot preserves author and message identity so the model can follow the discussion. Repeated snapshots do not create duplicate SQLite message rows because source Discord message IDs are deduplicated.
 
 Work for the same conversation is serialized so two rapidly arriving messages cannot race while updating one session. Different conversations may run concurrently. Discord message IDs provide idempotency so a redelivered event is not submitted to the model twice.
 
@@ -216,7 +218,7 @@ If configuration, migration, or required model setup fails, startup exits with a
 1. Ignore bot-authored messages.
 2. In a guild, silently stop unless the channel ID, or a thread's parent channel ID, is in the configured channel allowlist. DMs skip this check.
 3. In a guild, silently stop unless the triggering message directly mentions Artemis. DMs skip this check.
-4. Check the author ID against the configured user allowlist; silently stop if it is not authorized.
+4. In a DM, check the author ID against the configured user allowlist and silently stop if it is not authorized. Guild messages skip this check.
 5. Derive the conversation key from the DM channel or the parent guild channel and serialize work behind that conversation's queue.
 6. Silently stop if the Discord message ID has already been processed.
 7. Start Discord's typing indicator and refresh it every five seconds while generation remains active.
@@ -245,7 +247,7 @@ Transient Discord disconnects rely on the Discord client's resume and reconnect 
 ## Security and privacy
 
 - Keep Discord and model credentials only in the local environment or an operator-provided secret mechanism; never commit `.env`.
-- Ignore unauthorized normal messages before reading conversation state or invoking the model.
+- Ignore DMs from users outside the DM user allowlist before reading conversation state or invoking the model.
 - Scope every persistence query by the stable conversation identifier.
 - Do not expose chat history, model reasoning, tokens, or raw error payloads in routine application logs.
 - Run containers as a non-root user where practical and grant write access only to the data volume.
@@ -270,13 +272,13 @@ Application code is tested with Vitest. Discord, PI, and Ollama are mocked at th
 Required tests include:
 
 - `/ping` returns exactly `pong` for allowlisted DM users and any user in allowed guild channels, ignores unauthorized DMs and disallowed guild channels, and proves that persistence, PI, and Ollama are untouched.
-- Unauthorized normal chat is silently ignored without persistence or model calls.
+- DMs from users outside the DM user allowlist are silently ignored without persistence or model calls.
 - Guild messages outside the configured channel allowlist are silently ignored, while DMs are unaffected.
 - Unmentioned guild messages are silently ignored, while direct messages continue without requiring a mention.
 - Typing starts only for accepted, non-duplicate normal messages, refreshes during generation, and stops on success or failure.
 - Guild and guild-thread responses reply to the triggering message, while DM responses keep their existing delivery behavior.
 - DM and guild-channel keys remain distinct and stable, while a thread resolves to its parent guild-channel key.
-- Every authorized thread reply submits the complete ordered thread, including the new message, without duplicating persisted source messages.
+- Every accepted thread reply submits the complete ordered thread, including the new message, without duplicating persisted source messages.
 - Repeated messages reuse the correct session after a simulated process restart.
 - Context never crosses conversation keys.
 - Duplicate Discord message IDs invoke the model once.
@@ -297,8 +299,9 @@ Required tests include:
 | Reconnect after interruption | Adapter reconnect-state unit test with the Discord boundary mocked. |
 | Eligible users receive exactly `pong` | Ping unit tests for authorized and unauthorized DMs plus allowed guild channels, allowed threads, and disallowed channels. |
 | Ping does not affect AI or history | Assert zero calls to the persistence, PI, and Ollama boundaries. |
-| Authorized users can chat in DM and guild contexts | Coordinator unit tests proving comma-separated user and channel allowlists, DMs needing no channel match or mention, and allowed guild messages requiring a direct bot mention. |
-| Other users are silently ignored | Authorization unit test asserting no reply, persistence, or model call. |
+| Authorized users can chat in DMs | Coordinator unit tests proving the comma-separated user allowlist governs DMs, which need no channel match or mention. |
+| Any user can chat in an allowed guild context | Coordinator unit tests proving the channel allowlist governs guild messages, which require a direct bot mention but do not check the user allowlist. |
+| Other DM users are silently ignored | DM authorization unit test asserting no reply, persistence, or model call. |
 | Each conversation reuses durable context | Persistence and coordinator tests across fresh application instances. |
 | No context leaks | Cross-key isolation tests using distinct DMs and parent guild channels, plus tests proving threads share only their own parent channel's key. |
 | Model changes through configuration | Configuration and PI-boundary tests with a non-default model. |
@@ -307,7 +310,7 @@ Required tests include:
 
 ## Resolved implementation questions
 
-- Guild threads are part of their parent guild channel conversation. A thread is eligible only when its parent channel ID is in `DISCORD_ALLOWED_CHANNEL_ID`. On each authorized thread reply that directly mentions Artemis, the bot resubmits the entire ordered thread, including the new message.
+- Guild threads are part of their parent guild channel conversation. A thread is eligible only when its parent channel ID is in `DISCORD_ALLOWED_CHANNEL_ID`. On each thread reply that directly mentions Artemis, the bot resubmits the entire ordered thread, including the new message regardless of whether the author is in `DISCORD_ALLOWED_USER_ID`.
 - SQLite has no automatic retention or deletion policy. Stored chat content, sessions, and model reasoning or diagnostics remain until an operator deliberately removes them.
 - PI or Ollama generation failures are recorded for operators but produce no Discord response.
 - Docker Compose starts Ollama as a separate dependency container. Ollama is not included in the Artemis Dockerfile or application container.
