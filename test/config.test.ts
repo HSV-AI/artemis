@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_DISCORD_ALLOWED_USER_ID,
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
   DEFAULT_SQLITE_PATH,
@@ -8,16 +7,15 @@ import {
 } from "../src/config.js";
 
 describe("parseConfig", () => {
-  it("loads required values and safe defaults", () => {
+  it("loads required values and empty allowlists by default", () => {
     expect(
       parseConfig({
-        DISCORD_TOKEN: "token",
-        DISCORD_ALLOWED_CHANNEL_ID: "channel"
+        DISCORD_TOKEN: "token"
       })
     ).toEqual({
       discordToken: "token",
-      discordAllowedChannelIds: ["channel"],
-      discordUserIds: [DEFAULT_DISCORD_ALLOWED_USER_ID],
+      discordAllowedChannelIds: [],
+      discordUserIds: [],
       ollamaBaseUrl: DEFAULT_OLLAMA_BASE_URL,
       ollamaModel: DEFAULT_OLLAMA_MODEL,
       ollamaApiKey: "ollama",
@@ -49,28 +47,26 @@ describe("parseConfig", () => {
     });
   });
 
-  it.each(["DISCORD_TOKEN", "DISCORD_ALLOWED_CHANNEL_ID"])(
-    "rejects missing %s",
-    (name) => {
-      const env = {
-        DISCORD_TOKEN: "token",
-        DISCORD_ALLOWED_CHANNEL_ID: "channel",
-        [name]: ""
-      };
-      expect(() => parseConfig(env)).toThrow(`Missing required configuration: ${name}`);
-    }
-  );
+  it("rejects a missing Discord token", () => {
+    expect(() => parseConfig({ DISCORD_TOKEN: "" })).toThrow(
+      "Missing required configuration: DISCORD_TOKEN"
+    );
+  });
 
   it.each(["DISCORD_ALLOWED_CHANNEL_ID", "DISCORD_ALLOWED_USER_ID"])(
-    "rejects an empty %s allowlist",
+    "accepts a blank %s allowlist",
     (name) => {
-      expect(() =>
+      expect(
         parseConfig({
           DISCORD_TOKEN: "token",
           DISCORD_ALLOWED_CHANNEL_ID: "channel",
+          DISCORD_ALLOWED_USER_ID: "user",
           [name]: ", ,"
         })
-      ).toThrow(`${name} must contain at least one ID`);
+      ).toMatchObject({
+        [name === "DISCORD_ALLOWED_CHANNEL_ID" ? "discordAllowedChannelIds" : "discordUserIds"]:
+          []
+      });
     }
   );
 
@@ -78,14 +74,12 @@ describe("parseConfig", () => {
     expect(() =>
       parseConfig({
         DISCORD_TOKEN: "token",
-        DISCORD_ALLOWED_CHANNEL_ID: "channel",
         OLLAMA_BASE_URL: "file:///tmp/ollama"
       })
     ).toThrow("Invalid URL configuration: OLLAMA_BASE_URL");
     expect(() =>
       parseConfig({
         DISCORD_TOKEN: "token",
-        DISCORD_ALLOWED_CHANNEL_ID: "channel",
         LOG_LEVEL: "verbose"
       })
     ).toThrow("Invalid configuration: LOG_LEVEL");

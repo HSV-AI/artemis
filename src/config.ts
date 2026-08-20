@@ -1,4 +1,3 @@
-export const DEFAULT_DISCORD_ALLOWED_USER_ID = "603384387685449728";
 export const DEFAULT_OLLAMA_MODEL = "deepseek-v4-flash:0731-cloud";
 export const DEFAULT_OLLAMA_BASE_URL = "http://ollama:11434/v1";
 export const DEFAULT_SQLITE_PATH = "/data/artemis.sqlite";
@@ -30,12 +29,8 @@ function valueOrDefault(env: Environment, name: string, defaultValue: string): s
   return env[name]?.trim() || defaultValue;
 }
 
-function parseCommaSeparatedIds(value: string, name: string): string[] {
-  const ids = [...new Set(value.split(",").map((id) => id.trim()))].filter(Boolean);
-  if (ids.length === 0) {
-    throw new Error(`Invalid configuration: ${name} must contain at least one ID`);
-  }
-  return ids;
+function parseCommaSeparatedIds(value: string | undefined): string[] {
+  return [...new Set((value ?? "").split(",").map((id) => id.trim()))].filter(Boolean);
 }
 
 function parseUrl(value: string, name: string): string {
@@ -61,14 +56,8 @@ function parseLogLevel(value: string): LogLevel {
 export function parseConfig(env: Environment = process.env): ArtemisConfig {
   return {
     discordToken: required(env, "DISCORD_TOKEN"),
-    discordAllowedChannelIds: parseCommaSeparatedIds(
-      required(env, "DISCORD_ALLOWED_CHANNEL_ID"),
-      "DISCORD_ALLOWED_CHANNEL_ID"
-    ),
-    discordUserIds: parseCommaSeparatedIds(
-      valueOrDefault(env, "DISCORD_ALLOWED_USER_ID", DEFAULT_DISCORD_ALLOWED_USER_ID),
-      "DISCORD_ALLOWED_USER_ID"
-    ),
+    discordAllowedChannelIds: parseCommaSeparatedIds(env.DISCORD_ALLOWED_CHANNEL_ID),
+    discordUserIds: parseCommaSeparatedIds(env.DISCORD_ALLOWED_USER_ID),
     ollamaBaseUrl: parseUrl(
       valueOrDefault(env, "OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL),
       "OLLAMA_BASE_URL"

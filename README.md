@@ -8,7 +8,7 @@ The product and implementation baseline is documented in [design/baseline.md](de
 
 - Any Discord user can run `/ping` in an allowed guild channel. In DMs, `/ping` and normal conversation are restricted to users in `DISCORD_ALLOWED_USER_ID`.
 - `/ping` never accesses SQLite, PI, or Ollama.
-- `DISCORD_ALLOWED_USER_ID` supplies the comma-separated user allowlist and defaults to `603384387685449728`.
+- `DISCORD_ALLOWED_USER_ID` supplies the comma-separated user allowlist. A blank list authorizes no users.
 - DMs produce no response for users outside `DISCORD_ALLOWED_USER_ID`.
 - Other normal messages are silently ignored.
 - Guild responses across all connected guilds are limited to the comma-separated channel IDs in `DISCORD_ALLOWED_CHANNEL_ID`; threads inherit permission from their parent channel.
@@ -32,7 +32,7 @@ For host-based development, Node.js 24 or newer is also required.
 1. Create an application in the Discord Developer Portal and add a bot user.
 2. Enable the **Message Content Intent** for the bot.
 3. Invite the bot to each desired guild with permissions to view channels, read message history, send messages, use application commands, and access the threads where it should operate.
-4. Copy the bot token, allowed channel IDs, and allowed user IDs into `.env`.
+4. Copy the bot token into `.env`, then add any channel IDs and user IDs Artemis should allow.
 
 Artemis registers `/ping` as a global application command when it connects. Global command changes can take time to appear in Discord.
 
@@ -47,15 +47,15 @@ cp .env.example .env
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `DISCORD_TOKEN` | Yes | — | Discord bot token. |
-| `DISCORD_ALLOWED_CHANNEL_ID` | Yes | — | Comma-separated guild channel IDs where Artemis may respond. Threads use their parent channel ID. |
-| `DISCORD_ALLOWED_USER_ID` | No | `603384387685449728` | Comma-separated Discord user IDs allowed to converse with Artemis. |
+| `DISCORD_ALLOWED_CHANNEL_ID` | No | Empty | Comma-separated guild channel IDs where Artemis may respond. A blank list disables guild responses. Threads use their parent channel ID. |
+| `DISCORD_ALLOWED_USER_ID` | No | Empty | Comma-separated Discord user IDs allowed to converse with Artemis. A blank list authorizes no users. |
 | `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | Ollama's OpenAI-compatible endpoint. Compose enforces this internal URL. |
 | `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Model selected by PI. |
 | `OLLAMA_API_KEY` | No | `ollama` | Placeholder for local Ollama, or bearer token for a compatible remote endpoint. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error`. |
 
-When upgrading an existing `.env`, remove `DISCORD_GUILD_ID`, replace `AUTHORIZED_USER_ID` with `DISCORD_ALLOWED_USER_ID`, and add `DISCORD_ALLOWED_CHANNEL_ID`. Separate multiple IDs with commas; surrounding whitespace and duplicate IDs are removed.
+When upgrading an existing `.env`, remove `DISCORD_GUILD_ID`, replace `AUTHORIZED_USER_ID` with `DISCORD_ALLOWED_USER_ID`, and add `DISCORD_ALLOWED_CHANNEL_ID`. Separate multiple IDs with commas; surrounding whitespace and duplicate IDs are removed. Either allowlist may be blank, which allows no matching users or channels.
 
 Never commit `.env`, the SQLite database, or Ollama credentials.
 

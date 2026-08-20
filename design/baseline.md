@@ -17,7 +17,7 @@ The implementation uses PI and the PI SDK as the conversational harness, Ollama 
 - Connect reliably to Discord and operate in configured channels across guilds.
 - Support conversations in direct messages and allowed guild channels, treating threads as part of their parent guild channel.
 - Keep every Discord conversation isolated and durable.
-- Allow a comma-separated configuration list of Discord users to converse with the model, defaulting to `603384387685449728` (`.mattieb`).
+- Support a comma-separated configuration list of Discord users allowed to converse with the model, with a blank list authorizing no users.
 - Let any Discord user run `/ping` and receive exactly `pong` without touching the AI or conversation state.
 - Make the model and runtime settings configurable without code changes.
 - Record enough activity, errors, chat history, and available model diagnostics for operators to debug conversations.
@@ -102,8 +102,8 @@ flowchart LR
 
 Configuration is loaded once at startup, parsed into a typed runtime object, and validated before any network connection or database mutation. At minimum it includes:
 
-- Discord bot token and comma-separated allowed channel IDs across guilds.
-- Comma-separated authorized Discord user IDs, defaulting to `603384387685449728`.
+- Discord bot token and an optional comma-separated list of allowed channel IDs across guilds. A blank list disables guild responses.
+- An optional comma-separated list of authorized Discord user IDs, with no built-in default. A blank list authorizes no users.
 - Comma-separated allowed guild channel IDs. Threads are matched by parent channel ID.
 - Ollama endpoint and model, with `deepseek-v4-flash:0731-cloud` as the default model.
 - SQLite database path.
