@@ -112,6 +112,25 @@ describe("ConversationService", () => {
     expect(dmIndicator.stop).toHaveBeenCalledOnce();
   });
 
+  it("responds to a direct guild reply to Artemis without a mention", async () => {
+    const { service, pi } = createService(createPiMock({ text: "Reply received" }));
+
+    await expect(
+      service.handleMessage(
+        inbound({
+          discordMessageId: "reply-message",
+          guildId: "guild-1",
+          channelId: "group-1",
+          mentionsBot: false,
+          repliesToBot: true,
+          content: "following up"
+        })
+      )
+    ).resolves.toBe("Reply received");
+
+    expect(pi.generate).toHaveBeenCalledOnce();
+  });
+
   it("does not start a response indicator for ignored or duplicate messages", async () => {
     const { service } = createService();
     const ignoredIndicator = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };

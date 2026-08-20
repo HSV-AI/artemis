@@ -93,12 +93,15 @@ export function toInboundMessage(message: Message, selfUserId: string | undefine
     selfUserId !== undefined &&
     (message.mentions.parsedUsers.has(selfUserId) ||
       message.mentions.roles.some((role) => role.tags?.botId === selfUserId));
+  const repliesToBot =
+    selfUserId !== undefined && message.mentions.repliedUser?.id === selfUserId;
   return {
     ...source,
     role: "user",
     channelId: message.channelId,
     isBot: message.author.bot,
     mentionsBot,
+    repliesToBot,
     ...(message.guildId ? { guildId: message.guildId } : {}),
     ...(thread?.parentId ? { parentChannelId: thread.parentId } : {}),
     ...(thread ? { loadThread: () => fetchEntireThread(thread, selfUserId) } : {})

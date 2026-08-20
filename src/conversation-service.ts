@@ -56,7 +56,7 @@ export class ConversationService {
     ) {
       return null;
     }
-    if (message.guildId !== undefined && !message.mentionsBot) {
+    if (message.guildId !== undefined && !message.mentionsBot && !message.repliesToBot) {
       this.logger.debug("discord_message_ignored", {
         discordMessageId: message.discordMessageId,
         authorId: message.authorId,
