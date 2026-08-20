@@ -1,4 +1,4 @@
-export const DEFAULT_AUTHORIZED_USER_ID = "603384387685449728";
+export const DEFAULT_DISCORD_ALLOWED_USER_ID = "603384387685449728";
 export const DEFAULT_OLLAMA_MODEL = "deepseek-v4-flash:0731-cloud";
 export const DEFAULT_OLLAMA_BASE_URL = "http://ollama:11434/v1";
 export const DEFAULT_SQLITE_PATH = "/data/artemis.sqlite";
@@ -7,8 +7,8 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export interface ArtemisConfig {
   discordToken: string;
-  discordGuildId: string;
-  authorizedUserId: string;
+  discordAllowedChannelIds: readonly string[];
+  discordUserIds: readonly string[];
   ollamaBaseUrl: string;
   ollamaModel: string;
   ollamaApiKey: string;
@@ -28,6 +28,14 @@ function required(env: Environment, name: string): string {
 
 function valueOrDefault(env: Environment, name: string, defaultValue: string): string {
   return env[name]?.trim() || defaultValue;
+}
+
+function parseCommaSeparatedIds(value: string, name: string): string[] {
+  const ids = [...new Set(value.split(",").map((id) => id.trim()))].filter(Boolean);
+  if (ids.length === 0) {
+    throw new Error(`Invalid configuration: ${name} must contain at least one ID`);
+  }
+  return ids;
 }
 
 function parseUrl(value: string, name: string): string {
@@ -53,8 +61,14 @@ function parseLogLevel(value: string): LogLevel {
 export function parseConfig(env: Environment = process.env): ArtemisConfig {
   return {
     discordToken: required(env, "DISCORD_TOKEN"),
-    discordGuildId: required(env, "DISCORD_GUILD_ID"),
-    authorizedUserId: valueOrDefault(env, "AUTHORIZED_USER_ID", DEFAULT_AUTHORIZED_USER_ID),
+    discordAllowedChannelIds: parseCommaSeparatedIds(
+      required(env, "DISCORD_ALLOWED_CHANNEL_ID"),
+      "DISCORD_ALLOWED_CHANNEL_ID"
+    ),
+    discordUserIds: parseCommaSeparatedIds(
+      valueOrDefault(env, "DISCORD_ALLOWED_USER_ID", DEFAULT_DISCORD_ALLOWED_USER_ID),
+      "DISCORD_ALLOWED_USER_ID"
+    ),
     ollamaBaseUrl: parseUrl(
       valueOrDefault(env, "OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL),
       "OLLAMA_BASE_URL"

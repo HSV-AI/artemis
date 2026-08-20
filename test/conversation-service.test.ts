@@ -9,8 +9,8 @@ import { ArtemisRepository } from "../src/repository.js";
 import { createLoggerMock, createPiMock, inbound } from "./helpers.js";
 
 const options = {
-  guildId: "guild-1",
-  authorizedUserId: "603384387685449728",
+  channelIds: ["group-1", "group-2"],
+  userIds: ["603384387685449728", "second-user"],
   model: "test-model"
 };
 
@@ -70,12 +70,18 @@ describe("ConversationService", () => {
     return { service: new ConversationService(options, repository, pi, logger), pi, logger };
   }
 
-  it("silently ignores bots, empty messages, unsupported guilds, unmentioned guild messages, and unauthorized users", async () => {
+  it("silently ignores bots, empty messages, disallowed channels, unmentioned guild messages, and unauthorized users", async () => {
     const { service, pi, logger } = createService();
     await expect(service.handleMessage(inbound({ isBot: true }))).resolves.toBeNull();
     await expect(service.handleMessage(inbound({ content: " " }))).resolves.toBeNull();
-    await expect(service.handleMessage(inbound({ guildId: "other" }))).resolves.toBeNull();
-    await expect(service.handleMessage(inbound({ guildId: "guild-1" }))).resolves.toBeNull();
+    await expect(
+      service.handleMessage(
+        inbound({ guildId: "guild-1", channelId: "not-allowed", mentionsBot: true })
+      )
+    ).resolves.toBeNull();
+    await expect(
+      service.handleMessage(inbound({ guildId: "guild-1", channelId: "group-1" }))
+    ).resolves.toBeNull();
     await expect(service.handleMessage(inbound({ authorId: "unauthorized" }))).resolves.toBeNull();
     expect(pi.generate).not.toHaveBeenCalled();
     expect(logger.debug).toHaveBeenCalledWith(
@@ -95,8 +101,8 @@ describe("ConversationService", () => {
       service.handleMessage(
         inbound({
           discordMessageId: "guild-message",
-          guildId: "guild-1",
-          channelId: "guild-channel",
+          guildId: "another-guild",
+          channelId: "group-2",
           mentionsBot: true,
           content: "<@artemis> hello"
         })
@@ -104,7 +110,12 @@ describe("ConversationService", () => {
     ).resolves.toBe("Hello group");
     await expect(
       service.handleMessage(
-        inbound({ discordMessageId: "dm-message", channelId: "dm-channel", mentionsBot: false })
+        inbound({
+          discordMessageId: "dm-message",
+          authorId: "second-user",
+          channelId: "dm-channel",
+          mentionsBot: false
+        })
       )
     ).resolves.toBe("Hello group");
 
@@ -165,7 +176,7 @@ describe("ConversationService", () => {
       {
         discordMessageId: "message-1",
         threadId: "thread",
-        authorId: options.authorizedUserId,
+        authorId: options.userIds[0] ?? "",
         authorName: "Matt",
         role: "user",
         content: "new message",
@@ -176,7 +187,7 @@ describe("ConversationService", () => {
       inbound({
         guildId: "guild-1",
         channelId: "thread",
-        parentChannelId: "parent",
+        parentChannelId: "group-1",
         mentionsBot: true,
         loadThread
       })
@@ -186,7 +197,12 @@ describe("ConversationService", () => {
     expect(vi.mocked(pi.generate).mock.calls[0]?.[0].prompt).toContain("old message");
     expect(vi.mocked(pi.generate).mock.calls[0]?.[0].prompt).toContain("new message");
     const session = repository?.getOrCreateSession(
-      { key: "guild:guild-1:channel:parent", kind: "guild", guildId: "guild-1", channelId: "parent" },
+      {
+        key: "guild:guild-1:channel:group-1",
+        kind: "guild",
+        guildId: "guild-1",
+        channelId: "group-1"
+      },
       "test-model"
     );
     expect(repository?.getHistory(session?.id ?? "").filter((message) => message.role === "user")).toHaveLength(2);
@@ -196,13 +212,21 @@ describe("ConversationService", () => {
     const { service } = createService();
     const loadThread = vi.fn().mockResolvedValue([]);
     await service.handleMessage(
-      inbound({ guildId: "guild-1", mentionsBot: false, loadThread })
+      inbound({
+        guildId: "guild-1",
+        channelId: "thread",
+        parentChannelId: "group-1",
+        mentionsBot: false,
+        loadThread
+      })
     );
     await service.handleMessage(
       inbound({
         discordMessageId: "unauthorized",
         authorId: "other",
         guildId: "guild-1",
+        channelId: "thread",
+        parentChannelId: "group-1",
         mentionsBot: true,
         loadThread
       })

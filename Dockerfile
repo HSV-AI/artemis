@@ -19,7 +19,7 @@ FROM node:24-bookworm-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gosu \
+    && apt-get install -y --no-install-recommends gosu sqlite3 \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data \
     && chown node:node /data

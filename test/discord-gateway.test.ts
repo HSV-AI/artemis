@@ -33,7 +33,7 @@ function fakeMessage(overrides: Record<string, unknown> = {}): Message {
     createdTimestamp: Date.parse("2026-08-19T00:00:00.000Z"),
     guildId: null,
     channelId: "channel",
-    mentions: { parsedUsers: new Collection() },
+    mentions: { parsedUsers: new Collection(), roles: new Collection() },
     channel,
     ...overrides
   } as unknown as Message;
@@ -72,7 +72,8 @@ describe("Discord helpers", () => {
         channelId: "thread",
         channel: thread,
         mentions: {
-          parsedUsers: new Collection([["artemis-user", { id: "artemis-user" }]])
+          parsedUsers: new Collection([["artemis-user", { id: "artemis-user" }]]),
+          roles: new Collection()
         }
       }),
       "artemis-user"
@@ -87,6 +88,38 @@ describe("Discord helpers", () => {
     await expect(normalized.loadThread?.()).resolves.toEqual([]);
   });
 
+  it("recognizes only the bot's managed role as a bot mention", () => {
+    const botRoleMention = toInboundMessage(
+      fakeMessage({
+        guildId: "guild",
+        content: "<@&bot-role> hello",
+        mentions: {
+          parsedUsers: new Collection(),
+          roles: new Collection([
+            ["bot-role", { id: "bot-role", tags: { botId: "artemis-user" } }]
+          ])
+        }
+      }),
+      "artemis-user"
+    );
+    const unrelatedRoleMention = toInboundMessage(
+      fakeMessage({
+        guildId: "guild",
+        content: "<@&other-role> hello",
+        mentions: {
+          parsedUsers: new Collection(),
+          roles: new Collection([
+            ["other-role", { id: "other-role", tags: { botId: "another-bot" } }]
+          ])
+        }
+      }),
+      "artemis-user"
+    );
+
+    expect(botRoleMention.mentionsBot).toBe(true);
+    expect(unrelatedRoleMention.mentionsBot).toBe(false);
+  });
+
   it.each(["@everyone hello", "@here hello"])(
     "does not treat %s as a direct bot mention",
     (content) => {
@@ -94,7 +127,7 @@ describe("Discord helpers", () => {
         fakeMessage({
           guildId: "guild",
           content,
-          mentions: { everyone: true, parsedUsers: new Collection() }
+          mentions: { everyone: true, parsedUsers: new Collection(), roles: new Collection() }
         }),
         "artemis-user"
       );
@@ -122,10 +155,14 @@ describe("Discord helpers", () => {
 });
 
 describe("DiscordGateway", () => {
-  it("handles ping directly for DMs and the configured guild", async () => {
+  it("handles ping for authorized DMs and allowed channels across guilds", async () => {
     const conversations = { handleMessage: vi.fn() } as unknown as ConversationService;
     const gateway = new DiscordGateway(
-      { token: "token", guildId: "guild" },
+      {
+        token: "token",
+        channelIds: ["group-one", "group-two"],
+        userIds: ["allowed-user"]
+      },
       conversations,
       createLoggerMock(),
       new FakeClient() as unknown as Client
@@ -135,22 +172,58 @@ describe("DiscordGateway", () => {
       isChatInputCommand: () => true,
       commandName: "ping",
       guildId: null,
+      channelId: "dm",
+      channel: null,
+      user: { id: "allowed-user" },
+      reply
+    } as unknown as Interaction);
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "ping",
+      guildId: null,
+      channelId: "dm-other",
+      channel: null,
+      user: { id: "unauthorized-user" },
       reply
     } as unknown as Interaction);
     await gateway.handleInteraction({
       isChatInputCommand: () => true,
       commandName: "ping",
       guildId: "guild",
+      channelId: "group-one",
+      channel: { isThread: () => false },
+      user: { id: "unauthorized-user" },
+      reply
+    } as unknown as Interaction);
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "ping",
+      guildId: "guild",
+      channelId: "not-allowed",
+      channel: { isThread: () => false },
+      user: { id: "allowed-user" },
+      reply
+    } as unknown as Interaction);
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "ping",
+      guildId: "guild",
+      channelId: "thread",
+      channel: { isThread: () => true, parentId: "group-two" },
+      user: { id: "unauthorized-user" },
       reply
     } as unknown as Interaction);
     await gateway.handleInteraction({
       isChatInputCommand: () => true,
       commandName: "ping",
       guildId: "other",
+      channelId: "group-one",
+      channel: { isThread: () => false },
+      user: { id: "allowed-user" },
       reply
     } as unknown as Interaction);
     await gateway.handleInteraction({ isChatInputCommand: () => false } as unknown as Interaction);
-    expect(reply).toHaveBeenCalledTimes(2);
+    expect(reply).toHaveBeenCalledTimes(4);
     expect(reply).toHaveBeenNthCalledWith(1, "pong");
   });
 
@@ -160,7 +233,7 @@ describe("DiscordGateway", () => {
     } as unknown as ConversationService;
     const client = new FakeClient();
     const gateway = new DiscordGateway(
-      { token: "token", guildId: "guild" },
+      { token: "token", channelIds: ["group-one"], userIds: ["user"] },
       conversations,
       createLoggerMock(),
       client as unknown as Client
@@ -177,7 +250,7 @@ describe("DiscordGateway", () => {
     const conversations = { handleMessage: vi.fn().mockResolvedValue(null) };
     const logger = createLoggerMock();
     const gateway = new DiscordGateway(
-      { token: "token", guildId: "guild" },
+      { token: "token", channelIds: ["group-one"], userIds: ["user"] },
       conversations as unknown as ConversationService,
       logger,
       new FakeClient() as unknown as Client
@@ -224,7 +297,7 @@ describe("DiscordGateway", () => {
     const conversations = { handleMessage: vi.fn().mockResolvedValue(null) };
     const logger = createLoggerMock();
     const gateway = new DiscordGateway(
-      { token: "token", guildId: "guild" },
+      { token: "token", channelIds: ["group-one"], userIds: ["user"] },
       conversations as unknown as ConversationService,
       logger,
       new FakeClient() as unknown as Client
@@ -245,7 +318,7 @@ describe("DiscordGateway", () => {
     const client = new FakeClient();
     const logger = createLoggerMock();
     const gateway = new DiscordGateway(
-      { token: "token", guildId: "guild" },
+      { token: "token", channelIds: ["group-one"], userIds: ["user"] },
       { handleMessage: vi.fn().mockResolvedValue(null) } as unknown as ConversationService,
       logger,
       client as unknown as Client
@@ -265,7 +338,7 @@ describe("DiscordGateway", () => {
     expect(client.application.commands.set).toHaveBeenCalledOnce();
     expect(logger.info).toHaveBeenCalledWith(
       "discord_ready",
-      expect.objectContaining({ botUserId: "artemis-user", guildId: "guild" })
+      expect.objectContaining({ botUserId: "artemis-user", channelIds: ["group-one"] })
     );
     expect(logger.warn).toHaveBeenCalledWith("discord_disconnected", { shardId: 0, closeCode: 1000 });
     expect(logger.error).toHaveBeenCalledWith(

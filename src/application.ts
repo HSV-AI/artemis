@@ -30,8 +30,8 @@ export class ArtemisApplication {
     this.pi = dependencies.pi ?? new PiSdkGateway(config);
     const conversations = new ConversationService(
       {
-        guildId: config.discordGuildId,
-        authorizedUserId: config.authorizedUserId,
+        channelIds: config.discordAllowedChannelIds,
+        userIds: config.discordUserIds,
         model: config.ollamaModel
       },
       this.repository,
@@ -41,7 +41,11 @@ export class ArtemisApplication {
     this.discord =
       dependencies.discord ??
       new DiscordGateway(
-        { token: config.discordToken, guildId: config.discordGuildId },
+        {
+          token: config.discordToken,
+          channelIds: config.discordAllowedChannelIds,
+          userIds: config.discordUserIds
+        },
         conversations,
         this.logger
       );
@@ -49,7 +53,7 @@ export class ArtemisApplication {
 
   public async start(): Promise<void> {
     this.logger.info("artemis_starting", {
-      guildId: this.config.discordGuildId,
+      channelIds: this.config.discordAllowedChannelIds,
       model: this.config.ollamaModel
     });
     try {

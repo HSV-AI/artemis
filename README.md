@@ -1,16 +1,18 @@
 # Artemis
 
-Artemis is a small, community-run Discord chatbot built with TypeScript, the PI SDK, Ollama, and SQLite. It supports direct messages and one Discord guild, keeps each conversation isolated across restarts, and deliberately starts with one authorized conversational user.
+Artemis is a small, community-run Discord chatbot built with TypeScript, the PI SDK, Ollama, and SQLite. It supports direct messages and selected channels across Discord guilds, keeps each conversation isolated across restarts, and restricts conversations to a configured user allowlist.
 
 The product and implementation baseline is documented in [design/baseline.md](design/baseline.md).
 
 ## Behavior
 
-- Any Discord user can run `/ping` in a DM or the configured guild and receive exactly `pong`.
+- Any Discord user can run `/ping` in an allowed guild channel. In DMs, `/ping` and normal conversation are restricted to users in `DISCORD_ALLOWED_USER_ID`.
 - `/ping` never accesses SQLite, PI, or Ollama.
-- Only Discord user `603384387685449728` is allowed to trigger conversational responses by default.
+- `DISCORD_ALLOWED_USER_ID` supplies the comma-separated user allowlist and defaults to `603384387685449728`.
+- DMs produce no response for users outside `DISCORD_ALLOWED_USER_ID`.
 - Other normal messages are silently ignored.
-- In guild channels and threads, the authorized user must directly mention the bot user (`@Artemis`) in the triggering message. `@everyone`, `@here`, role mentions, and reply-only mentions do not trigger Artemis. DMs do not require a mention.
+- Guild responses across all connected guilds are limited to the comma-separated channel IDs in `DISCORD_ALLOWED_CHANNEL_ID`; threads inherit permission from their parent channel.
+- In guild channels and threads, the authorized user must mention the bot user or its Discord-managed bot role (`@Artemis`) in the triggering message. `@everyone`, `@here`, unrelated roles, and reply-only mentions do not trigger Artemis. DMs do not require a mention.
 - DMs have independent sessions. Guild threads share their parent channel's session.
 - An authorized thread reply submits the complete ordered thread, including the new message, to PI.
 - PI and Ollama failures are written to operator logs and SQLite; nothing is sent to Discord.
@@ -29,8 +31,8 @@ For host-based development, Node.js 24 or newer is also required.
 
 1. Create an application in the Discord Developer Portal and add a bot user.
 2. Enable the **Message Content Intent** for the bot.
-3. Invite the bot to the target guild with permissions to view channels, read message history, send messages, use application commands, and access the threads where it should operate.
-4. Copy the bot token and guild ID into `.env`.
+3. Invite the bot to each desired guild with permissions to view channels, read message history, send messages, use application commands, and access the threads where it should operate.
+4. Copy the bot token, allowed channel IDs, and allowed user IDs into `.env`.
 
 Artemis registers `/ping` as a global application command when it connects. Global command changes can take time to appear in Discord.
 
@@ -45,13 +47,15 @@ cp .env.example .env
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | `DISCORD_TOKEN` | Yes | — | Discord bot token. |
-| `DISCORD_GUILD_ID` | Yes | — | The only guild in which normal messages are accepted. |
-| `AUTHORIZED_USER_ID` | No | `603384387685449728` | User allowed to converse with Artemis. |
+| `DISCORD_ALLOWED_CHANNEL_ID` | Yes | — | Comma-separated guild channel IDs where Artemis may respond. Threads use their parent channel ID. |
+| `DISCORD_ALLOWED_USER_ID` | No | `603384387685449728` | Comma-separated Discord user IDs allowed to converse with Artemis. |
 | `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | Ollama's OpenAI-compatible endpoint. Compose enforces this internal URL. |
 | `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Model selected by PI. |
 | `OLLAMA_API_KEY` | No | `ollama` | Placeholder for local Ollama, or bearer token for a compatible remote endpoint. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error`. |
+
+When upgrading an existing `.env`, remove `DISCORD_GUILD_ID`, replace `AUTHORIZED_USER_ID` with `DISCORD_ALLOWED_USER_ID`, and add `DISCORD_ALLOWED_CHANNEL_ID`. Separate multiple IDs with commas; surrounding whitespace and duplicate IDs are removed.
 
 Never commit `.env`, the SQLite database, or Ollama credentials.
 
@@ -127,5 +131,5 @@ Global statement, branch, function, and line coverage thresholds are all enforce
 - Application logs are written as structured JSON to standard output and duplicated in SQLite's `application_logs` table. Credentials are excluded. The `discord_message_received` event intentionally includes raw message bodies from every Discord message event.
 - Chat content, model reasoning, and diagnostics are stored in SQLite and do not expire automatically.
 - If `ollama-model` cannot pull the cloud model, repeat the Ollama sign-in command and inspect `docker compose logs ollama ollama-model`.
-- If messages are ignored, verify the guild ID, authorized user ID, Message Content Intent, channel/thread permissions, and that guild messages directly mention the bot.
+- If messages are ignored, verify the allowed channel and user IDs, Message Content Intent, channel/thread permissions, and that guild messages directly mention the bot.
 - If `/ping` is missing, allow time for global command propagation and verify the bot has application-command permissions.

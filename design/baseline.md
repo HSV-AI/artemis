@@ -8,16 +8,16 @@ Last updated: 2026-08-19
 
 ## Summary
 
-Artemis is a community-run Discord bot that supports AI-assisted conversations in direct messages and guild chats. The first release is deliberately small: it serves one Discord server, allows one configured user to converse with the model, exposes a public `/ping` health command, and preserves each chat's context across restarts.
+Artemis is a community-run Discord bot that supports AI-assisted conversations in direct messages and selected guild chats. The first release allows a configured list of users to converse with the model in configured channels across guilds, exposes a context-aware `/ping` health command, and preserves each chat's context across restarts.
 
 The implementation uses PI and the PI SDK as the conversational harness, Ollama as the initial model provider, SQLite for durable sessions and chat logs, and Docker Compose for local operation. Configuration and credentials are supplied through an uncommitted `.env` file.
 
 ## Goals
 
-- Connect reliably to one configured Discord server.
-- Support conversations in direct messages and guild channels, treating threads as part of their parent guild channel.
+- Connect reliably to Discord and operate in configured channels across guilds.
+- Support conversations in direct messages and allowed guild channels, treating threads as part of their parent guild channel.
 - Keep every Discord conversation isolated and durable.
-- Allow only Discord user `603384387685449728` (`.mattieb`) to converse with the model initially.
+- Allow a comma-separated configuration list of Discord users to converse with the model, defaulting to `603384387685449728` (`.mattieb`).
 - Let any Discord user run `/ping` and receive exactly `pong` without touching the AI or conversation state.
 - Make the model and runtime settings configurable without code changes.
 - Record enough activity, errors, chat history, and available model diagnostics for operators to debug conversations.
@@ -25,7 +25,6 @@ The implementation uses PI and the PI SDK as the conversational harness, Ollama 
 
 ## Non-goals for the first release
 
-- Supporting more than one Discord server.
 - Providing a general user, role, or server administration system.
 - Supporting model providers other than Ollama.
 - Sharing context across unrelated direct messages or guild channels.
@@ -36,10 +35,11 @@ The implementation uses PI and the PI SDK as the conversational harness, Ollama 
 
 | Requirement | Design response |
 | --- | --- |
-| One Discord server | Require a configured guild ID and reject or ignore events from other guilds. Direct messages remain supported. |
-| Public `/ping` | Handle `/ping` in the Discord adapter before authorization, persistence, or PI invocation and reply with exactly `pong`. |
-| One authorized conversational user | Compare the message author's Discord user ID with the configured initial allowlist before loading a conversation or invoking PI. Unauthorized normal messages receive no response. |
-| Explicit guild invocation | Require the triggering message in a guild channel or thread to directly mention the Artemis bot user (`@Artemis`). `@everyone`, `@here`, role mentions, and reply-only mentions do not qualify. Direct messages do not require a mention. |
+| Multiple Discord guilds | Scope guild responses by globally unique channel IDs rather than by a single guild ID. Direct messages remain supported. |
+| Context-aware `/ping` | Handle `/ping` in the Discord adapter before persistence or PI invocation. Reply with exactly `pong` for allowlisted users in DMs and for any user in allowed guild channels. |
+| Authorized conversational users | Parse `DISCORD_ALLOWED_USER_ID` as a comma-separated allowlist and compare the message author's Discord user ID before loading a conversation or invoking PI. Unauthorized normal messages receive no response. |
+| Allowed guild channels | Parse `DISCORD_ALLOWED_CHANNEL_ID` as a comma-separated channel allowlist. Accept a guild message only when its channel ID, or a thread's parent channel ID, is present. DMs remain supported independently. |
+| Explicit guild invocation | Require the triggering message in a guild channel or thread to mention the Artemis bot user or its Discord-managed bot role (`@Artemis`). `@everyone`, `@here`, unrelated roles, and reply-only mentions do not qualify. Direct messages do not require a mention. |
 | Direct-message and guild conversations | Derive a stable conversation key from the Discord context. Direct messages use the DM channel ID. Guild messages, including thread replies, use the guild ID plus the parent channel ID. |
 | Isolated, persistent context | Associate each conversation key with one durable PI session and store its session state and messages in SQLite. Never query history without the conversation key. |
 | Configurable model and runtime | Read validated settings from environment variables loaded through `.env` for local use. |
@@ -73,10 +73,12 @@ flowchart LR
     subgraph Compose[Docker Compose]
         Bot[Artemis bot<br/>TypeScript container]
         Bot --> Ping{Ping command?}
-        Ping -- Yes, any user --> Pong[Direct protocol response]
-        Ping -- No --> Auth{Authorized user?<br/>603384387685449728}
+        Ping -- Yes, allowed DM user or any user in allowed channel --> Pong[Direct protocol response]
+        Ping -- No --> Auth{User ID in configured allowlist?}
         Auth -- No --> Ignore[Silently ignore message]
-        Auth -- Yes --> Mention{DM or bot mentioned?}
+        Auth -- Yes --> Group{DM or allowed guild channel?}
+        Group -- No --> Ignore
+        Group -- Yes --> Mention{DM or bot mentioned?}
         Mention -- No --> Ignore
         Mention -- Yes --> Sessions[Session router<br/>One PI session per DM or guild group chat]
         Sessions --> Store[(SQLite<br/>sessions and chat logs)]
@@ -100,8 +102,9 @@ flowchart LR
 
 Configuration is loaded once at startup, parsed into a typed runtime object, and validated before any network connection or database mutation. At minimum it includes:
 
-- Discord bot token and target guild ID.
-- Authorized conversational user ID, defaulting to `603384387685449728` where a safe default is appropriate.
+- Discord bot token and comma-separated allowed channel IDs across guilds.
+- Comma-separated authorized Discord user IDs, defaulting to `603384387685449728`.
+- Comma-separated allowed guild channel IDs. Threads are matched by parent channel ID.
 - Ollama endpoint and model, with `deepseek-v4-flash:0731-cloud` as the default model.
 - SQLite database path.
 - Log level and other non-secret runtime controls.
@@ -112,7 +115,7 @@ Secrets are never committed, printed, or included in error payloads. `.env.examp
 
 The Discord adapter owns gateway connection, interaction registration, incoming-event normalization, outbound replies, and connection lifecycle logging. It exposes normalized events to the application rather than leaking Discord SDK objects into the conversation core.
 
-The adapter distinguishes `/ping` interactions from normal chat messages immediately. Bot-authored messages and events from guilds other than the configured guild are ignored to prevent loops and unintended operation.
+The adapter distinguishes `/ping` interactions from normal chat messages immediately. Bot-authored conversational messages are ignored to prevent loops, while channel allowlisting determines where guild responses are permitted.
 
 #### Ping handler
 
@@ -120,9 +123,9 @@ The ping path is independent of the conversational path. It performs no authoriz
 
 #### Conversation authorization
 
-Normal chat is accepted only when the author's Discord ID matches the configured authorized user. Rejected messages are not sent to PI and do not create or alter conversation records. They produce no Discord response; optional debug logging is metadata-only and must not include the message body.
+Normal chat is accepted only when the author's Discord ID appears in the configured user allowlist. Rejected messages are not sent to PI and do not create or alter conversation records. They produce no Discord response.
 
-Within the configured guild, an authorized message must also directly mention Artemis. This applies to ordinary guild channels and threads. Reply metadata, role mentions, `@everyone`, and `@here` do not count as a direct bot mention. Direct messages retain their normal conversational behavior and never require a mention.
+Within a guild, an authorized message must originate in one of the configured channels and mention either the Artemis bot user or the Discord-managed role whose `botId` belongs to Artemis. A thread is allowed when its parent channel is configured. Reply metadata, unrelated roles, `@everyone`, and `@here` do not count as a bot mention. Direct messages retain their normal conversational behavior and never require a channel match or mention.
 
 #### Conversation coordinator
 
@@ -166,7 +169,7 @@ There is no automatic retention or deletion policy. Chat content, session data, 
 
 Application logs are structured and written to standard output for `docker compose logs`. Every emitted entry is also inserted into SQLite's `application_logs` table with the same timestamp, severity, event name, and metadata. A database-write failure never suppresses the console entry and produces a console-only persistence-failure diagnostic without recursively attempting another database write. Each relevant event includes correlation fields such as conversation ID, session ID, and Discord message ID and excludes credentials.
 
-Every newly received Discord message is logged before normalization or any bot, content, guild, mention, authorization, or conversation filter runs. The `discord_message_received` entry includes the raw message body, guild and channel identifiers, author identity and display name, bot flag, thread identity when applicable, and Discord creation timestamp. This deliberately sensitive audit event bypasses the normal `LOG_LEVEL` threshold, is emitted to standard output, and is retained in `application_logs`. It includes DMs, configured and unconfigured guilds, bot-authored messages, unauthorized messages, and unmentioned messages.
+Every newly received Discord message is logged before normalization or any bot, content, channel, mention, authorization, or conversation filter runs. The `discord_message_received` entry includes the raw message body, guild and channel identifiers, author identity and display name, bot flag, thread identity when applicable, and Discord creation timestamp. This deliberately sensitive audit event bypasses the normal `LOG_LEVEL` threshold, is emitted to standard output, and is retained in `application_logs`. It includes DMs, messages from every connected guild, bot-authored messages, unauthorized messages, and unmentioned messages.
 
 Chat content, PI session history, and model-provided reasoning or diagnostics are stored in SQLite as required for conversation debugging. These records are sensitive: only local operators should have database access, and documentation must warn against publishing or committing the database file.
 
@@ -187,29 +190,32 @@ The Artemis Dockerfile contains only the application and its runtime dependencie
 2. Open SQLite, enable foreign keys, and apply migrations.
 3. Initialize the PI/Ollama boundary using the configured model.
 4. Register Discord interactions and connect the Discord client.
-5. Log a successful ready event including the connected bot identity and configured guild ID, but no secrets.
+5. Log a successful ready event including the connected bot identity and allowed channel IDs, but no secrets.
 
 If configuration, migration, or required model setup fails, startup exits with a clear error instead of connecting in a partially working state.
 
 ### `/ping`
 
 1. Receive and identify the `/ping` interaction.
-2. Reply with exactly `pong`.
-3. Do not authorize the user, resolve a conversation, access SQLite, invoke PI, or invoke Ollama.
+2. In a DM, silently stop unless the caller is in the configured user allowlist.
+3. In a guild, silently stop unless the channel ID, or a thread's parent channel ID, is in the configured channel allowlist. Guild callers do not require user authorization for `/ping`.
+4. Reply with exactly `pong`.
+5. Do not resolve a conversation, access SQLite, invoke PI, or invoke Ollama.
 
 ### Normal message
 
-1. Ignore bot-authored messages and unsupported guilds.
-2. In a guild, silently stop unless the triggering message directly mentions Artemis. DMs skip this check.
-3. Check the author ID; silently stop if it is not authorized.
-4. For a thread reply, fetch the complete thread in Discord order, including the new message.
-5. Derive the conversation key from the DM channel or the parent guild channel.
-6. Serialize work behind that conversation's queue.
-7. Within the conversation, deduplicate source messages by Discord message ID.
-8. Restore or create the durable PI session and persist any new inbound messages.
-9. Submit the current message, or the complete thread snapshot for a thread reply, to PI through the configured Ollama model.
-10. Atomically persist the assistant response and available model diagnostics.
-11. Send the response to the originating Discord conversation or thread.
+1. Ignore bot-authored messages.
+2. In a guild, silently stop unless the channel ID, or a thread's parent channel ID, is in the configured channel allowlist. DMs skip this check.
+3. In a guild, silently stop unless the triggering message directly mentions Artemis. DMs skip this check.
+4. Check the author ID against the configured user allowlist; silently stop if it is not authorized.
+5. For a thread reply, fetch the complete thread in Discord order, including the new message.
+6. Derive the conversation key from the DM channel or the parent guild channel.
+7. Serialize work behind that conversation's queue.
+8. Within the conversation, deduplicate source messages by Discord message ID.
+9. Restore or create the durable PI session and persist any new inbound messages.
+10. Submit the current message, or the complete thread snapshot for a thread reply, to PI through the configured Ollama model.
+11. Atomically persist the assistant response and available model diagnostics.
+12. Send the response to the originating Discord conversation or thread.
 
 If generation fails, Artemis records the failed attempt and sanitized diagnostics for operators. It does not fabricate an assistant turn or send anything to Discord. A later message reuses the last valid session state.
 
@@ -254,8 +260,9 @@ Application code is tested with Vitest. Discord, PI, and Ollama are mocked at th
 
 Required tests include:
 
-- `/ping` returns exactly `pong` for authorized and unauthorized users while proving that persistence, PI, and Ollama are untouched.
+- `/ping` returns exactly `pong` for allowlisted DM users and any user in allowed guild channels, ignores unauthorized DMs and disallowed guild channels, and proves that persistence, PI, and Ollama are untouched.
 - Unauthorized normal chat is silently ignored without persistence or model calls.
+- Guild messages outside the configured channel allowlist are silently ignored, while DMs are unaffected.
 - Unmentioned guild messages are silently ignored, while direct messages continue without requiring a mention.
 - DM and guild-channel keys remain distinct and stable, while a thread resolves to its parent guild-channel key.
 - Every authorized thread reply submits the complete ordered thread, including the new message, without duplicating persisted source messages.
@@ -276,9 +283,9 @@ Required tests include:
 | --- | --- |
 | Connect and log success | Adapter unit test plus a documented local smoke check. |
 | Reconnect after interruption | Adapter reconnect-state unit test with the Discord boundary mocked. |
-| Anyone receives exactly `pong` | Ping unit tests for authorized and unauthorized identities. |
+| Eligible users receive exactly `pong` | Ping unit tests for authorized and unauthorized DMs plus allowed guild channels, allowed threads, and disallowed channels. |
 | Ping does not affect AI or history | Assert zero calls to the persistence, PI, and Ollama boundaries. |
-| Authorized user can chat in DM and guild contexts | Coordinator unit tests proving DMs need no mention and guild messages require a direct bot mention. |
+| Authorized users can chat in DM and guild contexts | Coordinator unit tests proving comma-separated user and channel allowlists, DMs needing no channel match or mention, and allowed guild messages requiring a direct bot mention. |
 | Other users are silently ignored | Authorization unit test asserting no reply, persistence, or model call. |
 | Each conversation reuses durable context | Persistence and coordinator tests across fresh application instances. |
 | No context leaks | Cross-key isolation tests using distinct DMs and parent guild channels, plus tests proving threads share only their own parent channel's key. |
@@ -288,7 +295,7 @@ Required tests include:
 
 ## Resolved implementation questions
 
-- Guild threads are part of their parent guild channel conversation. On each authorized thread reply that directly mentions Artemis, the bot resubmits the entire ordered thread, including the new message.
+- Guild threads are part of their parent guild channel conversation. A thread is eligible only when its parent channel ID is in `DISCORD_ALLOWED_CHANNEL_ID`. On each authorized thread reply that directly mentions Artemis, the bot resubmits the entire ordered thread, including the new message.
 - SQLite has no automatic retention or deletion policy. Stored chat content, sessions, and model reasoning or diagnostics remain until an operator deliberately removes them.
 - PI or Ollama generation failures are recorded for operators but produce no Discord response.
 - Docker Compose starts Ollama as a separate dependency container. Ollama is not included in the Artemis Dockerfile or application container.

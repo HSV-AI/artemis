@@ -7,8 +7,8 @@ import { createLoggerMock, createPiMock } from "./helpers.js";
 
 const config: ArtemisConfig = {
   discordToken: "token",
-  discordGuildId: "guild",
-  authorizedUserId: "user",
+  discordAllowedChannelIds: ["channel-one", "channel-two"],
+  discordUserIds: ["user-one", "user-two"],
   ollamaBaseUrl: "http://ollama:11434/v1",
   ollamaModel: "model",
   ollamaApiKey: "ollama",
@@ -38,7 +38,7 @@ describe("ArtemisApplication", () => {
     await application.start();
     expect(order).toEqual(["pi", "discord"]);
     expect(logger.info).toHaveBeenCalledWith("artemis_starting", {
-      guildId: "guild",
+      channelIds: ["channel-one", "channel-two"],
       model: "model"
     });
 

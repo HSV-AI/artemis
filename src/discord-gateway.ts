@@ -88,13 +88,16 @@ export async function fetchEntireThread(
 export function toInboundMessage(message: Message, selfUserId: string | undefined): InboundMessage {
   const source = toSourceMessage(message, selfUserId);
   const thread = message.channel.isThread() ? message.channel : undefined;
+  const mentionsBot =
+    selfUserId !== undefined &&
+    (message.mentions.parsedUsers.has(selfUserId) ||
+      message.mentions.roles.some((role) => role.tags?.botId === selfUserId));
   return {
     ...source,
     role: "user",
     channelId: message.channelId,
     isBot: message.author.bot,
-    mentionsBot:
-      selfUserId !== undefined && message.mentions.parsedUsers.has(selfUserId),
+    mentionsBot,
     ...(message.guildId ? { guildId: message.guildId } : {}),
     ...(thread?.parentId ? { parentChannelId: thread.parentId } : {}),
     ...(thread ? { loadThread: () => fetchEntireThread(thread, selfUserId) } : {})
@@ -103,11 +106,14 @@ export function toInboundMessage(message: Message, selfUserId: string | undefine
 
 export interface DiscordGatewayOptions {
   token: string;
-  guildId: string;
+  channelIds: readonly string[];
+  userIds: readonly string[];
 }
 
 export class DiscordGateway {
   private bound = false;
+  private readonly allowedChannelIds: ReadonlySet<string>;
+  private readonly allowedUserIds: ReadonlySet<string>;
 
   public constructor(
     private readonly options: DiscordGatewayOptions,
@@ -122,7 +128,10 @@ export class DiscordGateway {
       ],
       partials: [Partials.Channel]
     })
-  ) {}
+  ) {
+    this.allowedChannelIds = new Set(options.channelIds);
+    this.allowedUserIds = new Set(options.userIds);
+  }
 
   public async start(): Promise<void> {
     this.bindEvents();
@@ -137,8 +146,19 @@ export class DiscordGateway {
     if (!interaction.isChatInputCommand() || interaction.commandName !== "ping") {
       return;
     }
-    if (interaction.guildId && interaction.guildId !== this.options.guildId) {
+    if (!interaction.guildId && !this.allowedUserIds.has(interaction.user.id)) {
       return;
+    }
+    if (interaction.guildId) {
+      const channelId = interaction.channel?.isThread()
+        ? interaction.channel.parentId
+        : interaction.channelId;
+      if (
+        channelId === null ||
+        !this.allowedChannelIds.has(channelId)
+      ) {
+        return;
+      }
     }
     await interaction.reply("pong");
   }
@@ -188,7 +208,7 @@ export class DiscordGateway {
         .then(() => {
           this.logger.info("discord_ready", {
             botUserId: readyClient.user.id,
-            guildId: this.options.guildId
+            channelIds: this.options.channelIds
           });
         })
         .catch((error: unknown) => {

@@ -10,8 +10,8 @@ import { safeError } from "./logger.js";
 import type { ArtemisRepository } from "./repository.js";
 
 export interface ConversationServiceOptions {
-  guildId: string;
-  authorizedUserId: string;
+  channelIds: readonly string[];
+  userIds: readonly string[];
   model: string;
 }
 
@@ -46,19 +46,26 @@ export function formatThreadSnapshot(messages: SourceMessage[]): string {
 }
 
 export class ConversationService {
+  private readonly authorizedUserIds: ReadonlySet<string>;
+  private readonly allowedChannelIds: ReadonlySet<string>;
+
   public constructor(
     private readonly options: ConversationServiceOptions,
     private readonly repository: ArtemisRepository,
     private readonly pi: PiGateway,
     private readonly logger: Logger,
     private readonly queue = new KeyedSerialQueue()
-  ) {}
+  ) {
+    this.authorizedUserIds = new Set(options.userIds);
+    this.allowedChannelIds = new Set(options.channelIds);
+  }
 
   public async handleMessage(message: InboundMessage): Promise<string | null> {
     if (
       message.isBot ||
       !message.content.trim() ||
-      (message.guildId !== undefined && message.guildId !== this.options.guildId)
+      (message.guildId !== undefined &&
+        !this.allowedChannelIds.has(message.parentChannelId ?? message.channelId))
     ) {
       return null;
     }
@@ -70,7 +77,7 @@ export class ConversationService {
       });
       return null;
     }
-    if (message.authorId !== this.options.authorizedUserId) {
+    if (!this.authorizedUserIds.has(message.authorId)) {
       this.logger.debug("discord_message_ignored", {
         discordMessageId: message.discordMessageId,
         authorId: message.authorId
