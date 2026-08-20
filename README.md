@@ -98,6 +98,24 @@ Stop without deleting durable data:
 docker compose down
 ```
 
+## Automated updates
+
+[`scripts/update-artemis-if-needed.sh`](scripts/update-artemis-if-needed.sh) checks a remote branch for a new commit. When an update exists, it force-aligns the local checkout, refreshes host dependencies if `package.json` or `package-lock.json` changed, and runs `docker compose up -d --build`.
+
+Run it on demand from any directory:
+
+```sh
+./scripts/update-artemis-if-needed.sh
+```
+
+The default source is `origin/main`. Override either value when the deployment uses another remote name or branch:
+
+```sh
+ARTEMIS_UPDATE_REMOTE=personal ARTEMIS_UPDATE_BRANCH=main ./scripts/update-artemis-if-needed.sh
+```
+
+This is a deployment script: it switches branches with `git checkout -f` and resets tracked files with `git reset --hard`. Do not run it in a development checkout containing uncommitted work. Persistent Docker volumes and `.env` are not removed.
+
 Deleting volumes permanently removes conversations, reasoning, diagnostics, and the Ollama sign-in/model data:
 
 ```sh
