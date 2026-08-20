@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ConversationService,
-  deriveConversationIdentity,
-  formatThreadSnapshot
+  deriveConversationIdentity
 } from "../src/conversation-service.js";
 import type { PiGateway, PiGenerationResult, SourceMessage } from "../src/domain.js";
 import { ArtemisRepository } from "../src/repository.js";
@@ -33,30 +32,6 @@ describe("conversation identity", () => {
     });
   });
 
-  it("formats a complete chronological thread with author labels", () => {
-    const messages: SourceMessage[] = [
-      {
-        discordMessageId: "2",
-        authorId: "artemis",
-        authorName: "Artemis",
-        role: "assistant",
-        content: "answer",
-        createdAt: "2026-08-19T00:00:02.000Z"
-      },
-      {
-        discordMessageId: "1",
-        authorId: "user",
-        authorName: "Matt",
-        role: "user",
-        content: "question",
-        createdAt: "2026-08-19T00:00:01.000Z"
-      }
-    ];
-    expect(formatThreadSnapshot(messages)).toContain(
-      "[2026-08-19T00:00:01.000Z] Matt (user): question\n" +
-        "[2026-08-19T00:00:02.000Z] Artemis: answer"
-    );
-  });
 });
 
 describe("ConversationService", () => {
@@ -125,6 +100,12 @@ describe("ConversationService", () => {
     ).resolves.toBe("Hello group");
 
     expect(pi.generate).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(pi.generate).mock.calls[0]?.[0].prompt).toContain(
+      '"author":{"id":"not-in-dm-user-allowlist","name":"Matt"}'
+    );
+    expect(vi.mocked(pi.generate).mock.calls[1]?.[0].prompt).toContain(
+      '"author":{"id":"second-user","name":"Matt"}'
+    );
     expect(guildIndicator.start).toHaveBeenCalledOnce();
     expect(guildIndicator.stop).toHaveBeenCalledOnce();
     expect(dmIndicator.start).toHaveBeenCalledOnce();
@@ -220,8 +201,13 @@ describe("ConversationService", () => {
     );
 
     expect(loadThread).toHaveBeenCalledOnce();
-    expect(vi.mocked(pi.generate).mock.calls[0]?.[0].prompt).toContain("old message");
-    expect(vi.mocked(pi.generate).mock.calls[0]?.[0].prompt).toContain("new message");
+    const prompt = vi.mocked(pi.generate).mock.calls[0]?.[0].prompt ?? "";
+    expect(prompt).toContain("old message");
+    expect(prompt).toContain("new message");
+    expect(prompt).toContain('"author":{"id":"other-user","name":"Other"}');
+    expect(prompt).toContain(
+      `"author":{"id":"${options.userIds[0]}","name":"Matt"}`
+    );
     const session = repository?.getOrCreateSession(
       {
         key: "guild:guild-1:channel:group-1",

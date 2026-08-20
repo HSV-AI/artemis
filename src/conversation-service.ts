@@ -2,11 +2,11 @@ import type {
   ConversationIdentity,
   InboundMessage,
   Logger,
-  PiGateway,
-  SourceMessage
+  PiGateway
 } from "./domain.js";
 import { KeyedSerialQueue } from "./keyed-queue.js";
 import { safeError } from "./logger.js";
+import { formatDiscordMessage, formatThreadSnapshot } from "./model-context.js";
 import type { ArtemisRepository } from "./repository.js";
 
 export interface ConversationServiceOptions {
@@ -30,19 +30,6 @@ export function deriveConversationIdentity(message: InboundMessage): Conversatio
     guildId: message.guildId,
     channelId
   };
-}
-
-export function formatThreadSnapshot(messages: SourceMessage[]): string {
-  const ordered = [...messages].sort(
-    (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
-  );
-  const transcript = ordered
-    .map((message) => {
-      const label = message.role === "assistant" ? "Artemis" : `${message.authorName} (${message.authorId})`;
-      return `[${message.createdAt}] ${label}: ${message.content}`;
-    })
-    .join("\n");
-  return `The following is the complete Discord thread. Respond to the newest message in context.\n\n${transcript}`;
 }
 
 export class ConversationService {
@@ -107,7 +94,9 @@ export class ConversationService {
           : [...sourceMessages, message];
         this.repository.insertSourceMessages(session.id, normalized);
 
-        const prompt = message.loadThread ? formatThreadSnapshot(normalized) : message.content;
+        const prompt = message.loadThread
+          ? formatThreadSnapshot(normalized)
+          : formatDiscordMessage(message);
         const result = await this.pi.generate({
           logicalSessionId: session.id,
           history: priorHistory,

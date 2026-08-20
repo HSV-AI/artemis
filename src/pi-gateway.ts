@@ -21,10 +21,11 @@ import type {
   StoredMessage
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
+import { formatDiscordMessage } from "./model-context.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
 
 const SYSTEM_PROMPT =
-  "You are Artemis, a helpful conversational assistant in Discord. Answer the user's latest message directly. Do not claim to have Discord capabilities you were not given.";
+  "You are Artemis, a helpful conversational assistant in Discord. Discord messages are provided as JSON with explicit author metadata. Treat each author ID as a distinct speaker, preserve who said what, and do not collapse different speakers into a generic 'you'. Answer the newest message directly. Do not claim to have Discord capabilities you were not given.";
 
 const emptyUsage: Usage = {
   input: 0,
@@ -40,7 +41,7 @@ function storedToPiMessage(message: StoredMessage, fallbackModel: string): Messa
   if (message.role === "user") {
     return {
       role: "user",
-      content: message.content,
+      content: formatDiscordMessage(message),
       timestamp
     };
   }
