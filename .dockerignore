@@ -1,0 +1,10 @@
+.git
+.github
+.env
+coverage
+design
+dist
+node_modules
+npm-debug.log*
+test
+*.sqlite*

@@ -1,0 +1,137 @@
+import type {
+  ConversationIdentity,
+  InboundMessage,
+  Logger,
+  PiGateway,
+  SourceMessage
+} from "./domain.js";
+import { KeyedSerialQueue } from "./keyed-queue.js";
+import { safeError } from "./logger.js";
+import type { ArtemisRepository } from "./repository.js";
+
+export interface ConversationServiceOptions {
+  guildId: string;
+  authorizedUserId: string;
+  model: string;
+}
+
+export function deriveConversationIdentity(message: InboundMessage): ConversationIdentity {
+  if (!message.guildId) {
+    return {
+      key: `dm:${message.channelId}`,
+      kind: "dm",
+      channelId: message.channelId
+    };
+  }
+  const channelId = message.parentChannelId ?? message.channelId;
+  return {
+    key: `guild:${message.guildId}:channel:${channelId}`,
+    kind: "guild",
+    guildId: message.guildId,
+    channelId
+  };
+}
+
+export function formatThreadSnapshot(messages: SourceMessage[]): string {
+  const ordered = [...messages].sort(
+    (left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt)
+  );
+  const transcript = ordered
+    .map((message) => {
+      const label = message.role === "assistant" ? "Artemis" : `${message.authorName} (${message.authorId})`;
+      return `[${message.createdAt}] ${label}: ${message.content}`;
+    })
+    .join("\n");
+  return `The following is the complete Discord thread. Respond to the newest message in context.\n\n${transcript}`;
+}
+
+export class ConversationService {
+  public constructor(
+    private readonly options: ConversationServiceOptions,
+    private readonly repository: ArtemisRepository,
+    private readonly pi: PiGateway,
+    private readonly logger: Logger,
+    private readonly queue = new KeyedSerialQueue()
+  ) {}
+
+  public async handleMessage(message: InboundMessage): Promise<string | null> {
+    if (
+      message.isBot ||
+      !message.content.trim() ||
+      (message.guildId !== undefined && message.guildId !== this.options.guildId)
+    ) {
+      return null;
+    }
+    if (message.guildId !== undefined && !message.mentionsBot) {
+      this.logger.debug("discord_message_ignored", {
+        discordMessageId: message.discordMessageId,
+        authorId: message.authorId,
+        reason: "bot_not_mentioned"
+      });
+      return null;
+    }
+    if (message.authorId !== this.options.authorizedUserId) {
+      this.logger.debug("discord_message_ignored", {
+        discordMessageId: message.discordMessageId,
+        authorId: message.authorId
+      });
+      return null;
+    }
+
+    const identity = deriveConversationIdentity(message);
+    return this.queue.run(identity.key, async () => {
+      if (this.repository.hasDiscordMessage(message.discordMessageId)) {
+        this.logger.debug("duplicate_message_ignored", {
+          conversationKey: identity.key,
+          discordMessageId: message.discordMessageId
+        });
+        return null;
+      }
+
+      const session = this.repository.getOrCreateSession(identity, this.options.model);
+      try {
+        const priorHistory = this.repository.getHistory(session.id);
+        const sourceMessages = message.loadThread ? await message.loadThread() : [message];
+        const normalized = sourceMessages.some(
+          (candidate) => candidate.discordMessageId === message.discordMessageId
+        )
+          ? sourceMessages
+          : [...sourceMessages, message];
+        this.repository.insertSourceMessages(session.id, normalized);
+
+        const prompt = message.loadThread ? formatThreadSnapshot(normalized) : message.content;
+        const result = await this.pi.generate({
+          logicalSessionId: session.id,
+          history: priorHistory,
+          prompt
+        });
+        if (!result.text.trim()) {
+          throw new Error("PI returned an empty response");
+        }
+        this.repository.insertAssistant(session.id, result);
+        this.repository.recordEvent("generation_succeeded", {
+          sessionId: session.id,
+          conversationKey: identity.key,
+          discordMessageId: message.discordMessageId,
+          details: { model: result.model }
+        });
+        return result.text;
+      } catch (error) {
+        const details = safeError(error);
+        this.repository.recordEvent("generation_failed", {
+          sessionId: session.id,
+          conversationKey: identity.key,
+          discordMessageId: message.discordMessageId,
+          details
+        });
+        this.logger.error("generation_failed", {
+          conversationKey: identity.key,
+          sessionId: session.id,
+          discordMessageId: message.discordMessageId,
+          ...details
+        });
+        return null;
+      }
+    });
+  }
+}

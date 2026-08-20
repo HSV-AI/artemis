@@ -1,0 +1,238 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
+import type { StoredMessage } from "../src/domain.js";
+
+const mocks = vi.hoisted(() => {
+  const appendMessage = vi.fn();
+  const sessionManagerInMemory = vi.fn();
+  const sessionManager = { appendMessage };
+  sessionManagerInMemory.mockReturnValue(sessionManager);
+  const runtime = {
+    registerProvider: vi.fn(),
+    setRuntimeApiKey: vi.fn().mockResolvedValue(undefined),
+    getModel: vi.fn().mockReturnValue({ provider: "ollama", id: "model" })
+  };
+  const session = {
+    prompt: vi.fn().mockResolvedValue(undefined),
+    dispose: vi.fn(),
+    messages: [] as unknown[]
+  };
+  return {
+    appendMessage,
+    sessionManagerInMemory,
+    sessionManager,
+    runtime,
+    session,
+    createAgentSession: vi.fn().mockResolvedValue({ session, extensionsResult: {} }),
+    runtimeCreate: vi.fn().mockResolvedValue(runtime),
+    loaderReload: vi.fn().mockResolvedValue(undefined),
+    settings: {}
+  };
+});
+
+vi.mock("@earendil-works/pi-ai", () => ({
+  InMemoryCredentialStore: class InMemoryCredentialStore {}
+}));
+
+vi.mock("@earendil-works/pi-coding-agent", () => ({
+  createAgentSession: mocks.createAgentSession,
+  ModelRuntime: { create: mocks.runtimeCreate },
+  SessionManager: { inMemory: mocks.sessionManagerInMemory },
+  SettingsManager: { inMemory: vi.fn(() => mocks.settings) },
+  DefaultResourceLoader: class DefaultResourceLoader {
+    public reload = mocks.loaderReload;
+  }
+}));
+
+import { PiSdkGateway, piInternals } from "../src/pi-gateway.js";
+
+const usage: Usage = {
+  input: 1,
+  output: 2,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 3,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+};
+
+function assistant(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text: "answer" }],
+    api: "openai-completions",
+    provider: "ollama",
+    model: "model",
+    usage,
+    stopReason: "stop",
+    timestamp: Date.now(),
+    ...overrides
+  };
+}
+
+describe("pi message conversion", () => {
+  it("converts persisted user and assistant messages", () => {
+    const base: StoredMessage = {
+      id: 1,
+      sessionId: "session",
+      discordMessageId: "message",
+      authorId: "user",
+      authorName: "User",
+      role: "user",
+      content: "question",
+      createdAt: "2026-08-19T00:00:00.000Z"
+    };
+    expect(piInternals.storedToPiMessage(base, "fallback")).toMatchObject({
+      role: "user",
+      content: "question"
+    });
+    expect(
+      piInternals.storedToPiMessage(
+        {
+          ...base,
+          role: "assistant",
+          content: "answer",
+          reasoning: "thought",
+          diagnostics: [{ type: "trace", timestamp: 1 }],
+          model: "saved"
+        },
+        "fallback"
+      )
+    ).toMatchObject({
+      role: "assistant",
+      model: "saved",
+      content: [
+        { type: "thinking", thinking: "thought" },
+        { type: "text", text: "answer" }
+      ]
+    });
+  });
+
+  it("extracts text, reasoning, diagnostics, and response model", () => {
+    expect(
+      piInternals.extractGeneration(
+        assistant({
+          content: [
+            { type: "thinking", thinking: "reason" },
+            { type: "text", text: "one" },
+            { type: "text", text: " two" }
+          ],
+          diagnostics: [{ type: "trace", timestamp: 1 }],
+          responseModel: "resolved"
+        })
+      )
+    ).toEqual({
+      text: "one two",
+      reasoning: "reason",
+      diagnostics: [{ type: "trace", timestamp: 1 }],
+      model: "resolved"
+    });
+  });
+
+  it("rejects provider errors", () => {
+    expect(() =>
+      piInternals.extractGeneration(assistant({ stopReason: "error", errorMessage: "provider failed" }))
+    ).toThrow("provider failed");
+    expect(() => piInternals.extractGeneration(assistant({ stopReason: "aborted" }))).toThrow(
+      "PI generation stopped: aborted"
+    );
+  });
+});
+
+describe("PiSdkGateway", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.runtime.getModel.mockReturnValue({ provider: "ollama", id: "model" });
+    mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
+    mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
+    mocks.loaderReload.mockResolvedValue(undefined);
+    mocks.session.prompt.mockResolvedValue(undefined);
+    mocks.session.messages = [assistant()];
+    mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
+  });
+
+  it("checks Ollama health, registers the provider, and omits local auth headers", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const gateway = new PiSdkGateway(
+      { ollamaBaseUrl: "http://ollama:11434/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      fetchMock
+    );
+    await gateway.checkHealth();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://ollama:11434/v1/models",
+      expect.objectContaining({ headers: {} })
+    );
+    expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
+      "ollama",
+      expect.objectContaining({ api: "openai-completions", authHeader: false })
+    );
+  });
+
+  it("uses bearer auth for a configured remote key", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const gateway = new PiSdkGateway(
+      { ollamaBaseUrl: "https://ollama.example/v1", ollamaModel: "model", ollamaApiKey: "secret" },
+      fetchMock
+    );
+    await gateway.checkHealth();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://ollama.example/v1/models",
+      expect.objectContaining({ headers: { Authorization: "Bearer secret" } })
+    );
+  });
+
+  it("rejects an unhealthy provider", async () => {
+    const gateway = new PiSdkGateway(
+      { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      vi.fn().mockResolvedValue(new Response("no", { status: 503 }))
+    );
+    await expect(gateway.checkHealth()).rejects.toThrow("status 503");
+  });
+
+  it("reconstructs history, prompts PI, and disposes the session", async () => {
+    const gateway = new PiSdkGateway(
+      { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      vi.fn()
+    );
+    const result = await gateway.generate({
+      logicalSessionId: "logical",
+      history: [
+        {
+          id: 1,
+          sessionId: "logical",
+          discordMessageId: "message",
+          authorId: "user",
+          authorName: "User",
+          role: "user",
+          content: "history",
+          createdAt: "2026-08-19T00:00:00.000Z"
+        }
+      ],
+      prompt: "new prompt"
+    });
+    expect(mocks.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ content: "history" }));
+    expect(mocks.sessionManagerInMemory).toHaveBeenCalledWith(process.cwd(), { id: "logical" });
+    expect(mocks.session.prompt).toHaveBeenCalledWith("new prompt", {
+      expandPromptTemplates: false,
+      source: "rpc"
+    });
+    expect(mocks.session.dispose).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ text: "answer", model: "model" });
+  });
+
+  it("rejects a missing configured model and a missing assistant response", async () => {
+    const gateway = new PiSdkGateway(
+      { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      vi.fn()
+    );
+    mocks.runtime.getModel.mockReturnValueOnce(undefined);
+    await expect(
+      gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt" })
+    ).rejects.toThrow("Configured Ollama model is unavailable");
+
+    mocks.session.messages = [];
+    await expect(
+      gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt" })
+    ).rejects.toThrow("PI completed without an assistant message");
+    expect(mocks.session.dispose).toHaveBeenCalled();
+  });
+});

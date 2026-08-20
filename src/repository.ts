@@ -1,0 +1,362 @@
+import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import Database from "better-sqlite3";
+import type {
+  ConversationIdentity,
+  LogEntry,
+  PiGenerationResult,
+  SessionRecord,
+  SourceMessage,
+  StoredMessage
+} from "./domain.js";
+
+interface ConversationRow {
+  id: string;
+  conversation_key: string;
+  kind: "dm" | "guild";
+  guild_id: string | null;
+  channel_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface SessionRow {
+  id: string;
+  conversation_id: string;
+  conversation_key: string;
+  model: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MessageRow {
+  id: number;
+  session_id: string;
+  discord_message_id: string | null;
+  thread_id: string | null;
+  role: "user" | "assistant";
+  author_id: string | null;
+  author_name: string | null;
+  content: string;
+  reasoning: string | null;
+  diagnostics_json: string | null;
+  model: string | null;
+  created_at: string;
+}
+
+function now(): string {
+  return new Date().toISOString();
+}
+
+function optional<T>(value: T | null): T | undefined {
+  return value === null ? undefined : value;
+}
+
+export class ArtemisRepository {
+  private readonly database: Database.Database;
+
+  public constructor(path: string) {
+    if (path !== ":memory:") {
+      mkdirSync(dirname(path), { recursive: true });
+    }
+    this.database = new Database(path);
+    this.database.pragma("foreign_keys = ON");
+    this.database.pragma("journal_mode = WAL");
+    this.migrate();
+  }
+
+  public close(): void {
+    this.database.close();
+  }
+
+  public hasDiscordMessage(discordMessageId: string): boolean {
+    const row = this.database
+      .prepare("SELECT 1 FROM messages WHERE discord_message_id = ? LIMIT 1")
+      .get(discordMessageId);
+    return row !== undefined;
+  }
+
+  public getOrCreateSession(identity: ConversationIdentity, model: string): SessionRecord {
+    const transaction = this.database.transaction(() => {
+      const existing = this.database
+        .prepare("SELECT * FROM conversations WHERE conversation_key = ?")
+        .get(identity.key) as ConversationRow | undefined;
+
+      let conversation = existing;
+      if (!conversation) {
+        const timestamp = now();
+        const id = randomUUID();
+        this.database
+          .prepare(
+            `INSERT INTO conversations
+             (id, conversation_key, kind, guild_id, channel_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            id,
+            identity.key,
+            identity.kind,
+            identity.guildId ?? null,
+            identity.channelId,
+            timestamp,
+            timestamp
+          );
+        conversation = this.database.prepare("SELECT * FROM conversations WHERE id = ?").get(id) as
+          | ConversationRow
+          | undefined;
+      }
+      if (!conversation) {
+        throw new Error("Failed to create conversation");
+      }
+
+      let session = this.database
+        .prepare(
+          `SELECT s.*, c.conversation_key
+           FROM sessions s
+           JOIN conversations c ON c.id = s.conversation_id
+           WHERE s.conversation_id = ? AND s.status = 'active'
+           LIMIT 1`
+        )
+        .get(conversation.id) as SessionRow | undefined;
+
+      if (!session) {
+        const timestamp = now();
+        const id = randomUUID();
+        this.database
+          .prepare(
+            `INSERT INTO sessions
+             (id, conversation_id, model, status, created_at, updated_at)
+             VALUES (?, ?, ?, 'active', ?, ?)`
+          )
+          .run(id, conversation.id, model, timestamp, timestamp);
+        session = this.database
+          .prepare(
+            `SELECT s.*, c.conversation_key
+             FROM sessions s JOIN conversations c ON c.id = s.conversation_id
+             WHERE s.id = ?`
+          )
+          .get(id) as SessionRow | undefined;
+      }
+      if (!session) {
+        throw new Error("Failed to create session");
+      }
+      return this.mapSession(session);
+    });
+    return transaction();
+  }
+
+  public getHistory(sessionId: string): StoredMessage[] {
+    const rows = this.database
+      .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC")
+      .all(sessionId) as MessageRow[];
+    return rows.map((row) => this.mapMessage(row));
+  }
+
+  public insertSourceMessages(sessionId: string, messages: SourceMessage[]): number {
+    const insert = this.database.prepare(
+      `INSERT OR IGNORE INTO messages
+       (session_id, discord_message_id, thread_id, role, author_id, author_name, content, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    const transaction = this.database.transaction(() => {
+      let inserted = 0;
+      for (const message of messages) {
+        const result = insert.run(
+          sessionId,
+          message.discordMessageId,
+          message.threadId ?? null,
+          message.role,
+          message.authorId,
+          message.authorName,
+          message.content,
+          message.createdAt
+        );
+        inserted += result.changes;
+      }
+      this.touchSession(sessionId);
+      return inserted;
+    });
+    return transaction();
+  }
+
+  public insertAssistant(sessionId: string, result: PiGenerationResult): void {
+    const transaction = this.database.transaction(() => {
+      this.database
+        .prepare(
+          `INSERT INTO messages
+           (session_id, role, content, reasoning, diagnostics_json, model, created_at)
+           VALUES (?, 'assistant', ?, ?, ?, ?, ?)`
+        )
+        .run(
+          sessionId,
+          result.text,
+          result.reasoning ?? null,
+          result.diagnostics === undefined ? null : JSON.stringify(result.diagnostics),
+          result.model,
+          now()
+        );
+      this.touchSession(sessionId);
+    });
+    transaction();
+  }
+
+  public recordEvent(
+    type: string,
+    fields: { sessionId?: string; conversationKey?: string; discordMessageId?: string; details?: unknown }
+  ): void {
+    this.database
+      .prepare(
+        `INSERT INTO events
+         (session_id, conversation_key, discord_message_id, event_type, details_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        fields.sessionId ?? null,
+        fields.conversationKey ?? null,
+        fields.discordMessageId ?? null,
+        type,
+        fields.details === undefined ? null : JSON.stringify(fields.details),
+        now()
+      );
+  }
+
+  public recordLog(entry: LogEntry): void {
+    const { timestamp, level, event, ...details } = entry;
+    this.database
+      .prepare(
+        `INSERT INTO application_logs
+         (level, event, details_json, created_at)
+         VALUES (?, ?, ?, ?)`
+      )
+      .run(level, event, JSON.stringify(details), timestamp);
+  }
+
+  private touchSession(sessionId: string): void {
+    this.database.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(now(), sessionId);
+  }
+
+  private migrate(): void {
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    const applied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 1")
+      .get();
+    if (!applied) {
+      const transaction = this.database.transaction(() => {
+        this.database.exec(`
+        CREATE TABLE conversations (
+          id TEXT PRIMARY KEY,
+          conversation_key TEXT NOT NULL UNIQUE,
+          kind TEXT NOT NULL CHECK (kind IN ('dm', 'guild')),
+          guild_id TEXT,
+          channel_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE sessions (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          model TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('active', 'closed')),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX one_active_session_per_conversation
+          ON sessions(conversation_id) WHERE status = 'active';
+
+        CREATE TABLE messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          discord_message_id TEXT UNIQUE,
+          thread_id TEXT,
+          role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+          author_id TEXT,
+          author_name TEXT,
+          content TEXT NOT NULL,
+          reasoning TEXT,
+          diagnostics_json TEXT,
+          model TEXT,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX messages_by_session ON messages(session_id, id);
+
+        CREATE TABLE events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+          conversation_key TEXT,
+          discord_message_id TEXT,
+          event_type TEXT NOT NULL,
+          details_json TEXT,
+          created_at TEXT NOT NULL
+        );
+
+          INSERT INTO schema_migrations(version, applied_at) VALUES (1, '${now()}');
+        `);
+      });
+      transaction();
+    }
+
+    const logsApplied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 2")
+      .get();
+    if (!logsApplied) {
+      const transaction = this.database.transaction(() => {
+        this.database.exec(`
+          CREATE TABLE application_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            level TEXT NOT NULL CHECK (level IN ('debug', 'info', 'warn', 'error')),
+            event TEXT NOT NULL,
+            details_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+
+          CREATE INDEX application_logs_by_created_at
+            ON application_logs(created_at, id);
+
+          INSERT INTO schema_migrations(version, applied_at) VALUES (2, '${now()}');
+        `);
+      });
+      transaction();
+    }
+  }
+
+  private mapSession(row: SessionRow): SessionRecord {
+    return {
+      id: row.id,
+      conversationId: row.conversation_id,
+      conversationKey: row.conversation_key,
+      model: row.model,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  private mapMessage(row: MessageRow): StoredMessage {
+    const diagnostics = row.diagnostics_json ? (JSON.parse(row.diagnostics_json) as unknown) : undefined;
+    const threadId = optional(row.thread_id);
+    const reasoning = optional(row.reasoning);
+    const model = optional(row.model);
+    return {
+      id: row.id,
+      sessionId: row.session_id,
+      discordMessageId: row.discord_message_id ?? `stored:${row.id}`,
+      role: row.role,
+      authorId: row.author_id ?? "artemis",
+      authorName: row.author_name ?? "Artemis",
+      content: row.content,
+      ...(threadId ? { threadId } : {}),
+      ...(reasoning ? { reasoning } : {}),
+      ...(diagnostics !== undefined ? { diagnostics } : {}),
+      ...(model ? { model } : {}),
+      createdAt: row.created_at
+    };
+  }
+}

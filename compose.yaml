@@ -1,0 +1,44 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  ollama-model:
+    image: ollama/ollama:latest
+    restart: "no"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    command: ["pull", "${OLLAMA_MODEL:-deepseek-v4-flash:0731-cloud}"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  artemis:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - path: ${ARTEMIS_ENV_FILE:-.env}
+        required: true
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434/v1
+      SQLITE_PATH: /data/artemis.sqlite
+    volumes:
+      - artemis-data:/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-model:
+        condition: service_completed_successfully
+
+volumes:
+  artemis-data:
+  ollama-data:
