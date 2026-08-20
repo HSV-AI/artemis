@@ -173,6 +173,53 @@ describe("DiscordGateway", () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
+  it("logs every Discord message with its content before routing", async () => {
+    const conversations = { handleMessage: vi.fn().mockResolvedValue(null) };
+    const logger = createLoggerMock();
+    const gateway = new DiscordGateway(
+      { token: "token", guildId: "guild" },
+      conversations as unknown as ConversationService,
+      logger,
+      new FakeClient() as unknown as Client
+    );
+    const message = fakeMessage({
+      id: "guild-message",
+      guildId: "guild",
+      content: "visible server message",
+      author: { id: "server-user", username: "server-user", globalName: null, bot: true }
+    });
+
+    await gateway.handleMessage(message);
+
+    expect(logger.audit).toHaveBeenCalledWith("discord_message_received", {
+      discordMessageId: "guild-message",
+      guildId: "guild",
+      channelId: "channel",
+      authorId: "server-user",
+      authorName: "server-user",
+      isBot: true,
+      content: "visible server message",
+      createdAt: "2026-08-19T00:00:00.000Z"
+    });
+    expect(vi.mocked(logger.audit).mock.invocationCallOrder[0]).toBeLessThan(
+      conversations.handleMessage.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
+    );
+
+    await gateway.handleMessage(fakeMessage({ guildId: "other", id: "other-message" }));
+    await gateway.handleMessage(fakeMessage({ guildId: null, id: "dm-message" }));
+    expect(logger.audit).toHaveBeenCalledTimes(3);
+    expect(logger.audit).toHaveBeenNthCalledWith(
+      2,
+      "discord_message_received",
+      expect.objectContaining({ discordMessageId: "other-message", guildId: "other" })
+    );
+    expect(logger.audit).toHaveBeenNthCalledWith(
+      3,
+      "discord_message_received",
+      expect.objectContaining({ discordMessageId: "dm-message", guildId: null })
+    );
+  });
+
   it("does not send null responses and warns for non-sendable channels", async () => {
     const conversations = { handleMessage: vi.fn().mockResolvedValue(null) };
     const logger = createLoggerMock();

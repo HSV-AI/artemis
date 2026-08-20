@@ -21,6 +21,23 @@ describe("JsonLogger", () => {
     expect(persist.mock.calls[0]?.[0]).toEqual(JSON.parse(write.mock.calls[0]?.[0] as string));
   });
 
+  it("always writes and persists audit entries regardless of the minimum level", () => {
+    const write = vi.fn();
+    const persist = vi.fn();
+    const logger = new JsonLogger("error", write, persist);
+
+    logger.audit("discord_message_received", { content: "server message" });
+
+    expect(write).toHaveBeenCalledOnce();
+    expect(persist).toHaveBeenCalledWith(
+      expect.objectContaining({
+        level: "info",
+        event: "discord_message_received",
+        content: "server message"
+      })
+    );
+  });
+
   it("keeps console logging available when persistence fails", () => {
     const write = vi.fn();
     const logger = new JsonLogger("debug", write, () => {

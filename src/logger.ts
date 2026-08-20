@@ -15,6 +15,10 @@ export class JsonLogger implements Logger {
     private readonly persist?: (entry: LogEntry) => void
   ) {}
 
+  public audit(event: string, fields?: LogFields): void {
+    this.log("info", event, fields, true);
+  }
+
   public debug(event: string, fields?: LogFields): void {
     this.log("debug", event, fields);
   }
@@ -31,8 +35,8 @@ export class JsonLogger implements Logger {
     this.log("error", event, fields);
   }
 
-  private log(level: LogLevel, event: string, fields?: LogFields): void {
-    if (priorities[level] < priorities[this.minimumLevel]) {
+  private log(level: LogLevel, event: string, fields?: LogFields, always = false): void {
+    if (!always && priorities[level] < priorities[this.minimumLevel]) {
       return;
     }
     const entry: LogEntry = {

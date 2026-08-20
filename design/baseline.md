@@ -164,7 +164,9 @@ There is no automatic retention or deletion policy. Chat content, session data, 
 
 #### Logging and operator access
 
-Application logs are structured and written to standard output for `docker compose logs`. Every emitted entry is also inserted into SQLite's `application_logs` table with the same timestamp, severity, event name, and metadata. A database-write failure never suppresses the console entry and produces a console-only persistence-failure diagnostic without recursively attempting another database write. Each relevant event includes correlation fields such as conversation ID, session ID, and Discord message ID, but excludes credentials and avoids message content by default.
+Application logs are structured and written to standard output for `docker compose logs`. Every emitted entry is also inserted into SQLite's `application_logs` table with the same timestamp, severity, event name, and metadata. A database-write failure never suppresses the console entry and produces a console-only persistence-failure diagnostic without recursively attempting another database write. Each relevant event includes correlation fields such as conversation ID, session ID, and Discord message ID and excludes credentials.
+
+Every newly received Discord message is logged before normalization or any bot, content, guild, mention, authorization, or conversation filter runs. The `discord_message_received` entry includes the raw message body, guild and channel identifiers, author identity and display name, bot flag, thread identity when applicable, and Discord creation timestamp. This deliberately sensitive audit event bypasses the normal `LOG_LEVEL` threshold, is emitted to standard output, and is retained in `application_logs`. It includes DMs, configured and unconfigured guilds, bot-authored messages, unauthorized messages, and unmentioned messages.
 
 Chat content, PI session history, and model-provided reasoning or diagnostics are stored in SQLite as required for conversation debugging. These records are sensitive: only local operators should have database access, and documentation must warn against publishing or committing the database file.
 

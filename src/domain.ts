@@ -74,6 +74,7 @@ export interface LogEntry extends LogFields {
 }
 
 export interface Logger {
+  audit(event: string, fields?: LogFields): void;
   debug(event: string, fields?: LogFields): void;
   info(event: string, fields?: LogFields): void;
   warn(event: string, fields?: LogFields): void;

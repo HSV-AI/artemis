@@ -3,6 +3,7 @@ import type { InboundMessage, Logger, PiGateway, PiGenerationResult } from "../s
 
 export function createLoggerMock(): Logger {
   return {
+    audit: vi.fn(),
     debug: vi.fn(),
     info: vi.fn(),
     warn: vi.fn(),

@@ -144,9 +144,19 @@ export class DiscordGateway {
   }
 
   public async handleMessage(message: Message): Promise<void> {
-    const response = await this.conversations.handleMessage(
-      toInboundMessage(message, this.client.user?.id)
-    );
+    this.logger.audit("discord_message_received", {
+      discordMessageId: message.id,
+      guildId: message.guildId,
+      channelId: message.channelId,
+      ...(message.channel.isThread() ? { threadId: message.channel.id } : {}),
+      authorId: message.author.id,
+      authorName: displayName(message),
+      isBot: message.author.bot,
+      content: message.content,
+      createdAt: message.createdAt.toISOString()
+    });
+    const inbound = toInboundMessage(message, this.client.user?.id);
+    const response = await this.conversations.handleMessage(inbound);
     if (!response) {
       return;
     }

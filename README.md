@@ -15,6 +15,7 @@ The product and implementation baseline is documented in [design/baseline.md](de
 - An authorized thread reply submits the complete ordered thread, including the new message, to PI.
 - PI and Ollama failures are written to operator logs and SQLite; nothing is sent to Discord.
 - Sessions, chat content, reasoning, and diagnostics are retained in SQLite until an operator removes them.
+- Every newly received Discord message is logged with its raw content and metadata before filtering, regardless of `LOG_LEVEL`. This includes DMs, guild messages, bot messages, unauthorized messages, and unmentioned messages.
 
 ## Prerequisites
 
@@ -123,7 +124,7 @@ Global statement, branch, function, and line coverage thresholds are all enforce
 
 - Artemis refuses to connect to Discord if configuration, SQLite migration, or the Ollama health check fails.
 - At container startup, Artemis repairs ownership of its `/data` volume and then runs the application as the unprivileged `node` user.
-- Application logs are written as structured JSON to standard output and duplicated in SQLite's `application_logs` table. They exclude message bodies and credentials.
+- Application logs are written as structured JSON to standard output and duplicated in SQLite's `application_logs` table. Credentials are excluded. The `discord_message_received` event intentionally includes raw message bodies from every Discord message event.
 - Chat content, model reasoning, and diagnostics are stored in SQLite and do not expire automatically.
 - If `ollama-model` cannot pull the cloud model, repeat the Ollama sign-in command and inspect `docker compose logs ollama ollama-model`.
 - If messages are ignored, verify the guild ID, authorized user ID, Message Content Intent, channel/thread permissions, and that guild messages directly mention the bot.
