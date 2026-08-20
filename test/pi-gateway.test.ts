@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => {
     session,
     createAgentSession: vi.fn().mockResolvedValue({ session, extensionsResult: {} }),
     runtimeCreate: vi.fn().mockResolvedValue(runtime),
+    resourceLoaderConstructor: vi.fn(),
     loaderReload: vi.fn().mockResolvedValue(undefined),
     settings: {}
   };
@@ -41,6 +42,10 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   SessionManager: { inMemory: mocks.sessionManagerInMemory },
   SettingsManager: { inMemory: vi.fn(() => mocks.settings) },
   DefaultResourceLoader: class DefaultResourceLoader {
+    public constructor(options: unknown) {
+      mocks.resourceLoaderConstructor(options);
+    }
+
     public reload = mocks.loaderReload;
   }
 }));
@@ -84,7 +89,8 @@ describe("pi message conversion", () => {
     };
     expect(piInternals.storedToPiMessage(base, "fallback")).toMatchObject({
       role: "user",
-      content: "question"
+      content:
+        '{"discordMessage":{"id":"message","author":{"id":"user","name":"User"},"role":"user","content":"question","timestamp":"2026-08-19T00:00:00.000Z"}}'
     });
     expect(
       piInternals.storedToPiMessage(
@@ -210,7 +216,13 @@ describe("PiSdkGateway", () => {
       ],
       prompt: "new prompt"
     });
-    expect(mocks.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ content: "history" }));
+    expect(mocks.appendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining(
+          '"author":{"id":"user","name":"User"}'
+        )
+      })
+    );
     expect(mocks.sessionManagerInMemory).toHaveBeenCalledWith(process.cwd(), { id: "logical" });
     expect(mocks.session.prompt).toHaveBeenCalledWith("new prompt", {
       expandPromptTemplates: false,
@@ -220,6 +232,11 @@ describe("PiSdkGateway", () => {
       expect.objectContaining({
         tools: ["web_fetch"],
         customTools: [expect.objectContaining({ name: "web_fetch" })]
+      })
+    );
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemPrompt: expect.stringContaining("Treat each author ID as a distinct speaker")
       })
     );
     expect(mocks.session.dispose).toHaveBeenCalledOnce();
