@@ -9,10 +9,11 @@ import {
   type ThreadChannel
 } from "discord.js";
 import type { ConversationService } from "./conversation-service.js";
-import type { InboundMessage, Logger, SourceMessage } from "./domain.js";
+import type { InboundMessage, Logger, ResponseIndicator, SourceMessage } from "./domain.js";
 import { safeError } from "./logger.js";
 
 const DISCORD_MESSAGE_LIMIT = 2_000;
+const TYPING_REFRESH_INTERVAL_MS = 8_000;
 
 export function splitDiscordMessage(content: string, limit = DISCORD_MESSAGE_LIMIT): string[] {
   if (content.length <= limit) {
@@ -104,6 +105,66 @@ export function toInboundMessage(message: Message, selfUserId: string | undefine
   };
 }
 
+export function createTypingIndicator(
+  message: Message,
+  logger: Logger,
+  refreshIntervalMs = TYPING_REFRESH_INTERVAL_MS
+): ResponseIndicator {
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let sending = false;
+
+  const sendTyping = async (): Promise<boolean> => {
+    if (sending) {
+      return true;
+    }
+    if (!("sendTyping" in message.channel)) {
+      logger.warn("discord_typing_unavailable", {
+        discordMessageId: message.id,
+        channelId: message.channelId
+      });
+      return false;
+    }
+    sending = true;
+    try {
+      await message.channel.sendTyping();
+      return true;
+    } catch (error) {
+      logger.warn("discord_typing_failed", {
+        discordMessageId: message.id,
+        channelId: message.channelId,
+        ...safeError(error)
+      });
+      return false;
+    } finally {
+      sending = false;
+    }
+  };
+
+  const stop = (): void => {
+    if (timer) {
+      clearInterval(timer);
+      timer = undefined;
+    }
+  };
+
+  return {
+    async start() {
+      if (!(await sendTyping())) {
+        return;
+      }
+      timer = setInterval(() => {
+        void sendTyping().then((sent) => {
+          if (!sent) {
+            stop();
+          }
+        });
+      }, refreshIntervalMs);
+      timer.unref?.();
+    },
+    stop
+  };
+}
+
 export interface DiscordGatewayOptions {
   token: string;
   channelIds: readonly string[];
@@ -175,7 +236,10 @@ export class DiscordGateway {
       content: message.content,
       createdAt: message.createdAt.toISOString()
     });
-    const inbound = toInboundMessage(message, this.client.user?.id);
+    const inbound: InboundMessage = {
+      ...toInboundMessage(message, this.client.user?.id),
+      responseIndicator: createTypingIndicator(message, this.logger)
+    };
     const response = await this.conversations.handleMessage(inbound);
     if (!response) {
       return;
@@ -188,7 +252,11 @@ export class DiscordGateway {
       return;
     }
     for (const chunk of splitDiscordMessage(response)) {
-      await message.channel.send(chunk);
+      if (message.guildId) {
+        await message.reply(chunk);
+      } else {
+        await message.channel.send(chunk);
+      }
     }
   }
 

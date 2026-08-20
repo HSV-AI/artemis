@@ -22,6 +22,7 @@ The following behavior is fixed:
 - Accepted conversations retain their history in SQLite across restarts. There is no automatic retention or deletion.
 - Model or harness failures are logged and persisted, but produce no Discord response.
 - The model may use one explicitly allowlisted tool named `web_fetch` to retrieve an HTTP or HTTPS page through Ollama. Fetched content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled.
+- Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Ollama runs as a separate Docker Compose service. It is not installed in the Artemis application image.
 
 The following may be replaced:
@@ -93,7 +94,9 @@ Do not detect mentions with string matching alone. Use the Discord SDK's structu
 
 ### Responses
 
-Normal assistant output is sent as ordinary Discord channel messages in the same DM, channel, or thread that triggered generation. It is not sent as an interaction response or forced into a reply chain.
+Normal assistant output is sent in the same DM, channel, or thread that triggered generation. Guild and guild-thread chunks are Discord replies to the triggering message so the answered question is explicit. DM chunks remain ordinary channel messages.
+
+After a normal message passes all authorization and duplicate checks, send a typing indicator immediately and refresh it before Discord's indicator expires while generation is active. Stop refreshing on success or failure. Ignored and duplicate messages must never show typing. A typing-indicator API failure is logged but does not prevent generation.
 
 Discord limits message content to 2,000 characters. Split longer responses into ordered chunks, preferring a newline or space in the latter half of each chunk. Persist the assistant response as one logical message even when Discord receives multiple chunks.
 
@@ -402,6 +405,7 @@ Each stage should finish with tests before the next begins.
 - Page through entire threads.
 - Audit the raw event before filtering.
 - Send ordinary channel messages and split output safely at 2,000 characters.
+- Refresh typing during accepted generation, use replies for guild delivery, and retain ordinary sends for DMs.
 
 ### 5. Implement policy and conversation coordination
 
@@ -461,6 +465,8 @@ At minimum, prove all of the following:
 - Restarting the application preserves the logical session and ordered history.
 - A successful turn persists one assistant record, reasoning, diagnostics, and actual model.
 - Failed, aborted, missing, or blank generation persists a failure and sends nothing to Discord.
+- Typing appears only for accepted, non-duplicate messages, refreshes until generation ends, and a typing API failure does not cancel generation.
+- Every guild and guild-thread response chunk replies to the triggering message; DM chunks use ordinary sends.
 - `web_fetch` rejects non-HTTP(S) targets, uses the configured Ollama host and authentication, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Console logs continue when SQLite log persistence fails, without recursive failures.

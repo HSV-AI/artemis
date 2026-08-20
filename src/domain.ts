@@ -26,6 +26,12 @@ export interface InboundMessage extends SourceMessage {
   isBot: boolean;
   mentionsBot: boolean;
   loadThread?: () => Promise<SourceMessage[]>;
+  responseIndicator?: ResponseIndicator;
+}
+
+export interface ResponseIndicator {
+  start(): Promise<void>;
+  stop(): void;
 }
 
 export interface SessionRecord {

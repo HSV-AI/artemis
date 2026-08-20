@@ -1,9 +1,11 @@
 import { EventEmitter } from "node:events";
 import { Collection, Events, type Client, type Interaction, type Message, type ThreadChannel } from "discord.js";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationService } from "../src/conversation-service.js";
+import type { InboundMessage } from "../src/domain.js";
 import {
   DiscordGateway,
+  createTypingIndicator,
   fetchEntireThread,
   splitDiscordMessage,
   toInboundMessage
@@ -22,6 +24,7 @@ function fakeMessage(overrides: Record<string, unknown> = {}): Message {
     id: "channel",
     isThread: () => false,
     isSendable: () => true,
+    sendTyping: vi.fn().mockResolvedValue(undefined),
     send: vi.fn().mockResolvedValue(undefined)
   };
   return {
@@ -35,11 +38,14 @@ function fakeMessage(overrides: Record<string, unknown> = {}): Message {
     channelId: "channel",
     mentions: { parsedUsers: new Collection(), roles: new Collection() },
     channel,
+    reply: vi.fn().mockResolvedValue(undefined),
     ...overrides
   } as unknown as Message;
 }
 
 describe("Discord helpers", () => {
+  afterEach(() => vi.useRealTimers());
+
   it("splits long responses at natural boundaries", () => {
     expect(splitDiscordMessage("short", 10)).toEqual(["short"]);
     expect(splitDiscordMessage("one two three four", 10)).toEqual(["one two", "three four"]);
@@ -152,6 +158,58 @@ describe("Discord helpers", () => {
     const messages = await fetchEntireThread(thread, "artemis-user");
     expect(messages.map((message) => message.discordMessageId)).toEqual(["starter", "earlier", "later"]);
   });
+
+  it("starts, refreshes, and stops a typing indicator", async () => {
+    vi.useFakeTimers();
+    const sendTyping = vi.fn().mockResolvedValue(undefined);
+    const message = fakeMessage({
+      channel: { isThread: () => false, isSendable: () => true, sendTyping }
+    });
+    const indicator = createTypingIndicator(message, createLoggerMock(), 100);
+
+    await indicator.start();
+    expect(sendTyping).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+    indicator.stop();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sendTyping).toHaveBeenCalledTimes(2);
+  });
+
+  it("logs a typing failure without scheduling refreshes", async () => {
+    vi.useFakeTimers();
+    const logger = createLoggerMock();
+    const sendTyping = vi.fn().mockRejectedValue(new Error("missing permission"));
+    const message = fakeMessage({
+      channel: { isThread: () => false, isSendable: () => true, sendTyping }
+    });
+    const indicator = createTypingIndicator(message, logger, 100);
+
+    await indicator.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(logger.warn).toHaveBeenCalledWith(
+      "discord_typing_failed",
+      expect.objectContaining({
+        discordMessageId: "message",
+        errorMessage: "missing permission"
+      })
+    );
+    expect(sendTyping).toHaveBeenCalledOnce();
+  });
+
+  it("continues when the Discord channel cannot show typing", async () => {
+    const logger = createLoggerMock();
+    const message = fakeMessage({
+      channel: { isThread: () => false, isSendable: () => true }
+    });
+    const indicator = createTypingIndicator(message, logger, 100);
+
+    await indicator.start();
+    expect(logger.warn).toHaveBeenCalledWith("discord_typing_unavailable", {
+      discordMessageId: "message",
+      channelId: "channel"
+    });
+  });
 });
 
 describe("DiscordGateway", () => {
@@ -240,10 +298,65 @@ describe("DiscordGateway", () => {
     );
     const send = vi.fn().mockResolvedValue(undefined);
     const message = fakeMessage({
-      channel: { isThread: () => false, isSendable: () => true, send }
+      channel: {
+        isThread: () => false,
+        isSendable: () => true,
+        sendTyping: vi.fn().mockResolvedValue(undefined),
+        send
+      }
     });
     await gateway.handleMessage(message);
     expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses replies for guild responses and ordinary sends for DMs", async () => {
+    const conversations = {
+      handleMessage: vi.fn().mockImplementation(async (message: InboundMessage) => {
+        await message.responseIndicator?.start();
+        message.responseIndicator?.stop();
+        return message.guildId ? `${"a".repeat(2_000)} ${"b".repeat(10)}` : "response";
+      })
+    } as unknown as ConversationService;
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["channel"], userIds: ["user"] },
+      conversations,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+    const guildSend = vi.fn().mockResolvedValue(undefined);
+    const guildReply = vi.fn().mockResolvedValue(undefined);
+    const guildTyping = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleMessage(
+      fakeMessage({
+        guildId: "guild",
+        reply: guildReply,
+        channel: {
+          isThread: () => false,
+          isSendable: () => true,
+          sendTyping: guildTyping,
+          send: guildSend
+        }
+      })
+    );
+    expect(guildTyping).toHaveBeenCalledOnce();
+    expect(guildReply).toHaveBeenCalledTimes(2);
+    expect(guildSend).not.toHaveBeenCalled();
+
+    const dmSend = vi.fn().mockResolvedValue(undefined);
+    const dmReply = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleMessage(
+      fakeMessage({
+        reply: dmReply,
+        channel: {
+          isThread: () => false,
+          isSendable: () => true,
+          sendTyping: vi.fn().mockResolvedValue(undefined),
+          send: dmSend
+        }
+      })
+    );
+    expect(dmSend).toHaveBeenCalledWith("response");
+    expect(dmReply).not.toHaveBeenCalled();
   });
 
   it("logs every Discord message with its content before routing", async () => {

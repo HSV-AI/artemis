@@ -21,6 +21,7 @@ The implementation uses PI and the PI SDK as the conversational harness, Ollama 
 - Let any Discord user run `/ping` and receive exactly `pong` without touching the AI or conversation state.
 - Make the model and runtime settings configurable without code changes.
 - Let the model fetch user-provided HTTP or HTTPS pages through an explicitly allowlisted, Ollama-backed `web_fetch` tool while keeping built-in coding tools disabled.
+- Show a typing indicator while generating and attach every guild response to its triggering question with a Discord reply.
 - Record enough activity, errors, chat history, and available model diagnostics for operators to debug conversations.
 - Make the project approachable for community members to run and learn from locally.
 
@@ -116,7 +117,7 @@ Secrets are never committed, printed, or included in error payloads. `.env.examp
 
 #### Discord adapter
 
-The Discord adapter owns gateway connection, interaction registration, incoming-event normalization, outbound replies, and connection lifecycle logging. It exposes normalized events to the application rather than leaking Discord SDK objects into the conversation core.
+The Discord adapter owns gateway connection, interaction registration, incoming-event normalization, typing indicators, outbound replies, and connection lifecycle logging. It exposes normalized events to the application rather than leaking Discord SDK objects into the conversation core.
 
 The adapter distinguishes `/ping` interactions from normal chat messages immediately. Bot-authored conversational messages are ignored to prevent loops, while channel allowlisting determines where guild responses are permitted.
 
@@ -213,14 +214,14 @@ If configuration, migration, or required model setup fails, startup exits with a
 2. In a guild, silently stop unless the channel ID, or a thread's parent channel ID, is in the configured channel allowlist. DMs skip this check.
 3. In a guild, silently stop unless the triggering message directly mentions Artemis. DMs skip this check.
 4. Check the author ID against the configured user allowlist; silently stop if it is not authorized.
-5. For a thread reply, fetch the complete thread in Discord order, including the new message.
-6. Derive the conversation key from the DM channel or the parent guild channel.
-7. Serialize work behind that conversation's queue.
-8. Within the conversation, deduplicate source messages by Discord message ID.
+5. Derive the conversation key from the DM channel or the parent guild channel and serialize work behind that conversation's queue.
+6. Silently stop if the Discord message ID has already been processed.
+7. Start Discord's typing indicator and refresh it while generation remains active.
+8. For a thread reply, fetch the complete thread in Discord order, including the new message.
 9. Restore or create the durable PI session and persist any new inbound messages.
 10. Submit the current message, or the complete thread snapshot for a thread reply, to PI through the configured Ollama model.
-11. Atomically persist the assistant response and available model diagnostics.
-12. Send the response to the originating Discord conversation or thread.
+11. Atomically persist the assistant response and available model diagnostics, then stop refreshing the typing indicator.
+12. Send a DM response as an ordinary channel message. Send a guild-channel or guild-thread response as a reply to the triggering message.
 
 If generation fails, Artemis records the failed attempt and sanitized diagnostics for operators. It does not fabricate an assistant turn or send anything to Discord. A later message reuses the last valid session state.
 
@@ -269,6 +270,8 @@ Required tests include:
 - Unauthorized normal chat is silently ignored without persistence or model calls.
 - Guild messages outside the configured channel allowlist are silently ignored, while DMs are unaffected.
 - Unmentioned guild messages are silently ignored, while direct messages continue without requiring a mention.
+- Typing starts only for accepted, non-duplicate normal messages, refreshes during generation, and stops on success or failure.
+- Guild and guild-thread responses reply to the triggering message, while DM responses keep their existing delivery behavior.
 - DM and guild-channel keys remain distinct and stable, while a thread resolves to its parent guild-channel key.
 - Every authorized thread reply submits the complete ordered thread, including the new message, without duplicating persisted source messages.
 - Repeated messages reuse the correct session after a simulated process restart.

@@ -96,6 +96,8 @@ describe("ConversationService", () => {
 
   it("responds to a mentioned guild message without changing DM behavior", async () => {
     const { service, pi } = createService(createPiMock({ text: "Hello group" }));
+    const guildIndicator = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
+    const dmIndicator = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
 
     await expect(
       service.handleMessage(
@@ -104,7 +106,8 @@ describe("ConversationService", () => {
           guildId: "another-guild",
           channelId: "group-2",
           mentionsBot: true,
-          content: "<@artemis> hello"
+          content: "<@artemis> hello",
+          responseIndicator: guildIndicator
         })
       )
     ).resolves.toBe("Hello group");
@@ -114,12 +117,33 @@ describe("ConversationService", () => {
           discordMessageId: "dm-message",
           authorId: "second-user",
           channelId: "dm-channel",
-          mentionsBot: false
+          mentionsBot: false,
+          responseIndicator: dmIndicator
         })
       )
     ).resolves.toBe("Hello group");
 
     expect(pi.generate).toHaveBeenCalledTimes(2);
+    expect(guildIndicator.start).toHaveBeenCalledOnce();
+    expect(guildIndicator.stop).toHaveBeenCalledOnce();
+    expect(dmIndicator.start).toHaveBeenCalledOnce();
+    expect(dmIndicator.stop).toHaveBeenCalledOnce();
+  });
+
+  it("does not start a response indicator for ignored or duplicate messages", async () => {
+    const { service } = createService();
+    const ignoredIndicator = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
+    await service.handleMessage(
+      inbound({ authorId: "unauthorized", responseIndicator: ignoredIndicator })
+    );
+    expect(ignoredIndicator.start).not.toHaveBeenCalled();
+
+    const accepted = inbound({ discordMessageId: "duplicate" });
+    await service.handleMessage(accepted);
+    const duplicateIndicator = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
+    await service.handleMessage({ ...accepted, responseIndicator: duplicateIndicator });
+    expect(duplicateIndicator.start).not.toHaveBeenCalled();
+    expect(duplicateIndicator.stop).not.toHaveBeenCalled();
   });
 
   it("persists a successful DM turn and deduplicates a redelivery", async () => {
@@ -238,7 +262,8 @@ describe("ConversationService", () => {
     const pi = createPiMock();
     vi.mocked(pi.generate).mockRejectedValue(new Error("provider secret details"));
     const { service, logger } = createService(pi);
-    await expect(service.handleMessage(inbound())).resolves.toBeNull();
+    const responseIndicator = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };
+    await expect(service.handleMessage(inbound({ responseIndicator }))).resolves.toBeNull();
     expect(logger.error).toHaveBeenCalledWith(
       "generation_failed",
       expect.objectContaining({ errorName: "Error", errorMessage: "provider secret details" })
@@ -250,6 +275,8 @@ describe("ConversationService", () => {
     expect(repository?.getHistory(session?.id ?? "")).toEqual([
       expect.objectContaining({ role: "user" })
     ]);
+    expect(responseIndicator.start).toHaveBeenCalledOnce();
+    expect(responseIndicator.stop).toHaveBeenCalledOnce();
   });
 
   it("treats an empty PI answer as a logged failure", async () => {

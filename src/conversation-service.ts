@@ -96,6 +96,7 @@ export class ConversationService {
       }
 
       const session = this.repository.getOrCreateSession(identity, this.options.model);
+      await message.responseIndicator?.start();
       try {
         const priorHistory = this.repository.getHistory(session.id);
         const sourceMessages = message.loadThread ? await message.loadThread() : [message];
@@ -138,6 +139,8 @@ export class ConversationService {
           ...details
         });
         return null;
+      } finally {
+        message.responseIndicator?.stop();
       }
     });
   }
