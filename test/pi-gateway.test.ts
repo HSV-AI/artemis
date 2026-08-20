@@ -36,6 +36,7 @@ vi.mock("@earendil-works/pi-ai", () => ({
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession: mocks.createAgentSession,
+  defineTool: vi.fn((tool: unknown) => tool),
   ModelRuntime: { create: mocks.runtimeCreate },
   SessionManager: { inMemory: mocks.sessionManagerInMemory },
   SettingsManager: { inMemory: vi.fn(() => mocks.settings) },
@@ -215,6 +216,12 @@ describe("PiSdkGateway", () => {
       expandPromptTemplates: false,
       source: "rpc"
     });
+    expect(mocks.createAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: ["web_fetch"],
+        customTools: [expect.objectContaining({ name: "web_fetch" })]
+      })
+    );
     expect(mocks.session.dispose).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ text: "answer", model: "model" });
   });

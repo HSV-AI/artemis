@@ -21,6 +21,7 @@ The following behavior is fixed:
 - Every Discord message event is logged to the console and SQLite before filtering, including DMs, bot messages, unauthorized messages, unmentioned messages, and messages from disallowed channels.
 - Accepted conversations retain their history in SQLite across restarts. There is no automatic retention or deletion.
 - Model or harness failures are logged and persisted, but produce no Discord response.
+- The model may use one explicitly allowlisted tool named `web_fetch` to retrieve an HTTP or HTTPS page through Ollama. Fetched content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled.
 - Ollama runs as a separate Docker Compose service. It is not installed in the Artemis application image.
 
 The following may be replaced:
@@ -45,6 +46,8 @@ flowchart LR
     Sessions --> Store[(SQLite)]
     Sessions --> Harness[Harness adapter]
     Harness --> Model[Model adapter]
+    Harness --> WebFetch[web_fetch tool]
+    WebFetch --> Ollama
     Model --> Ollama[Ollama service]
     Ping --> Discord
     Sessions --> Discord
@@ -216,7 +219,7 @@ The model-facing implementation must:
 - Use the configured model rather than hard-coding a conditional model choice.
 - Supply the complete stored history for the logical session in order.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
-- Disable tools, skills, prompt templates, repository context, and other agentic extensions. Artemis is a conversational bot, not a coding agent with host access.
+- Enable only the `web_fetch` custom tool. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply a system instruction equivalent to: Artemis is a helpful conversational Discord assistant, should answer the latest message directly, and must not claim Discord capabilities it was not given.
 - Return final assistant text separately from optional reasoning and diagnostics.
 - Treat aborted, errored, absent, and blank final responses as failures.
@@ -232,6 +235,20 @@ Choose one session strategy:
 3. **Stateless completion API:** Convert stored history into the provider's message format on every turn and make a completion request. The stable logical session ID remains useful for tracing even if the provider does not consume it.
 
 Do not let a harness silently add tools, workspace files, or global memory. Do not rely exclusively on a provider-side transcript, because local restart recovery and operator inspection require the SQLite history.
+
+### `web_fetch` tool contract
+
+The tool accepts one string field named `url`. Reject malformed URLs and every scheme except HTTP and HTTPS before making a network request.
+
+Call Ollama's `/api/experimental/web_fetch` endpoint with `POST` JSON shaped as `{ "url": "<requested URL>" }`. Derive the Ollama host by removing a trailing slash and terminal `/v1` from `OLLAMA_BASE_URL`. Send the configured bearer token when `OLLAMA_API_KEY` is not the local `ollama` placeholder.
+
+Expect a response containing a title, page content, and links. Return the title, labeled page content, total link count, and at most the first ten links to the model. Before returning page content:
+
+- Wrap it in explicit begin/end markers identifying it as external data that must not be treated as instructions.
+- Neutralize common model role delimiters, including ChatML, Llama, Markdown role headings, bracketed roles, and XML-style role/tool tags.
+- Redact common instruction-override phrases and add a security notice when any content was changed.
+
+This is a defense-in-depth transformation, not a claim that arbitrary web content is safe. Tool errors follow the generation-failure path and send nothing to Discord.
 
 ### Using a language without a PI SDK
 
@@ -399,7 +416,7 @@ Each stage should finish with tests before the next begins.
 
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
-- Disable agentic capabilities and apply the Artemis system instruction.
+- Register and allowlist only `web_fetch`, disable every built-in tool, and apply the Artemis system instruction.
 - Add Ollama health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
 
@@ -444,6 +461,7 @@ At minimum, prove all of the following:
 - Restarting the application preserves the logical session and ordered history.
 - A successful turn persists one assistant record, reasoning, diagnostics, and actual model.
 - Failed, aborted, missing, or blank generation persists a failure and sends nothing to Discord.
+- `web_fetch` rejects non-HTTP(S) targets, uses the configured Ollama host and authentication, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Console logs continue when SQLite log persistence fails, without recursive failures.
 - Startup fails before Discord login when configuration, database migration, or model health validation fails.
@@ -492,4 +510,3 @@ A clean-room rebuild is complete only when:
 - Restart persistence and failure silence have been smoke-tested.
 - The README identifies the chosen language, Discord library, harness strategy, model endpoint, configuration, data location, and log access.
 - Any intentional behavior difference is first recorded as a design change rather than hidden inside an adapter substitution.
-

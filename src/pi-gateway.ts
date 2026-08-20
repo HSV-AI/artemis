@@ -20,6 +20,7 @@ import type {
   PiGenerationResult,
   StoredMessage
 } from "./domain.js";
+import { createWebFetchTool } from "./web-fetch-tool.js";
 
 const SYSTEM_PROMPT =
   "You are Artemis, a helpful conversational assistant in Discord. Answer the user's latest message directly. Do not claim to have Discord capabilities you were not given.";
@@ -133,7 +134,14 @@ export class PiSdkGateway implements PiGateway {
     const { session } = await createAgentSession({
       modelRuntime,
       model,
-      noTools: "all",
+      tools: ["web_fetch"],
+      customTools: [
+        createWebFetchTool({
+          ollamaBaseUrl: this.config.ollamaBaseUrl,
+          ollamaApiKey: this.config.ollamaApiKey,
+          fetchImplementation: this.fetchImplementation
+        })
+      ],
       resourceLoader,
       sessionManager,
       settingsManager: SettingsManager.inMemory()

@@ -20,6 +20,7 @@ The implementation uses PI and the PI SDK as the conversational harness, Ollama 
 - Support a comma-separated configuration list of Discord users allowed to converse with the model, with a blank list authorizing no users.
 - Let any Discord user run `/ping` and receive exactly `pong` without touching the AI or conversation state.
 - Make the model and runtime settings configurable without code changes.
+- Let the model fetch user-provided HTTP or HTTPS pages through an explicitly allowlisted, Ollama-backed `web_fetch` tool while keeping built-in coding tools disabled.
 - Record enough activity, errors, chat history, and available model diagnostics for operators to debug conversations.
 - Make the project approachable for community members to run and learn from locally.
 
@@ -83,6 +84,8 @@ flowchart LR
         Mention -- Yes --> Sessions[Session router<br/>One PI session per DM or guild group chat]
         Sessions --> Store[(SQLite<br/>sessions and chat logs)]
         Sessions --> PI[PI harness SDK]
+        PI --> WebFetch[web_fetch tool<br/>sanitized external content]
+        WebFetch --> Ollama
         PI --> Ollama[Ollama container]
         Ollama --> Model[deepseek-v4-flash<br/>configurable model]
         Model --> Ollama
@@ -145,6 +148,8 @@ Work for the same conversation is serialized so two rapidly arriving messages ca
 #### PI and Ollama boundary
 
 PI is the base conversational harness and owns interaction with the configured model through Ollama. Application code supplies the isolated conversation session and user message, then consumes the assistant response plus any available reasoning or diagnostic metadata.
+
+Only the custom `web_fetch` tool is enabled. It accepts an HTTP or HTTPS URL, calls Ollama's web-fetch endpoint, labels the returned page as untrusted external content, neutralizes common role-delimiter and instruction-override patterns, and returns the sanitized page to the model. PI's built-in read, write, edit, shell, and search tools remain disabled. Tool failures follow the normal generation-failure path and produce no Discord response.
 
 The model name is configuration, not a conditional embedded in application logic. Changing from the default `deepseek-v4-flash:0731-cloud` therefore requires a configuration update and restart, not a code change. Ollama-specific calls remain behind a narrow boundary so unit tests can substitute a deterministic fake.
 
@@ -273,6 +278,7 @@ Required tests include:
 - Configuration defaults and validation behave as documented, including the default model.
 - Persistence transactions, migrations, and error paths preserve the last valid session state.
 - PI or Ollama failures are logged without creating an assistant turn or sending a Discord response.
+- `web_fetch` is the only enabled tool, rejects non-HTTP(S) URLs, calls the configured Ollama service, sanitizes fetched content, and never enables built-in coding tools.
 - Discord reconnect lifecycle events are handled without losing durable context.
 
 `npm run guardrail` is the completion gate and runs all required checks, including the Vitest suite with coverage. A change is not complete until that command passes.

@@ -15,6 +15,7 @@ The product and implementation baseline is documented in [design/baseline.md](de
 - In guild channels and threads, the authorized user must mention the bot user or its Discord-managed bot role (`@Artemis`) in the triggering message. `@everyone`, `@here`, unrelated roles, and reply-only mentions do not trigger Artemis. DMs do not require a mention.
 - DMs have independent sessions. Guild threads share their parent channel's session.
 - An authorized thread reply submits the complete ordered thread, including the new message, to PI.
+- PI may use the explicitly allowlisted `web_fetch` tool to read a user-provided HTTP or HTTPS page through Ollama. Fetched content is labeled as untrusted and sanitized before it reaches the model; built-in coding tools remain disabled.
 - PI and Ollama failures are written to operator logs and SQLite; nothing is sent to Discord.
 - Sessions, chat content, reasoning, and diagnostics are retained in SQLite until an operator removes them.
 - Every newly received Discord message is logged with its raw content and metadata before filtering, regardless of `LOG_LEVEL`. This includes DMs, guild messages, bot messages, unauthorized messages, and unmentioned messages.
