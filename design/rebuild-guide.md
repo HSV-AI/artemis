@@ -15,7 +15,7 @@ The following behavior is fixed:
 - Artemis connects to Discord, registers a global `/ping` command, receives direct messages, and receives messages from channels across any guild the bot has joined.
 - `DISCORD_ALLOWED_CHANNEL_ID` and `DISCORD_ALLOWED_USER_ID` are comma-separated allowlists. Blank or absent lists are valid and match nothing. Values are trimmed and duplicates are removed.
 - DMs are accepted only from users in the user allowlist. They do not require a mention or channel allowlist entry.
-- Guild conversations are accepted only in an allowed channel, from an allowed user, and when the triggering message directly mentions the Artemis bot user or its Discord-managed bot role.
+- Guild conversations are accepted from any user in an allowed channel when the triggering message directly mentions the Artemis bot user or its Discord-managed bot role. The user allowlist does not apply to guild conversations.
 - Guild threads inherit authorization and conversation identity from their parent channel. Each accepted thread reply submits the entire ordered thread, including the new message, as the current prompt.
 - `/ping` in a DM requires an allowed user. `/ping` in a guild requires an allowed channel but does not require an allowed user or mention. An accepted ping responds with exactly `pong` and does not access conversation persistence or the model.
 - Every Discord message event is logged to the console and SQLite before filtering, including DMs, bot messages, unauthorized messages, unmentioned messages, and messages from disallowed channels.
@@ -213,7 +213,7 @@ The following is the complete Discord thread. Respond to the newest message in c
 [<timestamp>] Artemis: <assistant content>
 ```
 
-Repeat one line per message. Label messages authored by the bot as `Artemis`; label other messages with display name and Discord user ID. Other users' messages may be supplied as thread context, but only an allowed user's new message can trigger generation.
+Repeat one line per message. Label messages authored by the bot as `Artemis`; label other messages with display name and Discord user ID. In a guild thread, any user's new message may trigger generation when the parent channel is allowed and Artemis is directly mentioned.
 
 ## Model and harness behavior
 
@@ -365,7 +365,7 @@ Load local configuration from `.env` or the process environment. Trim scalar val
 | --- | --- | --- | --- |
 | `DISCORD_TOKEN` | Yes | None | Discord bot token. |
 | `DISCORD_ALLOWED_CHANNEL_ID` | No | Empty list | Comma-separated parent channel IDs where guild activity is allowed. |
-| `DISCORD_ALLOWED_USER_ID` | No | Empty list | Comma-separated user IDs allowed to converse in DMs and guilds. |
+| `DISCORD_ALLOWED_USER_ID` | No | Empty list | Comma-separated user IDs allowed to converse in DMs. This setting does not govern guild messages. |
 | `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | OpenAI-compatible model endpoint. |
 | `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Selected model. |
 | `OLLAMA_API_KEY` | No | `ollama` | Placeholder or bearer-token credential. |
@@ -461,7 +461,7 @@ At minimum, prove all of the following:
 - Guild ping accepts any user in an allowed parent channel and rejects a disallowed channel.
 - Ping performs no conversation database, harness, or model call.
 - Allowed DMs do not require mentions or channel entries.
-- Guild messages require allowed channel, allowed user, and a direct bot user or managed-role mention.
+- Guild messages require an allowed channel and a direct bot user or managed-role mention; they do not require an allowed user.
 - `@everyone`, `@here`, unrelated roles, reply-only mentions, bot authors, and blank content do not trigger generation.
 - Raw message audit occurs for every received message before all filters and bypasses the log threshold.
 - Distinct DMs and guild channels never share history.
@@ -506,9 +506,9 @@ After automated tests pass:
 1. Start the stack with blank allowlists and confirm readiness without any DM or guild response.
 2. Add one user ID, restart, and confirm that user's DM `/ping` returns `pong` while another user's DM is silent.
 3. Add one channel ID and confirm any guild user can run `/ping` there.
-4. Confirm normal guild chat remains silent until an allowed user directly mentions Artemis.
+4. Confirm normal guild chat remains silent until any user directly mentions Artemis in an allowed channel.
 5. Confirm `@everyone`, `@here`, and an unrelated role do not trigger Artemis.
-6. Create a thread, send multiple messages, then mention Artemis as an allowed user and verify the entire thread is represented in stored source messages.
+6. Create a thread, send multiple messages, then mention Artemis from any user and verify the entire thread is represented in stored source messages.
 7. Restart Artemis and confirm the next DM and guild turns retain their respective histories without crossing contexts.
 8. Force a model failure and confirm Discord receives nothing while console and SQLite contain correlated diagnostics.
 9. Inspect the SQLite volume and confirm conversations, sessions, messages, events, and application logs are durable.

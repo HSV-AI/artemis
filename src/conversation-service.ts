@@ -77,7 +77,7 @@ export class ConversationService {
       });
       return null;
     }
-    if (!this.authorizedUserIds.has(message.authorId)) {
+    if (message.guildId === undefined && !this.authorizedUserIds.has(message.authorId)) {
       this.logger.debug("discord_message_ignored", {
         discordMessageId: message.discordMessageId,
         authorId: message.authorId
