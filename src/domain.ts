@@ -25,6 +25,7 @@ export interface InboundMessage extends SourceMessage {
   parentChannelId?: string;
   isBot: boolean;
   mentionsBot: boolean;
+  repliesToBot: boolean;
   loadThread?: () => Promise<SourceMessage[]>;
   responseIndicator?: ResponseIndicator;
 }

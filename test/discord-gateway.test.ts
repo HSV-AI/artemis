@@ -36,7 +36,7 @@ function fakeMessage(overrides: Record<string, unknown> = {}): Message {
     createdTimestamp: Date.parse("2026-08-19T00:00:00.000Z"),
     guildId: null,
     channelId: "channel",
-    mentions: { parsedUsers: new Collection(), roles: new Collection() },
+    mentions: { parsedUsers: new Collection(), roles: new Collection(), repliedUser: null },
     channel,
     reply: vi.fn().mockResolvedValue(undefined),
     ...overrides
@@ -58,7 +58,8 @@ describe("Discord helpers", () => {
       channelId: "channel",
       role: "user",
       isBot: false,
-      mentionsBot: false
+      mentionsBot: false,
+      repliesToBot: false
     });
     expect(direct.guildId).toBeUndefined();
 
@@ -89,7 +90,8 @@ describe("Discord helpers", () => {
       channelId: "thread",
       parentChannelId: "parent",
       threadId: "thread",
-      mentionsBot: true
+      mentionsBot: true,
+      repliesToBot: false
     });
     await expect(normalized.loadThread?.()).resolves.toEqual([]);
   });
@@ -124,6 +126,34 @@ describe("Discord helpers", () => {
 
     expect(botRoleMention.mentionsBot).toBe(true);
     expect(unrelatedRoleMention.mentionsBot).toBe(false);
+  });
+
+  it("recognizes a direct reply to the bot without requiring a mention", () => {
+    const botReply = toInboundMessage(
+      fakeMessage({
+        guildId: "guild",
+        mentions: {
+          repliedUser: { id: "artemis-user" },
+          parsedUsers: new Collection(),
+          roles: new Collection()
+        }
+      }),
+      "artemis-user"
+    );
+    const otherReply = toInboundMessage(
+      fakeMessage({
+        guildId: "guild",
+        mentions: {
+          repliedUser: { id: "another-user" },
+          parsedUsers: new Collection(),
+          roles: new Collection()
+        }
+      }),
+      "artemis-user"
+    );
+
+    expect(botReply).toMatchObject({ mentionsBot: false, repliesToBot: true });
+    expect(otherReply).toMatchObject({ mentionsBot: false, repliesToBot: false });
   });
 
   it.each(["@everyone hello", "@here hello"])(

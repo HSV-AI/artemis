@@ -33,6 +33,7 @@ export function inbound(overrides: Partial<InboundMessage> = {}): InboundMessage
     channelId: "channel-1",
     isBot: false,
     mentionsBot: false,
+    repliesToBot: false,
     ...overrides
   };
 }
