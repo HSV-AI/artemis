@@ -7,6 +7,7 @@ import {
   DiscordGateway,
   createTypingIndicator,
   fetchEntireThread,
+  formatUptime,
   splitDiscordMessage,
   toInboundMessage
 } from "../src/discord-gateway.js";
@@ -45,6 +46,22 @@ function fakeMessage(overrides: Record<string, unknown> = {}): Message {
 
 describe("Discord helpers", () => {
   afterEach(() => vi.useRealTimers());
+
+  it("formats elapsed milliseconds as concise human-readable uptime", () => {
+    expect(formatUptime(0)).toBe("0s");
+    expect(formatUptime(30_000)).toBe("30s");
+    expect(formatUptime(59_000)).toBe("59s");
+    expect(formatUptime(60_000)).toBe("1m");
+    expect(formatUptime(90_000)).toBe("1m");
+    expect(formatUptime(3_600_000)).toBe("1h 0m");
+    expect(formatUptime(3_660_000)).toBe("1h 1m");
+    expect(formatUptime(86_400_000)).toBe("1d 0h 0m");
+    expect(formatUptime(3 * 86_400_000 + 4 * 3_600_000 + 12 * 60_000)).toBe("3d 4h 12m");
+  });
+
+  it("clamps negative elapsed time to zero", () => {
+    expect(formatUptime(-5_000)).toBe("0s");
+  });
 
   it("splits long responses at natural boundaries", () => {
     expect(splitDiscordMessage("short", 10)).toEqual(["short"]);
@@ -315,6 +332,41 @@ describe("DiscordGateway", () => {
     expect(reply).toHaveBeenNthCalledWith(1, "pong");
   });
 
+  it("replies to /uptime with elapsed time since startup for authorized contexts", async () => {
+    const conversations = { handleMessage: vi.fn() } as unknown as ConversationService;
+    const startedAt = 1_000_000;
+    const now = vi.fn(() => 1_000_000 + 3 * 86_400_000 + 4 * 3_600_000 + 12 * 60_000);
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["group-one"], userIds: ["allowed-user"], startedAt, now },
+      conversations,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+    const reply = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "uptime",
+      guildId: null,
+      channelId: "dm",
+      channel: null,
+      user: { id: "allowed-user" },
+      reply
+    } as unknown as Interaction);
+    expect(reply).toHaveBeenCalledWith("I've been up 3d 4h 12m.");
+
+    const unauthorizedReply = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "uptime",
+      guildId: null,
+      channelId: "dm-other",
+      channel: null,
+      user: { id: "unauthorized-user" },
+      reply: unauthorizedReply
+    } as unknown as Interaction);
+    expect(unauthorizedReply).not.toHaveBeenCalled();
+  });
+
   it("sends generated responses in Discord-safe chunks", async () => {
     const conversations = {
       handleMessage: vi.fn().mockResolvedValue(`${"a".repeat(2_000)} ${"b".repeat(10)}`)
@@ -479,6 +531,10 @@ describe("DiscordGateway", () => {
     await Promise.resolve();
 
     expect(client.application.commands.set).toHaveBeenCalledOnce();
+    const commands = vi.mocked(client.application.commands.set).mock.calls[0]?.[0] ?? [];
+    expect(commands.map((command: { name: string }) => command.name)).toEqual(
+      expect.arrayContaining(["ping", "uptime"])
+    );
     expect(logger.info).toHaveBeenCalledWith(
       "discord_ready",
       expect.objectContaining({ botUserId: "artemis-user", channelIds: ["group-one"] })

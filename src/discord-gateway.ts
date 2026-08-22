@@ -15,6 +15,31 @@ import { safeError } from "./logger.js";
 const DISCORD_MESSAGE_LIMIT = 2_000;
 const TYPING_REFRESH_INTERVAL_MS = 5_000;
 
+const MS_PER_SECOND = 1_000;
+const MS_PER_MINUTE = 60_000;
+const MS_PER_HOUR = 3_600_000;
+const MS_PER_DAY = 86_400_000;
+
+export function formatUptime(elapsedMs: number): string {
+  const totalMs = Math.max(0, Math.floor(elapsedMs));
+  const days = Math.floor(totalMs / MS_PER_DAY);
+  const hours = Math.floor((totalMs % MS_PER_DAY) / MS_PER_HOUR);
+  const minutes = Math.floor((totalMs % MS_PER_HOUR) / MS_PER_MINUTE);
+  const seconds = Math.floor((totalMs % MS_PER_MINUTE) / MS_PER_SECOND);
+
+  const parts: string[] = [];
+  if (days > 0) {
+    parts.push(`${days}d`, `${hours}h`, `${minutes}m`);
+  } else if (hours > 0) {
+    parts.push(`${hours}h`, `${minutes}m`);
+  } else if (minutes > 0) {
+    parts.push(`${minutes}m`);
+  } else {
+    parts.push(`${seconds}s`);
+  }
+  return parts.join(" ");
+}
+
 export function splitDiscordMessage(content: string, limit = DISCORD_MESSAGE_LIMIT): string[] {
   if (content.length <= limit) {
     return [content];
@@ -171,12 +196,16 @@ export interface DiscordGatewayOptions {
   token: string;
   channelIds: readonly string[];
   userIds: readonly string[];
+  startedAt?: number;
+  now?: () => number;
 }
 
 export class DiscordGateway {
   private bound = false;
   private readonly allowedChannelIds: ReadonlySet<string>;
   private readonly allowedUserIds: ReadonlySet<string>;
+  private readonly startedAt: number;
+  private readonly now: () => number;
 
   public constructor(
     private readonly options: DiscordGatewayOptions,
@@ -194,6 +223,8 @@ export class DiscordGateway {
   ) {
     this.allowedChannelIds = new Set(options.channelIds);
     this.allowedUserIds = new Set(options.userIds);
+    this.startedAt = options.startedAt ?? Date.now();
+    this.now = options.now ?? (() => Date.now());
   }
 
   public async start(): Promise<void> {
@@ -206,24 +237,32 @@ export class DiscordGateway {
   }
 
   public async handleInteraction(interaction: Interaction): Promise<void> {
-    if (!interaction.isChatInputCommand() || interaction.commandName !== "ping") {
+    if (!interaction.isChatInputCommand() || !this.isInteractionAuthorized(interaction)) {
       return;
     }
+    switch (interaction.commandName) {
+      case "ping":
+        await interaction.reply("pong");
+        return;
+      case "uptime":
+        await interaction.reply(`I've been up ${formatUptime(this.now() - this.startedAt)}.`);
+        return;
+    }
+  }
+
+  private isInteractionAuthorized(interaction: Interaction): boolean {
     if (!interaction.guildId && !this.allowedUserIds.has(interaction.user.id)) {
-      return;
+      return false;
     }
     if (interaction.guildId) {
       const channelId = interaction.channel?.isThread()
         ? interaction.channel.parentId
         : interaction.channelId;
-      if (
-        channelId === null ||
-        !this.allowedChannelIds.has(channelId)
-      ) {
-        return;
+      if (channelId === null || !this.allowedChannelIds.has(channelId)) {
+        return false;
       }
     }
-    await interaction.reply("pong");
+    return true;
   }
 
   public async handleMessage(message: Message): Promise<void> {
@@ -273,6 +312,10 @@ export class DiscordGateway {
           new SlashCommandBuilder()
             .setName("ping")
             .setDescription("Check whether Artemis is available")
+            .toJSON(),
+          new SlashCommandBuilder()
+            .setName("uptime")
+            .setDescription("Show how long Artemis has been running")
             .toJSON()
         ])
         .then(() => {
