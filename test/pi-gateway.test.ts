@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type { StoredMessage } from "../src/domain.js";
+import { modelConfig } from "./helpers.js";
 
 const mocks = vi.hoisted(() => {
   const appendMessage = vi.fn();
@@ -10,7 +11,7 @@ const mocks = vi.hoisted(() => {
   const runtime = {
     registerProvider: vi.fn(),
     setRuntimeApiKey: vi.fn().mockResolvedValue(undefined),
-    getModel: vi.fn().mockReturnValue({ provider: "ollama", id: "model" })
+    getModel: vi.fn().mockReturnValue({ provider: "test-provider", id: "model" })
   };
   const session = {
     prompt: vi.fn().mockResolvedValue(undefined),
@@ -66,7 +67,7 @@ function assistant(overrides: Partial<AssistantMessage> = {}): AssistantMessage 
     role: "assistant",
     content: [{ type: "text", text: "answer" }],
     api: "openai-completions",
-    provider: "ollama",
+    provider: "test-provider",
     model: "model",
     usage,
     stopReason: "stop",
@@ -130,7 +131,7 @@ describe("pi message conversion", () => {
       content: "question",
       createdAt: "2026-08-19T00:00:00.000Z"
     };
-    expect(piInternals.storedToPiMessage(base, "fallback")).toMatchObject({
+    expect(piInternals.storedToPiMessage(base, "test-provider", "fallback")).toMatchObject({
       role: "user",
       content:
         '{"discordMessage":{"id":"message","author":{"id":"user","name":"User"},"role":"user","content":"question","timestamp":"2026-08-19T00:00:00.000Z"}}'
@@ -145,6 +146,7 @@ describe("pi message conversion", () => {
           diagnostics: [{ type: "trace", timestamp: 1 }],
           model: "saved"
         },
+        "test-provider",
         "fallback"
       )
     ).toMatchObject({
@@ -191,7 +193,7 @@ describe("pi message conversion", () => {
 describe("PiSdkGateway", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.runtime.getModel.mockReturnValue({ provider: "ollama", id: "model" });
+    mocks.runtime.getModel.mockReturnValue({ provider: "test-provider", id: "model" });
     mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
     mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
     mocks.loaderReload.mockResolvedValue(undefined);
@@ -200,10 +202,35 @@ describe("PiSdkGateway", () => {
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
   });
 
-  it("checks Ollama health, registers the provider, and omits local auth headers", async () => {
+  it("checks health, registers the configured provider, and omits empty auth headers", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     const gateway = new PiSdkGateway(
-      { ollamaBaseUrl: "http://ollama:11434/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model", apiKey: "" }) },
+      fetchMock
+    );
+    await gateway.checkHealth();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://inference/v1/models",
+      expect.objectContaining({ headers: {} })
+    );
+    expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
+      "test-provider",
+      expect.objectContaining({ api: "openai-completions", authHeader: false })
+    );
+  });
+
+  it("preserves unauthenticated access for the legacy Ollama placeholder", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const gateway = new PiSdkGateway(
+      {
+        model: modelConfig({
+          providerId: "ollama",
+          providerName: "Ollama",
+          baseUrl: "http://ollama:11434/v1",
+          modelId: "local-model",
+          apiKey: "ollama"
+        })
+      },
       fetchMock
     );
     await gateway.checkHealth();
@@ -213,26 +240,27 @@ describe("PiSdkGateway", () => {
     );
     expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
       "ollama",
-      expect.objectContaining({ api: "openai-completions", authHeader: false })
+      expect.objectContaining({ authHeader: false })
     );
+    expect(mocks.runtime.setRuntimeApiKey).toHaveBeenCalledWith("ollama", "ollama");
   });
 
   it("uses bearer auth for a configured remote key", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     const gateway = new PiSdkGateway(
-      { ollamaBaseUrl: "https://ollama.example/v1", ollamaModel: "model", ollamaApiKey: "secret" },
+      { model: modelConfig({ baseUrl: "https://model.example/v1", modelId: "model", apiKey: "secret" }) },
       fetchMock
     );
     await gateway.checkHealth();
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://ollama.example/v1/models",
+      "https://model.example/v1/models",
       expect.objectContaining({ headers: { Authorization: "Bearer secret" } })
     );
   });
 
   it("rejects an unhealthy provider", async () => {
     const gateway = new PiSdkGateway(
-      { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }) },
       vi.fn().mockResolvedValue(new Response("no", { status: 503 }))
     );
     await expect(gateway.checkHealth()).rejects.toThrow("status 503");
@@ -240,7 +268,7 @@ describe("PiSdkGateway", () => {
 
   it("reconstructs history, prompts PI, and disposes the session", async () => {
     const gateway = new PiSdkGateway(
-      { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }) },
       vi.fn()
     );
     const result = await gateway.generate({
@@ -300,9 +328,7 @@ describe("PiSdkGateway", () => {
   it("allowlists the GitHub tools when a token is configured", async () => {
     const gateway = new PiSdkGateway(
       {
-        ollamaBaseUrl: "http://ollama/v1",
-        ollamaModel: "model",
-        ollamaApiKey: "ollama",
+        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
         githubToken: "github-token",
         githubAllowedRepositories: ["owner/repo", "other/repo"]
       },
@@ -323,13 +349,13 @@ describe("PiSdkGateway", () => {
 
   it("rejects a missing configured model and a missing assistant response", async () => {
     const gateway = new PiSdkGateway(
-      { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }) },
       vi.fn()
     );
     mocks.runtime.getModel.mockReturnValueOnce(undefined);
     await expect(
       gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt", conversationKind: "guild" })
-    ).rejects.toThrow("Configured Ollama model is unavailable");
+    ).rejects.toThrow("Configured model is unavailable");
 
     mocks.session.messages = [];
     await expect(
@@ -346,7 +372,7 @@ describe("system prompt Discord channel limits", () => {
     mocks.session.prompt.mockResolvedValue(undefined);
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
     const gateway = new PiSdkGateway(
-      { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }) },
       vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
     );
     await gateway.generate({
@@ -366,7 +392,7 @@ describe("system prompt Discord channel limits", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.runtime.getModel.mockReturnValue({ provider: "ollama", id: "model" });
+    mocks.runtime.getModel.mockReturnValue({ provider: "test-provider", id: "model" });
     mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
     mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
     mocks.loaderReload.mockResolvedValue(undefined);
@@ -415,7 +441,7 @@ describe("system prompt Discord channel limits", () => {
     mocks.session.prompt.mockResolvedValue(undefined);
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
     const gateway = new PiSdkGateway(
-      { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }) },
       vi.fn()
     );
     await gateway.generate({

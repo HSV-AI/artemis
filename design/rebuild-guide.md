@@ -4,7 +4,7 @@
 
 This guide is sufficient for a coding agent to rebuild Artemis without reading the existing application source. It describes the behavior that must remain compatible and the implementation seams that may change.
 
-The replacement may use a different programming language, Discord library, conversational harness, or Ollama client. Those choices are compatible only when the observable Discord behavior, conversation isolation, persistence, logging, failure handling, and local operating workflow in this guide remain intact.
+The replacement may use a different programming language, Discord library, conversational harness, or OpenAI-compatible model client. Those choices are compatible only when the observable Discord behavior, conversation isolation, persistence, logging, failure handling, and local operating workflow in this guide remain intact.
 
 Treat statements using **must** as compatibility requirements. Examples and technology suggestions are non-normative unless explicitly labeled otherwise.
 
@@ -26,14 +26,14 @@ The following behavior is fixed:
 - The model may use explicitly registered custom tools: `web_fetch`, plus six GitHub tools when a token is configured. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Group/channel (guild) assistant responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) self-contained Discord messages per turn. DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind (`guild` vs `dm`).
-- Ollama runs as a separate Docker Compose service. It is not installed in the Artemis application image.
+- Base Compose retains Ollama as a separate service and model-preparation job. An optional provider-specific Compose path may run only Artemis and mount a local provider definition read-only.
 
 The following may be replaced:
 
 - Programming language and application framework.
 - Discord SDK.
 - Conversational harness, including replacing PI.
-- Ollama SDK or use of Ollama's OpenAI-compatible HTTP API.
+- OpenAI-compatible SDK or HTTP client.
 - SQLite driver and migration library.
 - Dependency injection, module layout, and internal type system.
 
@@ -52,9 +52,9 @@ flowchart LR
     Harness --> Model[Model adapter]
     Harness --> WebFetch[web_fetch tool]
     Harness --> GitHubTools[Token-gated GitHub tools]
-    WebFetch --> Ollama
+    WebFetch --> Web[HTTP or HTTPS page]
     GitHubTools --> GitHubAPI[GitHub API]
-    Model --> Ollama[Ollama service]
+    Model --> Provider[Configured OpenAI-compatible endpoint]
     Commands -- clear-session only --> Store
     Commands --> Discord
     Sessions --> Discord
@@ -256,7 +256,7 @@ Do not let a harness silently add tools, workspace files, or global memory. Do n
 
 The tool accepts one string field named `url`. Reject malformed URLs and every scheme except HTTP and HTTPS before making a network request.
 
-Call Ollama's `/api/experimental/web_fetch` endpoint with `POST` JSON shaped as `{ "url": "<requested URL>" }`. Derive the Ollama host by removing a trailing slash and terminal `/v1` from `OLLAMA_BASE_URL`. Send the configured bearer token when `OLLAMA_API_KEY` is not the local `ollama` placeholder.
+Issue a direct HTTP `GET` to the validated target URL, follow redirects, and accept HTML, plain text, or JSON. Read at most 100,000 characters. For HTML, remove script and style bodies, derive a title, reduce markup to readable text, resolve links against the final URL, and deduplicate them. Return the title, labeled page content, total link count, and at most the first ten links. Do not send the model-provider API key to the target URL.
 
 Expect a response containing a title, page content, and links. Return the title, labeled page content, total link count, and at most the first ten links to the model. Before returning page content:
 
@@ -274,21 +274,26 @@ When `GITHUB_TOKEN` or `GITHUB_ALLOWED_REPOSITORY` is blank, register no GitHub 
 
 Prefer one of these approaches:
 
-- Implement the harness port directly against Ollama's OpenAI-compatible endpoint.
+- Implement the harness port directly against the configured OpenAI-compatible endpoint.
 - Use a native-language harness with equivalent history, reasoning, diagnostics, and tool-disable controls.
 - Run PI in a small sidecar process behind a narrow local RPC API that implements the harness port.
 
 The sidecar approach is appropriate when PI behavior is required but the main bot is written in a language without a compatible PI SDK. The sidecar must not own Discord policy or SQLite conversation identity.
 
-### Ollama adapter
+### Model-provider adapter
 
-The default configuration is:
+The default workflow remains:
 
+- Provider ID: `ollama`
 - Base URL: `http://ollama:11434/v1`
 - Model: `deepseek-v4-flash:0731-cloud`
-- API key placeholder: `ollama`
+- API key: `OLLAMA_API_KEY`, default `ollama`
 
-Before connecting Discord, perform a bounded health check against the model service and initialize or validate the configured model. A real API key may be sent as a bearer token; the `ollama` placeholder must not require an authorization header.
+When `MODEL_CONFIG_PATH` is selected, the operator-provided JSON provider
+definition and `MODEL_API_KEY` replace those Ollama settings. Upstream Artemis
+does not own any concrete alternate-provider values.
+
+Before connecting Discord, perform a bounded health check against the model service and initialize or validate the configured model. Send a bearer header only when the configured API key is nonblank.
 
 ## Persistence contract
 
@@ -382,7 +387,7 @@ Application code must not deliberately insert configured secrets into logs or SQ
 
 ## Configuration contract
 
-Load local configuration from `.env` or the process environment. Trim scalar values and fail startup with an actionable field name when a required scalar is blank or invalid.
+Load local environment configuration from `.env` or the process environment and optional provider metadata from `MODEL_CONFIG_PATH`. Trim scalar values and fail startup with an actionable field name when required configuration is blank or invalid.
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
@@ -391,9 +396,11 @@ Load local configuration from `.env` or the process environment. Trim scalar val
 | `DISCORD_ALLOWED_USER_ID` | No | Empty list | Comma-separated user IDs allowed to converse in DMs. This setting does not govern guild messages. |
 | `DISCORD_SUPPRESS_EMBEDS` | No | `true` | When `true`, Artemis sends every outbound Discord message with the `SuppressEmbeds` flag so link-preview cards are not rendered. When `false`, embeds render normally. Must be `true` or `false`. |
 | `DISCORD_EMBEDS_ALLOWED_CHANNEL_ID` | No | Empty list | Comma-separated channel IDs where link embeds are re-enabled even when `DISCORD_SUPPRESS_EMBEDS` is `true`. Threads resolve through their parent channel. Blank re-enables embeds nowhere. |
-| `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | OpenAI-compatible model endpoint. |
-| `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Selected model. |
-| `OLLAMA_API_KEY` | No | `ollama` | Placeholder or bearer-token credential. |
+| `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | Existing default model endpoint. |
+| `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Existing default selected model. |
+| `OLLAMA_API_KEY` | No | `ollama` | Existing placeholder or bearer credential. |
+| `MODEL_CONFIG_PATH` | No | Empty | Optional local JSON provider definition that replaces the Ollama settings. |
+| `MODEL_API_KEY` | No | `local` | Bearer value for the selected provider definition; blank sends no authorization header. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token; blank disables all GitHub tools. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` in application code | Comma-separated GitHub repository allowlist; blank disables GitHub tools. The supplied `.env.example` explicitly sets only `HSV-AI/artemis`. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
@@ -455,7 +462,7 @@ Each stage should finish with tests before the next begins.
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
 - Register and allowlist `web_fetch` plus token-gated GitHub tools, disable every built-in tool, and build the Artemis system instruction from conversation kind and the registered-tool metadata, including the Capability Gap Protocol.
-- Add Ollama health/model validation.
+- Add configured provider health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
 
 ### 7. Package the local stack
@@ -463,15 +470,15 @@ Each stage should finish with tests before the next begins.
 - Build a multi-stage application image containing only the application and runtime dependencies.
 - Run the final application process as a non-root user.
 - Ensure the mounted SQLite directory is created and writable before dropping privileges.
-- Define separate `ollama`, model-preparation, and `artemis` Compose services.
-- Persist Ollama data and Artemis data in separate volumes.
-- Make Artemis depend on a healthy Ollama service and successful model preparation.
-- Inject `.env`, force the internal Ollama URL, and force the SQLite path to the mounted data directory.
+- Preserve the base `ollama`, model-preparation, and `artemis` Compose services.
+- Persist Ollama and Artemis data in separate volumes.
+- Allow deployment-owned Compose overrides to select externally managed providers.
+- In an override, mount the selected model config read-only, set its in-container path, and preserve the SQLite data volume.
 - Document `docker compose up --build` as the one-command startup workflow after initial credentials/sign-in are prepared.
 
 ### 8. Complete conformance testing
 
-- Mock Discord, the harness, and Ollama at their external boundaries.
+- Mock Discord, the harness, model provider, and direct HTTP fetch at their external boundaries.
 - Keep the compatibility tests independent of the concrete SDK wherever practical.
 - Use Vitest for the repository's conformance and application unit suite. A different-language port may additionally use native tests.
 - Enforce global statement, branch, function, and line coverage thresholds of at least 80% for code measured by the suite.
@@ -503,7 +510,7 @@ At minimum, prove all of the following:
 - Failed, aborted, missing, or blank generation persists a failure and sends nothing to Discord.
 - Typing appears only for accepted, non-duplicate messages, refreshes until generation ends, and a typing API failure does not cancel generation.
 - Every guild and guild-thread response chunk replies to the triggering message; DM chunks use ordinary sends.
-- `web_fetch` rejects non-HTTP(S) targets, uses the configured Ollama host and authentication, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
+- `web_fetch` rejects non-HTTP(S) targets, fetches directly without model credentials, bounds content, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and publish the explicit-mutation guideline in the model's tool registry.
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
@@ -511,7 +518,7 @@ At minimum, prove all of the following:
 - Every outbound Discord message (guild reply, DM send, chunked response, and slash-command reply) carries the `SuppressEmbeds` flag by default; `DISCORD_SUPPRESS_EMBEDS=false` omits it globally, and `DISCORD_EMBEDS_ALLOWED_CHANNEL_ID` omits it per channel with threads resolving through the parent channel.
 - Console logs continue when SQLite log persistence fails, without recursive failures.
 - Startup fails before Discord login when configuration, database migration, or model health validation fails.
-- The application image does not contain Ollama and Compose starts it as a separate dependency.
+- The application image contains no model server; base Compose starts Ollama separately, while deployment-owned overrides may select an external provider.
 
 ## Language-port checklist
 
@@ -523,9 +530,9 @@ When changing languages, explicitly document these mappings in the pull request 
 | Discord SDK | Intents, partial DM support, slash-command registration, structured mention inspection, thread pagination, and message sending. |
 | SQLite driver | Foreign keys, WAL, transactions, unique constraints, migration serialization, and safe concurrent access. |
 | Harness | Which session strategy is used and how history, system instruction, disabled tools, reasoning, diagnostics, and errors map to the port. |
-| Ollama | Health check, model selection, authentication header, timeout, and response parsing. |
+| Model provider | Local provider definition, health check, model selection, authentication header, timeout, and response parsing. |
 | Shutdown | How Discord stops and SQLite closes without accepting new work. |
-| Packaging | Non-root runtime, writable data volume, and separation from Ollama. |
+| Packaging | Non-root runtime, writable data volume, unchanged Ollama Compose workflow, and optional read-only provider config. |
 | Verification | How native checks are invoked by `npm run guardrail` and how the Vitest conformance suite reaches the implementation. |
 
 Do not translate library calls line by line. Rebuild the normalized contracts and prove compatibility at the ports.
@@ -553,7 +560,7 @@ A clean-room rebuild is complete only when:
 
 - The fixed compatibility boundary and conformance tests pass.
 - The full `npm run guardrail` command passes with all coverage thresholds enforced.
-- `docker compose up --build` provides the documented local workflow with Ollama as a separate service.
+- `docker compose up --build` preserves the documented Ollama workflow, and deployment-owned overrides can select a configured external provider.
 - Restart persistence and failure silence have been smoke-tested.
 - The README identifies the chosen language, Discord library, harness strategy, model endpoint, configuration, data location, and log access.
 - Any intentional behavior difference is first recorded as a design change rather than hidden inside an adapter substitution.

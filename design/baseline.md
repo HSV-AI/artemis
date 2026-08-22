@@ -4,13 +4,13 @@ Status: Implemented baseline
 
 Source: [HSV-AI/artemis issue #1](https://github.com/HSV-AI/artemis/issues/1)
 
-Last updated: 2026-08-21
+Last updated: 2026-08-22
 
 ## Summary
 
 Artemis is a community-run Discord bot that supports AI-assisted conversations in direct messages and selected guild chats. The current application allows configured users to converse with the model in DMs and any user to converse in configured channels across guilds, exposes context-aware `/ping`, `/uptime`, and `/clear-session` commands, and preserves each chat's context across restarts until an authorized user starts a fresh session.
 
-The implementation uses PI and the PI SDK as the conversational harness, Ollama as the initial model provider, SQLite for durable sessions and chat logs, and Docker Compose for local operation. Configuration and credentials are supplied through an uncommitted `.env` file.
+The implementation uses PI and the PI SDK as the conversational harness, SQLite for durable sessions and chat logs, and Docker Compose for local operation. The existing Ollama-backed workflow remains the default; an optional operator-provided JSON file selects another OpenAI-compatible provider. Environment configuration and credentials are supplied through an uncommitted `.env` file. [Configurable model provider](model-provider.md) owns the detailed provider and web-fetch contract.
 
 ## Design document map
 
@@ -33,10 +33,10 @@ Detailed protocols and major features live in focused subdocuments so this basel
 ## Non-goals for the first release
 
 - Providing a general user, role, or server administration system.
-- Supporting model providers other than Ollama.
+- Hosting or managing the configured model provider.
 - Sharing context across unrelated direct messages or guild channels.
 - Building a hosted control plane or managed deployment service.
-- Requiring Ollama or Docker integration tests in the automated test suite.
+- Requiring model-provider or Docker integration tests in the automated test suite.
 
 ## Requirements and design responses
 
@@ -50,7 +50,7 @@ Detailed protocols and major features live in focused subdocuments so this basel
 | Direct-message and guild conversations | Derive a stable conversation key from the Discord context. Direct messages use the DM channel ID. Guild messages, including thread replies, use the guild ID plus the parent channel ID. |
 | Channel-aware response limits | Group/channel (guild) responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained Discord messages per turn; DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind. |
 | Isolated, persistent context | Associate each conversation key with one active logical session and store its messages in SQLite. Reconstruct PI input from that session's ordered history, and never query history without the conversation key. |
-| Configurable model and runtime | Read validated settings from environment variables loaded through `.env` for local use. |
+| Configurable model and runtime | Read provider metadata from an optional local JSON file and credentials plus other runtime settings from environment variables loaded through `.env`. |
 | Reconnection | Use the Discord client's reconnect and resume behavior, and log connection lifecycle events. |
 | Debuggable operation | Emit structured application logs and persist sessions, chat messages, model metadata, and available reasoning or diagnostics. |
 
@@ -62,10 +62,10 @@ The following choices come from the [implementation comment on issue #1](https:/
 | --- | --- |
 | Use PI and the PI SDK as the base harness | PI owns the model-facing conversation lifecycle. Discord-specific code sits outside PI behind an adapter so the main flow remains easy for a first-time chatbot contributor to follow. |
 | Save all sessions and chat logs to SQLite | SQLite is the durable system of record for conversation identity, PI session references or state, user and assistant messages, model metadata, and available reasoning or diagnostic data. |
-| Community members must be able to run locally | A documented local workflow requires only Discord credentials, the configured Ollama access, and Docker Compose. Persistent data lives in a named or bind-mounted local volume. |
-| Start with Ollama and `deepseek-v4-flash:0731-cloud` | Ollama is the initial model boundary and `deepseek-v4-flash:0731-cloud` is the default model. The model remains configurable without a code change. |
-| Store configuration in `.env` | Local configuration is loaded from `.env`; `.env` is ignored by Git, while a non-secret `.env.example` documents every required value. Startup fails clearly when required configuration is absent or invalid. |
-| Use Docker and Docker Compose | The project supplies an Artemis image and a Compose definition for local startup. Compose starts Ollama as a separate dependency container, mounts durable data, injects `.env`, and connects Artemis to Ollama over the Compose network. Ollama is not installed in the Artemis image. |
+| Community members must be able to run locally | The existing Ollama-backed Compose workflow remains available with Discord credentials and Ollama access. Persistent data lives in named volumes. |
+| Configure another model provider locally | When selected, provider metadata is loaded from an operator-provided JSON file. PI registration follows that data without provider-specific application branches. |
+| Store secrets in `.env` | Environment configuration is loaded from `.env`; `.env` and `model.config.json` are ignored by Git, while non-secret examples document the expected settings. Startup fails clearly when required configuration is absent or invalid. |
+| Use Docker and Docker Compose | Base Compose retains Ollama, model preparation, and Artemis. Deployments may layer their own override to mount provider configuration and use an externally managed endpoint. |
 | Create design docs | This document is the initial design baseline and should be updated when implementation decisions change. |
 
 ## High-level architecture
@@ -77,7 +77,7 @@ flowchart LR
     DM --> Bot
     Guild --> Bot
     Config[Environment configuration] --> Bot
-    Config --> Ollama
+    Config --> PI
     subgraph Compose[Docker Compose]
         Bot[Artemis bot<br/>TypeScript container]
         Bot --> Command{Slash command?}
@@ -96,12 +96,10 @@ flowchart LR
         Sessions --> PI[PI harness SDK]
         PI --> WebFetch[web_fetch tool<br/>sanitized external content]
         PI --> GitHub[GitHub tools<br/>token-gated and sanitized]
-        WebFetch --> Ollama
+        WebFetch --> Web[HTTP or HTTPS page]
         GitHub --> GitHubAPI[GitHub API]
-        PI --> Ollama[Ollama container]
-        Ollama --> Model[deepseek-v4-flash<br/>configurable model]
-        Model --> Ollama
-        Ollama --> PI
+        PI --> Model[Configured OpenAI-compatible endpoint<br/>Ollama default or operator-selected provider]
+        Model --> PI
         PI -- Reasoning and diagnostics --> Store
         Bot -- Application logs --> Store
         PI --> Bot
@@ -120,7 +118,7 @@ Configuration is loaded once at startup, parsed into a typed runtime object, and
 - Discord bot token and an optional comma-separated list of allowed channel IDs across guilds. A blank list disables guild responses.
 - An optional comma-separated list of authorized Discord DM user IDs, with no built-in default. A blank list authorizes no DM users and has no effect on guild conversations.
 - Comma-separated allowed guild channel IDs. Threads are matched by parent channel ID.
-- Ollama endpoint and model, with `deepseek-v4-flash:0731-cloud` as the default model.
+- Existing Ollama endpoint, model, and API key variables, plus an optional model config path and API key. A selected JSON definition owns provider identity, endpoint, model, context limits, reasoning support, and PI compatibility flags.
 - Optional GitHub API token and a comma-separated repository allowlist. When the variable is absent, the application fallback is `mbrooks/artemis,HSV-AI/artemis`; the supplied `.env.example` explicitly selects only `HSV-AI/artemis`. A blank token or an explicitly blank repository allowlist disables all GitHub tools.
 - SQLite database path.
 - Log level and other non-secret runtime controls.
@@ -135,7 +133,7 @@ The adapter distinguishes `/ping`, `/uptime`, and `/clear-session` interactions 
 
 #### Slash-command handler
 
-All three commands share one authorization check: DMs require a user in `DISCORD_ALLOWED_USER_ID`, while guild commands require an allowed channel or thread parent and do not use the DM allowlist. None invokes PI or Ollama.
+All three commands share one authorization check: DMs require a user in `DISCORD_ALLOWED_USER_ID`, while guild commands require an allowed channel or thread parent and do not use the DM allowlist. None invokes PI or the model provider.
 
 - `/ping` replies exactly `pong` and does not access conversation persistence.
 - `/uptime` replies `I've been up <duration>.`, where the duration is measured from construction of the running Discord gateway. It does not access conversation persistence.
@@ -164,15 +162,15 @@ Work for the same conversation is serialized so two rapidly arriving messages ca
 
 An authorized `/clear-session` closes the active session for the same conversation key. Closed sessions and their messages remain queryable, but the next normal message creates a new session and sends PI no history from the closed session. Clearing one DM or parent guild channel does not affect any other conversation.
 
-#### PI and Ollama boundary
+#### PI and model-provider boundary
 
-PI is the base conversational harness and owns interaction with the configured model through Ollama. Application code supplies the isolated conversation session and user message, then consumes the assistant response plus any available reasoning or diagnostic metadata.
+PI is the base conversational harness and owns interaction with the configured OpenAI-compatible model endpoint. Application code supplies the isolated conversation session and user message, then consumes the assistant response plus any available reasoning or diagnostic metadata. [Configurable model provider](model-provider.md) defines the provider file and startup contract.
 
-Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, calls Ollama's web-fetch endpoint, and sanitizes the returned page. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers `github_search`, `github_list`, `github_fetch`, `github_create`, `github_update`, and `github_upload_image`. Every operation resolves its repository against that case-insensitive allowlist before making a request; repository-scoped calls require explicit `owner` and `repo` arguments. Searches may omit them to run separately within every allowed repository and never perform a global GitHub search. The tools sanitize GitHub read results as untrusted content. The tool descriptions instruct PI to perform a GitHub mutation only when the current Discord user explicitly requested that specific change; the execution functions enforce repository and parameter validation but do not independently reconstruct conversational intent. CASE-specific watch creation and git-origin discovery are intentionally not ported. PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Tool failures follow the normal generation-failure path and produce no Discord response.
+Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, fetches it directly as a PI custom tool, bounds and extracts its content, and sanitizes the returned page independently of the model provider. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers `github_search`, `github_list`, `github_fetch`, `github_create`, `github_update`, and `github_upload_image`. Every operation resolves its repository against that case-insensitive allowlist before making a request; repository-scoped calls require explicit `owner` and `repo` arguments. Searches may omit them to run separately within every allowed repository and never perform a global GitHub search. The tools sanitize GitHub read results as untrusted content. The tool descriptions instruct PI to perform a GitHub mutation only when the current Discord user explicitly requested that specific change; the execution functions enforce repository and parameter validation but do not independently reconstruct conversational intent. CASE-specific watch creation and git-origin discovery are intentionally not ported. PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Tool failures follow the normal generation-failure path and produce no Discord response.
 
 The system prompt is built from the conversation kind and the tools that were actually registered. It contains a Capability Gap Protocol that tells Artemis to acknowledge an unavailable capability, avoid source exploration or improvised code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when that tool is available. Its Available Tools section is generated from the live custom-tool registry so the prompt does not advertise unregistered tools.
 
-The model name is configuration, not a conditional embedded in application logic. Changing from the default `deepseek-v4-flash:0731-cloud` therefore requires a configuration update and restart, not a code change. Ollama-specific calls remain behind a narrow boundary so unit tests can substitute a deterministic fake.
+Provider identity and model metadata are configuration, not conditionals embedded in application logic. Changing providers therefore requires a JSON configuration update and restart, not a code change. Model discovery and completion remain behind a narrow boundary so unit tests can substitute a deterministic fake.
 
 #### Persistence
 
@@ -202,13 +200,7 @@ Chat content, PI session history, and model-provided reasoning or diagnostics ar
 
 #### Container topology
 
-Docker Compose starts three separate services:
-
-- `ollama`: the model service and an explicit runtime dependency of Artemis, with its own persistent data volume where required.
-- `ollama-model`: a one-shot service that pulls the configured model after Ollama is healthy.
-- `artemis`: the Discord bot application, built from the Artemis Dockerfile, with its SQLite data volume and configuration from `.env`.
-
-The Artemis Dockerfile contains only the application and its runtime dependencies; it does not install or launch Ollama. The Artemis container reaches Ollama by its Compose service name over the internal Compose network. Compose waits for Ollama to become healthy and for `ollama-model` to finish successfully before starting Artemis so the bot does not connect to Discord before the configured model is prepared.
+Base Docker Compose retains three services: `ollama`, the one-shot `ollama-model` pull job, and `artemis`. A deployment-owned override may select an external provider without changing the upstream topology. Artemis performs a bounded `/models` health check before Discord login.
 
 ## Runtime flows
 
@@ -216,7 +208,7 @@ The Artemis Dockerfile contains only the application and its runtime dependencie
 
 1. Load and validate environment configuration.
 2. Open SQLite, enable foreign keys, and apply migrations.
-3. Initialize and health-check the PI/Ollama boundary using the configured model.
+3. Load the model provider definition and health-check its OpenAI-compatible `/models` endpoint.
 4. Connect the Discord client and register the three global slash commands when Discord reports ready.
 5. Log a successful ready event including the connected bot identity and allowed channel IDs, but no secrets.
 
@@ -228,14 +220,14 @@ If configuration, migration, or required model setup fails, startup exits with a
 2. In a DM, silently stop unless the caller is in the configured user allowlist.
 3. In a guild, silently stop unless the channel ID, or a thread's parent channel ID, is in the configured channel allowlist. Guild callers do not require user authorization for `/ping`.
 4. Reply with exactly `pong`.
-5. Do not resolve a conversation, access SQLite, invoke PI, or invoke Ollama.
+5. Do not resolve a conversation, access SQLite, invoke PI, or invoke the model provider.
 
 ### `/uptime`
 
 1. Apply the same DM-user or guild-channel authorization policy as `/ping`.
 2. Measure elapsed time from construction of the running Discord gateway.
 3. Reply `I've been up <duration>.` using seconds below one minute, minutes below one hour, hours and minutes below one day, or days, hours, and minutes thereafter.
-4. Do not resolve a conversation, access SQLite, invoke PI, or invoke Ollama.
+4. Do not resolve a conversation, access SQLite, invoke PI, or invoke the model provider.
 
 ### `/clear-session`
 
@@ -243,7 +235,7 @@ If configuration, migration, or required model setup fails, startup exits with a
 2. Derive the stable conversation key without creating a conversation or session.
 3. Close the active session when one exists and record a `session_cleared` event and application log. Retain the conversation, closed session, and messages.
 4. Reply `Session cleared. I'll start fresh on the next message in this channel.` when a session was closed, otherwise reply `No active session to clear.`
-5. Do not invoke PI or Ollama. The next accepted normal message creates a new active session with empty history.
+5. Do not invoke PI or the model provider. The next accepted normal message creates a new active session with empty history.
 
 ### Normal message
 
@@ -256,7 +248,7 @@ If configuration, migration, or required model setup fails, startup exits with a
 7. Start Discord's typing indicator and refresh it every five seconds while generation remains active.
 8. For an accepted message in a thread, fetch the complete thread in Discord order, including the new message.
 9. Restore or create the durable PI session and persist any new inbound messages.
-10. Submit the current message, or the complete thread snapshot for a thread reply, to PI through the configured Ollama model.
+10. Submit the current message, or the complete thread snapshot for a thread reply, to PI through the configured model provider.
 11. Atomically persist the assistant response and available model diagnostics, then stop refreshing the typing indicator.
 12. Send a DM response as an ordinary channel message. Send a guild-channel or guild-thread response as a reply to the triggering message.
 
@@ -272,8 +264,8 @@ Transient Discord disconnects rely on the Discord client's resume and reconnect 
 
 - Invalid or missing required configuration: fail startup with actionable field names and no secret values.
 - SQLite unavailable or migration failure: fail startup; do not accept messages without persistence.
-- Ollama unavailable during startup validation: report the provider/model failure and remain unhealthy.
-- Ollama or PI failure during a turn: persist the normalized error name and message with correlation IDs, but send nothing to Discord.
+- Model provider unavailable during startup validation: report the provider/model failure and remain unhealthy.
+- Model provider or PI failure during a turn: persist the normalized error name and message with correlation IDs, but send nothing to Discord.
 - Discord disconnect: rely on Discord.js shard reconnect/resume behavior and log disconnect, reconnect, resume, and ready transitions.
 - Duplicate Discord event: return without a second model invocation or duplicate persisted turn.
 - Discord response too long: split at Discord-safe boundaries while retaining one assistant message in conversation history.
@@ -292,20 +284,20 @@ Transient Discord disconnects rely on the Discord client's resume and reconnect 
 
 The expected contributor workflow is:
 
-1. Copy `.env.example` to `.env` and provide Discord credentials and any required Ollama model credentials.
-2. Start the separate Artemis and Ollama containers with `docker compose up`.
+1. Copy `.env.example` to `.env` and provide Discord plus Ollama credentials, then use `docker compose up`. A deployment selecting another provider supplies its own model definition and Compose override.
+2. Start the selected Compose workflow.
 3. Watch readiness and reconnect events with `docker compose logs`.
 4. Stop the stack without deleting the persistent data volume.
 
-The README should document Discord application setup, required intents and permissions, Ollama authentication or model availability, first startup, database location, log access, upgrades, and safe cleanup.
+The README should document Discord application setup, required intents and permissions, model configuration and availability, first startup, database location, log access, upgrades, and safe cleanup.
 
 ## Testing and completion gates
 
-Application code is tested with Vitest. Discord, PI, and Ollama are mocked at their external boundaries; Ollama and Docker integration tests are not required. Unit coverage has global statement, branch, function, and line thresholds of at least 80%.
+Application code is tested with Vitest. Discord, PI, model-provider, and HTTP-fetch boundaries are mocked; model-provider and Docker integration tests are not required. Unit coverage has global statement, branch, function, and line thresholds of at least 80%.
 
 Required tests include:
 
-- `/ping` returns exactly `pong` for allowlisted DM users and any user in allowed guild channels, ignores unauthorized DMs and disallowed guild channels, and proves that persistence, PI, and Ollama are untouched.
+- `/ping` returns exactly `pong` for allowlisted DM users and any user in allowed guild channels, ignores unauthorized DMs and disallowed guild channels, and proves that persistence, PI, and the model provider are untouched.
 - `/uptime` uses the same interaction authorization policy, formats elapsed process time at its unit boundaries, and does not touch persistence or the model.
 - `/clear-session` uses the same interaction authorization policy, resolves threads through their parent channels, closes only the target active session, retains archived history, and gives the next accepted message empty PI history.
 - DMs from users outside the DM user allowlist are silently ignored without persistence or model calls.
@@ -321,7 +313,7 @@ Required tests include:
 - Concurrent messages in one conversation are serialized.
 - Configuration defaults and validation behave as documented, including the default model.
 - Persistence transactions, migrations, and error paths preserve the last valid session state.
-- PI or Ollama failures are logged without creating an assistant turn or sending a Discord response.
+- PI or model-provider failures are logged without creating an assistant turn or sending a Discord response.
 - Only `web_fetch` and token-gated GitHub custom tools are enabled; they sanitize external content, populate the Available Tools prompt registry, include the Capability Gap Protocol, and never enable built-in coding tools.
 - Every Discord message is emitted through the log-level-independent audit path and deduplicated in `incoming_messages` before conversation filtering.
 - Discord reconnect lifecycle events are handled without losing durable context.
@@ -335,7 +327,7 @@ Required tests include:
 | Connect and log success | Adapter unit test plus a documented local smoke check. |
 | Reconnect after interruption | Adapter reconnect-state unit test with the Discord boundary mocked. |
 | Eligible users receive exactly `pong` | Ping unit tests for authorized and unauthorized DMs plus allowed guild channels, allowed threads, and disallowed channels. |
-| Ping does not affect AI or history | Assert zero calls to the persistence, PI, and Ollama boundaries. |
+| Ping does not affect AI or history | Assert zero calls to the persistence, PI, and model-provider boundaries. |
 | Eligible users can inspect uptime | Command tests cover all duration formats and the same DM/guild authorization boundary as ping. |
 | Eligible users can start fresh | Command, coordinator, and repository tests prove `/clear-session` closes only the active session for the resolved conversation, retains archived messages, and creates empty history on the next turn. |
 | Authorized users can chat in DMs | Coordinator unit tests proving the comma-separated user allowlist governs DMs, which need no channel match or mention. |
@@ -359,8 +351,8 @@ Required tests include:
 - Every received Discord message is retained both as a log-level-independent `discord_message_received` application log and as a deduplicated `incoming_messages` audit row.
 - The PI system prompt advertises the actual registered custom tools and directs missing capabilities through the Capability Gap Protocol rather than source exploration or improvised code.
 - SQLite has no automatic retention or deletion policy. Stored chat content, sessions, and model reasoning or diagnostics remain until an operator deliberately removes them.
-- PI or Ollama generation failures are recorded for operators but produce no Discord response.
+- PI or model-provider generation failures are recorded for operators but produce no Discord response.
 - The system prompt is conversation-kind-aware. Guild sessions receive a Discord Channel Limits block capping responses at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained messages; DM sessions never receive it, so direct messages remain unrestricted. Prompt construction is a pure function of the conversation kind, so the model never sees limit messaging in a DM.
-- Docker Compose starts Ollama as a separate dependency container. Ollama is not included in the Artemis Dockerfile or application container.
+- Base Docker Compose retains Ollama and model preparation. Alternate-provider topology and values belong to deployment-owned overrides.
 
 Changes to these decisions should update this document and, when they alter observable behavior, the source issue and acceptance criteria.

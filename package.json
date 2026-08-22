@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Community-run Discord chatbot powered by PI and Ollama",
+  "description": "Community-run Discord chatbot powered by PI and a configurable model provider",
   "engines": {
     "node": ">=24.0.0"
   },

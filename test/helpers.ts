@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import type { ModelProviderConfig } from "../src/config.js";
 import type { InboundMessage, Logger, PiGateway, PiGenerationResult } from "../src/domain.js";
 
 export function createLoggerMock(): Logger {
@@ -19,6 +20,24 @@ export function createPiMock(result?: Partial<PiGenerationResult>): PiGateway {
       model: "test-model",
       ...result
     })
+  };
+}
+
+export function modelConfig(
+  overrides: Partial<ModelProviderConfig> = {}
+): ModelProviderConfig {
+  return {
+    providerId: "test-provider",
+    providerName: "Test Provider",
+    baseUrl: "http://model-provider/v1",
+    modelId: "test-model",
+    apiKey: "local",
+    reasoning: true,
+    contextWindow: 32_000,
+    maxTokens: 4_096,
+    supportsDeveloperRole: false,
+    supportsReasoningEffort: true,
+    ...overrides
   };
 }
 
