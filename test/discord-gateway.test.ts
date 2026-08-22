@@ -260,6 +260,22 @@ describe("Discord helpers", () => {
 });
 
 describe("DiscordGateway", () => {
+  it("registers ping, uptime, and clear-session slash commands", async () => {
+    const client = new FakeClient();
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["group-one"], userIds: ["user"] },
+      { handleMessage: vi.fn() } as unknown as ConversationService,
+      createLoggerMock(),
+      client as unknown as Client
+    );
+    await gateway.start();
+    client.emit(Events.ClientReady, client);
+    await Promise.resolve();
+    expect(client.application.commands.set).toHaveBeenCalledOnce();
+    const commands = vi.mocked(client.application.commands.set).mock.calls[0]?.[0] as Array<{ name: string }>;
+    expect(commands.map((command) => command.name).sort()).toEqual(["clear-session", "ping", "uptime"]);
+  });
+
   it("handles ping for authorized DMs and allowed channels across guilds", async () => {
     const conversations = { handleMessage: vi.fn() } as unknown as ConversationService;
     const gateway = new DiscordGateway(
@@ -509,6 +525,112 @@ describe("DiscordGateway", () => {
     );
   });
 
+  it("clears and confirms the active session for authorized clear-session commands", async () => {
+    const clearSession = vi.fn().mockReturnValue({ cleared: true });
+    const conversations = {
+      handleMessage: vi.fn(),
+      clearSession
+    } as unknown as ConversationService;
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["group-one"], userIds: ["allowed-user"] },
+      conversations,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+    const reply = vi.fn().mockResolvedValue(undefined);
+
+    // authorized DM
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "clear-session",
+      guildId: null,
+      channelId: "dm",
+      channel: null,
+      user: { id: "allowed-user" },
+      reply
+    } as unknown as Interaction);
+    expect(clearSession).toHaveBeenLastCalledWith({ channelId: "dm" });
+    expect(reply).toHaveBeenLastCalledWith(expect.stringMatching(/cleared/i));
+
+    // authorized guild thread, scoped to the parent channel
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "clear-session",
+      guildId: "guild",
+      channelId: "thread",
+      channel: { isThread: () => true, parentId: "group-one" },
+      user: { id: "anyone" },
+      reply
+    } as unknown as Interaction);
+    expect(clearSession).toHaveBeenLastCalledWith({
+      guildId: "guild",
+      channelId: "thread",
+      parentChannelId: "group-one"
+    });
+    expect(reply).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports nothing to clear when no active session exists", async () => {
+    const clearSession = vi.fn().mockReturnValue({ cleared: false });
+    const conversations = {
+      handleMessage: vi.fn(),
+      clearSession
+    } as unknown as ConversationService;
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["group-one"], userIds: ["allowed-user"] },
+      conversations,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+    const reply = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "clear-session",
+      guildId: null,
+      channelId: "dm",
+      channel: null,
+      user: { id: "allowed-user" },
+      reply
+    } as unknown as Interaction);
+    expect(clearSession).toHaveBeenCalledWith({ channelId: "dm" });
+    expect(reply).toHaveBeenCalledWith(expect.stringMatching(/no active session/i));
+  });
+
+  it("ignores clear-session from unauthorized DMs and disallowed channels", async () => {
+    const clearSession = vi.fn();
+    const conversations = {
+      handleMessage: vi.fn(),
+      clearSession
+    } as unknown as ConversationService;
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["group-one"], userIds: ["allowed-user"] },
+      conversations,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+    const reply = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "clear-session",
+      guildId: null,
+      channelId: "dm",
+      channel: null,
+      user: { id: "unauthorized-user" },
+      reply
+    } as unknown as Interaction);
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "clear-session",
+      guildId: "guild",
+      channelId: "not-allowed",
+      channel: { isThread: () => false },
+      user: { id: "allowed-user" },
+      reply
+    } as unknown as Interaction);
+    expect(clearSession).not.toHaveBeenCalled();
+    expect(reply).not.toHaveBeenCalled();
+  });
+
   it("binds Discord lifecycle handlers, registers ping, logs in, and stops", async () => {
     const client = new FakeClient();
     const logger = createLoggerMock();
@@ -533,7 +655,7 @@ describe("DiscordGateway", () => {
     expect(client.application.commands.set).toHaveBeenCalledOnce();
     const commands = vi.mocked(client.application.commands.set).mock.calls[0]?.[0] ?? [];
     expect(commands.map((command: { name: string }) => command.name)).toEqual(
-      expect.arrayContaining(["ping", "uptime"])
+      expect.arrayContaining(["ping", "uptime", "clear-session"])
     );
     expect(logger.info).toHaveBeenCalledWith(
       "discord_ready",

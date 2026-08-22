@@ -4,16 +4,20 @@ import {
   GatewayIntentBits,
   Partials,
   SlashCommandBuilder,
+  type ChatInputCommandInteraction,
   type Interaction,
   type Message,
   type ThreadChannel
 } from "discord.js";
 import type { ConversationService } from "./conversation-service.js";
-import type { InboundMessage, Logger, ResponseIndicator, SourceMessage } from "./domain.js";
+import type { ChannelRef, InboundMessage, Logger, ResponseIndicator, SourceMessage } from "./domain.js";
 import { safeError } from "./logger.js";
 
 const DISCORD_MESSAGE_LIMIT = 2_000;
 const TYPING_REFRESH_INTERVAL_MS = 5_000;
+const CLEAR_SESSION_SUCCESS =
+  "Session cleared. I'll start fresh on the next message in this channel.";
+const CLEAR_SESSION_NOTHING = "No active session to clear.";
 
 const MS_PER_SECOND = 1_000;
 const MS_PER_MINUTE = 60_000;
@@ -247,6 +251,11 @@ export class DiscordGateway {
       case "uptime":
         await interaction.reply(`I've been up ${formatUptime(this.now() - this.startedAt)}.`);
         return;
+      case "clear-session": {
+        const result = this.conversations.clearSession(this.channelRef(interaction));
+        await interaction.reply(result.cleared ? CLEAR_SESSION_SUCCESS : CLEAR_SESSION_NOTHING);
+        return;
+      }
     }
   }
 
@@ -263,6 +272,20 @@ export class DiscordGateway {
       }
     }
     return true;
+  }
+
+  private channelRef(interaction: ChatInputCommandInteraction): ChannelRef {
+    if (!interaction.guildId) {
+      return { channelId: interaction.channelId };
+    }
+    const parentChannelId = interaction.channel?.isThread()
+      ? interaction.channel.parentId
+      : undefined;
+    return {
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      ...(parentChannelId ? { parentChannelId } : {})
+    };
   }
 
   public async handleMessage(message: Message): Promise<void> {
@@ -316,6 +339,10 @@ export class DiscordGateway {
           new SlashCommandBuilder()
             .setName("uptime")
             .setDescription("Show how long Artemis has been running")
+            .toJSON(),
+          new SlashCommandBuilder()
+            .setName("clear-session")
+            .setDescription("Reset the active chat or DM session for this channel")
             .toJSON()
         ])
         .then(() => {

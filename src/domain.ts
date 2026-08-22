@@ -1,6 +1,12 @@
 export type ConversationKind = "dm" | "guild";
 export type ChatRole = "user" | "assistant";
 
+export interface ChannelRef {
+  channelId: string;
+  guildId?: string;
+  parentChannelId?: string;
+}
+
 export interface ConversationIdentity {
   key: string;
   kind: ConversationKind;

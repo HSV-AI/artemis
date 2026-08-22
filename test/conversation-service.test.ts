@@ -34,6 +34,61 @@ describe("conversation identity", () => {
 
 });
 
+describe("ConversationService clearing", () => {
+  let repository: ArtemisRepository | undefined;
+
+  afterEach(() => repository?.close());
+
+  function createService(pi = createPiMock()) {
+    repository = new ArtemisRepository(":memory:");
+    const logger = createLoggerMock();
+    return { service: new ConversationService(options, repository, pi, logger), pi, logger };
+  }
+
+  it("clears the active session so the next message starts fresh while retaining archived history", async () => {
+    const pi = createPiMock();
+    const { service, logger } = createService(pi);
+    await service.handleMessage(
+      inbound({ discordMessageId: "m1", channelId: "dm-clear", content: "first" })
+    );
+
+    const firstSession = repository?.getOrCreateSession(
+      { key: "dm:dm-clear", kind: "dm", channelId: "dm-clear" },
+      "test-model"
+    );
+    expect(firstSession?.id).toBeDefined();
+
+    expect(service.clearSession({ channelId: "dm-clear" })).toEqual({ cleared: true });
+    expect(logger.error).not.toHaveBeenCalled();
+
+    await service.handleMessage(
+      inbound({
+        discordMessageId: "m2",
+        channelId: "dm-clear",
+        content: "fresh"
+      })
+    );
+
+    const secondInput = vi.mocked(pi.generate).mock.calls[1]?.[0];
+    expect(secondInput?.history).toEqual([]);
+
+    const secondSession = repository?.getOrCreateSession(
+      { key: "dm:dm-clear", kind: "dm", channelId: "dm-clear" },
+      "test-model"
+    );
+    expect(secondSession?.id).not.toBe(firstSession?.id);
+    expect(repository?.getHistory(firstSession?.id ?? "")).toEqual([
+      expect.objectContaining({ role: "user", content: "first" }),
+      expect.objectContaining({ role: "assistant", content: "assistant response" })
+    ]);
+  });
+
+  it("reports nothing to clear for a conversation without an active session", () => {
+    const { service } = createService();
+    expect(service.clearSession({ channelId: "never-used" })).toEqual({ cleared: false });
+  });
+});
+
 describe("ConversationService", () => {
   let repository: ArtemisRepository | undefined;
 
