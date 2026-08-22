@@ -155,7 +155,7 @@ docker compose down
 
 ## Automated updates
 
-[`scripts/update-artemis-if-needed.sh`](scripts/update-artemis-if-needed.sh) checks a remote branch for a new commit. When an update exists, it force-aligns the local checkout, refreshes host dependencies if `package.json` or `package-lock.json` changed, and runs `docker compose up -d --build`.
+[`scripts/update-artemis-if-needed.sh`](scripts/update-artemis-if-needed.sh) checks a remote branch for a new commit. When an update exists, it force-aligns the local checkout and runs `docker compose up -d --build`.
 
 Run it on demand from any directory:
 
