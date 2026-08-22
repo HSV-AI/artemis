@@ -12,16 +12,18 @@ Treat statements using **must** as compatibility requirements. Examples and tech
 
 The following behavior is fixed:
 
-- Artemis connects to Discord, registers a global `/ping` command, receives direct messages, and receives messages from channels across any guild the bot has joined.
+- Artemis connects to Discord, registers global `/ping`, `/uptime`, and `/clear-session` commands, receives direct messages, and receives messages from channels across any guild the bot has joined.
 - `DISCORD_ALLOWED_CHANNEL_ID` and `DISCORD_ALLOWED_USER_ID` are comma-separated allowlists. Blank or absent lists are valid and match nothing. Values are trimmed and duplicates are removed.
 - DMs are accepted only from users in the user allowlist. They do not require a mention or channel allowlist entry.
-- Guild conversations are accepted from any user in an allowed channel when the triggering message directly mentions the Artemis bot user or its Discord-managed bot role. The user allowlist does not apply to guild conversations.
+- Guild conversations are accepted from any user in an allowed channel when the triggering message directly mentions the Artemis bot user, mentions its Discord-managed bot role, or replies directly to an Artemis-authored message. The user allowlist does not apply to guild conversations.
 - Guild threads inherit authorization and conversation identity from their parent channel. Each accepted thread reply submits the entire ordered thread, including the new message, as the current prompt.
 - `/ping` in a DM requires an allowed user. `/ping` in a guild requires an allowed channel but does not require an allowed user or mention. An accepted ping responds with exactly `pong` and does not access conversation persistence or the model.
+- `/uptime` uses the same authorization policy and reports elapsed time since the current process started without accessing conversation persistence or the model.
+- `/clear-session` uses the same authorization policy. It closes the active logical session for the DM or parent guild channel, retains archived messages, and causes the next accepted message to start with empty model history.
 - Every Discord message event is logged to the console and SQLite before filtering, including DMs, bot messages, unauthorized messages, unmentioned messages, and messages from disallowed channels.
 - Accepted conversations retain their history in SQLite across restarts. There is no automatic retention or deletion.
 - Model or harness failures are logged and persisted, but produce no Discord response.
-- The model may use explicitly allowlisted custom tools: `web_fetch`, plus six GitHub tools when a token is configured. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled.
+- The model may use explicitly registered custom tools: `web_fetch`, plus six GitHub tools when a token is configured. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Group/channel (guild) assistant responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) self-contained Discord messages per turn. DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind (`guild` vs `dm`).
 - Ollama runs as a separate Docker Compose service. It is not installed in the Artemis application image.
@@ -42,7 +44,7 @@ flowchart LR
     Discord[Discord gateway] --> Normalize[Event normalizer]
     Normalize --> Audit[Audit logger]
     Audit --> Route{Command or message?}
-    Route -->|/ping| Ping[Ping policy]
+    Route -->|slash command| Commands[Command authorization and dispatch]
     Route -->|message| Policy[Conversation policy]
     Policy --> Sessions[Conversation coordinator]
     Sessions --> Store[(SQLite)]
@@ -53,7 +55,8 @@ flowchart LR
     WebFetch --> Ollama
     GitHubTools --> GitHubAPI[GitHub API]
     Model --> Ollama[Ollama service]
-    Ping --> Discord
+    Commands -- clear-session only --> Store
+    Commands --> Discord
     Sessions --> Discord
     Audit --> Console[Standard output]
     Audit --> Store
@@ -71,9 +74,11 @@ Keep the core policy independent from external SDK objects. Discord events shoul
 | DM `/ping` | Author is not allowed, including an empty allowlist | Do nothing. |
 | Guild `/ping` | Channel or thread parent is allowed | Reply exactly `pong`, regardless of user allowlist. |
 | Guild `/ping` | Channel or thread parent is not allowed | Do nothing. |
+| DM or guild `/uptime` | Same authorization as `/ping` | Reply `I've been up <duration>.` without persistence or model access. |
+| DM or guild `/clear-session` | Same authorization as `/ping` | Close the active session for that conversation and confirm the outcome; retain archived history. |
 | Normal DM | Non-bot author is allowed and content is nonblank | Continue the DM conversation without requiring a mention. |
 | Normal DM | Author is not allowed, author is a bot, or content is blank | Do nothing. |
-| Normal guild message | Parent channel is allowed, author is allowed, content is nonblank, and Artemis is directly mentioned | Continue that guild-channel conversation. |
+| Normal guild message | Parent channel is allowed, author is not a bot, content is nonblank, and Artemis is directly mentioned or directly replied to | Continue that guild-channel conversation. |
 | Normal guild message | Any required condition is false | Do nothing. |
 | Model or harness failure | Message otherwise passed policy | Log and persist the failure; send nothing to Discord. |
 
@@ -86,14 +91,14 @@ A guild message counts as mentioning Artemis only when either of these is presen
 - The bot user's Discord ID.
 - A role whose Discord metadata identifies that role as managed by the bot user's ID.
 
-The following must not count:
+The following must not count as a mention or qualifying reply:
 
 - `@everyone` or `@here`.
 - An unrelated user or role.
 - Plain text containing the bot's name.
-- A mention that exists only in replied-to message metadata.
+- A reply to a message whose author is not Artemis.
 
-Do not detect mentions with string matching alone. Use the Discord SDK's structured user and role mention data.
+Do not detect mentions or replies with string matching alone. Use the Discord SDK's structured user and role mention data, including the replied-to user ID.
 
 ### Responses
 
@@ -118,7 +123,7 @@ Before any normalization or filter, emit a structured `discord_message_received`
 - Raw message content.
 - Discord creation time.
 
-This event bypasses the configured log-level threshold. It must be written to standard output and, when the database is available, to the application log table.
+This event bypasses the configured log-level threshold. It must be written to standard output and, when the database is available, to the application log table. After normalization but before conversation filtering, also write one deduplicated `incoming_messages` row containing the fields above plus parent-channel identity and the normalized `mentions_bot` and `replies_to_bot` flags.
 
 ## Normalized contracts
 
@@ -139,6 +144,7 @@ InboundMessage
   content: string
   created_at: ISO-8601 timestamp
   mentions_bot: boolean
+  replies_to_bot: boolean
   load_entire_thread: optional async operation returning SourceMessage[]
 ```
 
@@ -207,16 +213,13 @@ For an accepted message in a thread:
 6. Persist previously unseen source messages.
 7. Build the current prompt from the entire ordered snapshot.
 
-Use this semantic prompt format:
+Use this semantic prompt format, matching the current JSON model-context boundary. Prefix the JSON with `The following JSON contains the complete Discord thread. Respond to the newest message in context.`, followed by a blank line:
 
-```text
-The following is the complete Discord thread. Respond to the newest message in context.
-
-[<timestamp>] <author display name> (<author Discord ID>): <content>
-[<timestamp>] Artemis: <assistant content>
+```json
+{"discordThread":[{"id":"<Discord message ID>","author":{"id":"<Discord user ID>","name":"<display name>"},"role":"user","content":"<message text>","timestamp":"<ISO-8601 timestamp>"}]}
 ```
 
-Repeat one line per message. Label messages authored by the bot as `Artemis`; label other messages with display name and Discord user ID. In a guild thread, any user's new message may trigger generation when the parent channel is allowed and Artemis is directly mentioned.
+The array contains one object per message in oldest-to-newest order. Preserve message ID, author ID, author display name, role, content, and timestamp; normalize blank author IDs or names to `unknown`. A non-thread prompt uses the same object shape under a `discordMessage` key. In a guild thread, any user's new message may trigger generation when the parent channel is allowed and Artemis is directly mentioned or directly replied to.
 
 ## Model and harness behavior
 
@@ -228,7 +231,8 @@ The model-facing implementation must:
 - Supply the complete stored history for the logical session in order.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
 - Enable only `web_fetch` and, when configured, the six GitHub custom tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
-- Apply a system instruction equivalent to: Artemis is a helpful conversational Discord assistant, should answer the latest message directly, and must not claim Discord capabilities it was not given. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. Prompt construction must be a pure function of the conversation kind plus the registered tool registry.
+- Apply a system instruction equivalent to: Artemis is a helpful conversational Discord assistant, should treat each author ID as a distinct speaker, answer the latest message directly, and must not claim Discord capabilities it was not given. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind plus that registry.
+- Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
 - Treat aborted, errored, absent, and blank final responses as failures.
 
@@ -260,7 +264,7 @@ This is a defense-in-depth transformation, not a claim that arbitrary web conten
 
 ### GitHub tool contract
 
-When `GITHUB_TOKEN` or `GITHUB_ALLOWED_REPOSITORY` is blank, register no GitHub tools. Otherwise register `github_search`, `github_list`, `github_fetch`, `github_create`, `github_update`, and `github_upload_image`. These cover repository, issue, pull-request, branch, code, commit, contents, comment, and image operations through the GitHub REST API. Before any request, case-insensitively match the target `owner/repository` against the configured comma-separated allowlist. Require explicit `owner` and `repo` arguments for repository-scoped operations. A search may omit them to run once per allowed repository and merge its bounded results; never issue a global search. Do not require a local git checkout. Sanitize and label GitHub read results as untrusted external data using the same defenses as `web_fetch`. Mutations require an explicit request from the current Discord user. Do not recreate CASE-specific issue watches.
+When `GITHUB_TOKEN` or `GITHUB_ALLOWED_REPOSITORY` is blank, register no GitHub tools. Otherwise register `github_search`, `github_list`, `github_fetch`, `github_create`, `github_update`, and `github_upload_image`. These cover repository, issue, pull-request, branch, code, commit, contents, comment, and image operations through the GitHub REST API. Before any request, case-insensitively match the target `owner/repository` against the configured comma-separated allowlist. Require explicit `owner` and `repo` arguments for repository-scoped operations. A search may omit them to run once per allowed repository and merge its bounded results; never issue a global search. Do not require a local git checkout. Sanitize and label GitHub read results as untrusted external data using the same defenses as `web_fetch`. The registered write-tool guidelines tell the model to mutate only when the current Discord user explicitly requests that specific change. The current execution layer validates parameters and repository scope but does not independently reconstruct conversational intent. Do not recreate CASE-specific issue watches.
 
 ### Using a language without a PI SDK
 
@@ -312,6 +316,8 @@ The minimal logical schema is:
 - At most one active session per conversation.
 - Optional harness session reference or serialized state when the selected harness requires it.
 
+The current implementation uses the logical session ID only and reconstructs a fresh in-memory PI session from the SQLite transcript on every turn. `/clear-session` changes the active row to `closed`; the next accepted message creates a new active row for the same conversation.
+
 ### `messages`
 
 - Monotonically increasing local message ID.
@@ -342,7 +348,17 @@ The minimal logical schema is:
 - Creation timestamp.
 - Index by timestamp and ID.
 
-Source-message insertion must ignore duplicate Discord message IDs. Conversation and session creation, batch source-message insertion, and assistant insertion should each be transactional. A failed generation retains newly accepted source messages and records `generation_failed`, but it must not create an assistant message. A successful generation inserts one assistant record and records `generation_succeeded`.
+### `incoming_messages`
+
+- Monotonically increasing local message ID.
+- Globally unique Discord message ID used to deduplicate redeliveries.
+- Guild, channel, thread, and parent-channel IDs where applicable.
+- Author ID and optional display name.
+- Bot-author, bot-mention, and direct-reply-to-bot flags.
+- Raw content, Discord creation timestamp, and local logging timestamp.
+- Indexes by channel/local ID and Discord creation time/local ID.
+
+Incoming-message and source-message insertion must ignore duplicate Discord message IDs. Conversation and session creation, batch source-message insertion, assistant insertion, and active-session closing should each be transactional. A failed generation retains newly accepted source messages and records `generation_failed`, but it must not create an assistant message. A successful generation inserts one assistant record and records `generation_succeeded`. Every clear attempt records `session_cleared`, including whether an active session existed.
 
 No table has time-based expiration. Operators retain all chat content, reasoning, diagnostics, events, and logs until they deliberately delete records or the data volume.
 
@@ -353,12 +369,12 @@ Emit one-line structured JSON logs to standard output. Persist the same entries 
 If log persistence fails:
 
 1. Keep the original console log.
-2. Write a console-only `log_persistence_failed` error containing the original event name and a sanitized error name and message.
+2. Write a console-only `log_persistence_failed` error containing the original event name and the normalized error name and message.
 3. Do not attempt to persist that secondary error, which would recurse.
 
 Expected lifecycle events include startup, ready, stop, Discord disconnect, reconnect, resume, SDK warnings and errors, command-registration failure, message-handler failure, and generation success or failure.
 
-Error details sent to logs or SQLite must exclude secrets. No model or harness failure text is sent to Discord.
+Application code must not deliberately insert configured secrets into logs or SQLite. Errors are reduced to their name and message, but provider messages may still be sensitive and operator logs must be protected. No model or harness failure text is sent to Discord.
 
 ## Configuration contract
 
@@ -373,7 +389,7 @@ Load local configuration from `.env` or the process environment. Trim scalar val
 | `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Selected model. |
 | `OLLAMA_API_KEY` | No | `ollama` | Placeholder or bearer-token credential. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token; blank disables all GitHub tools. |
-| `GITHUB_ALLOWED_REPOSITORY` | No | `HSV-AI/artemis` | Comma-separated GitHub repository allowlist; blank disables GitHub tools. |
+| `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` in application code | Comma-separated GitHub repository allowlist; blank disables GitHub tools. The supplied `.env.example` explicitly sets only `HSV-AI/artemis`. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
 | `LOG_LEVEL` | No | `info` | Minimum routine level: `debug`, `info`, `warn`, or `error`. |
 
@@ -402,7 +418,7 @@ Each stage should finish with tests before the next begins.
 
 - Create the database parent directory before opening the file.
 - Apply versioned migrations and repository constraints.
-- Implement conversation/session lookup, ordered history, source deduplication, assistant insertion, events, and application logs.
+- Implement conversation/session lookup, active-session closing, ordered history, source and incoming-message deduplication, assistant insertion, events, and application logs.
 - Write every accepted log to console first, then SQLite.
 - Test restart recovery by closing one repository instance and opening another over the same test database.
 
@@ -410,9 +426,9 @@ Each stage should finish with tests before the next begins.
 
 - Request guild, guild-message, direct-message, and message-content gateway intents.
 - Support partial DM channels if required by the chosen SDK.
-- Register the global `/ping` command on ready.
+- Register global `/ping`, `/uptime`, and `/clear-session` commands on ready.
 - Normalize message events without exposing SDK objects to core policy.
-- Compute mentions from parsed user and managed-role metadata.
+- Compute mentions and direct replies from parsed user, managed-role, and replied-user metadata.
 - Page through entire threads.
 - Audit the raw event before filtering.
 - Send ordinary channel messages and split output safely at 2,000 characters.
@@ -422,16 +438,17 @@ Each stage should finish with tests before the next begins.
 
 - Implement the decision table in the documented order.
 - Derive stable conversation keys.
+- Route `/clear-session` through the same identity derivation, close only its active session, and retain archived history.
 - Deduplicate before session or model work.
 - Serialize work per conversation key.
 - Load prior history, persist new source messages, and build the current prompt.
-- Persist successful assistant output or a sanitized failed-generation event.
+- Persist successful assistant output or a failed-generation event containing the normalized error name and message.
 
 ### 6. Implement the harness and model adapters
 
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
-- Register and allowlist `web_fetch` plus token-gated GitHub tools, disable every built-in tool, and apply the Artemis system instruction.
+- Register and allowlist `web_fetch` plus token-gated GitHub tools, disable every built-in tool, and build the Artemis system instruction from conversation kind and the registered-tool metadata, including the Capability Gap Protocol.
 - Add Ollama health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
 
@@ -463,10 +480,12 @@ At minimum, prove all of the following:
 - DM ping accepts only allowed users and returns exactly `pong`.
 - Guild ping accepts any user in an allowed parent channel and rejects a disallowed channel.
 - Ping performs no conversation database, harness, or model call.
+- Uptime uses the ping authorization policy, reports elapsed process time in the documented format, and performs no conversation database, harness, or model call.
+- Clear-session uses the ping authorization policy, resolves a thread through its parent channel, closes only the target active session, retains archived history, and gives the next turn empty history.
 - Allowed DMs do not require mentions or channel entries.
-- Guild messages require an allowed channel and a direct bot user or managed-role mention; they do not require an allowed user.
-- `@everyone`, `@here`, unrelated roles, reply-only mentions, bot authors, and blank content do not trigger generation.
-- Raw message audit occurs for every received message before all filters and bypasses the log threshold.
+- Guild messages require an allowed channel plus a direct bot user/managed-role mention or a direct reply to Artemis; they do not require an allowed user.
+- `@everyone`, `@here`, unrelated roles, replies to non-Artemis users, bot authors, and blank content do not trigger generation.
+- Raw message audit occurs for every received message before all filters, bypasses the log threshold, and creates one deduplicated `incoming_messages` row with normalized mention/reply metadata.
 - Distinct DMs and guild channels never share history.
 - A thread shares its parent guild-channel conversation key.
 - Every accepted thread reply sends the complete ordered thread including the trigger.
@@ -479,7 +498,8 @@ At minimum, prove all of the following:
 - Typing appears only for accepted, non-duplicate messages, refreshes until generation ends, and a typing API failure does not cancel generation.
 - Every guild and guild-thread response chunk replies to the triggering message; DM chunks use ordinary sends.
 - `web_fetch` rejects non-HTTP(S) targets, uses the configured Ollama host and authentication, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
-- GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and prevent implicit mutations.
+- GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and publish the explicit-mutation guideline in the model's tool registry.
+- The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Guild sessions receive the channel-limits system-prompt block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3`, self-contained-thought rule) while DM sessions receive no limit messaging; prompt selection is deterministic from the conversation kind.
 - Console logs continue when SQLite log persistence fails, without recursive failures.
@@ -507,15 +527,16 @@ Do not translate library calls line by line. Rebuild the normalized contracts an
 
 After automated tests pass:
 
-1. Start the stack with blank allowlists and confirm readiness without any DM or guild response.
+1. Start the stack with blank allowlists and confirm readiness without any DM, guild, or command response.
 2. Add one user ID, restart, and confirm that user's DM `/ping` returns `pong` while another user's DM is silent.
-3. Add one channel ID and confirm any guild user can run `/ping` there.
-4. Confirm normal guild chat remains silent until any user directly mentions Artemis in an allowed channel.
-5. Confirm `@everyone`, `@here`, and an unrelated role do not trigger Artemis.
-6. Create a thread, send multiple messages, then mention Artemis from any user and verify the entire thread is represented in stored source messages.
-7. Restart Artemis and confirm the next DM and guild turns retain their respective histories without crossing contexts.
-8. Force a model failure and confirm Discord receives nothing while console and SQLite contain correlated diagnostics.
-9. Inspect the SQLite volume and confirm conversations, sessions, messages, events, and application logs are durable.
+3. Confirm the allowed user receives `/uptime`, then create and clear a DM session and verify the next turn starts fresh while the closed session remains stored.
+4. Add one channel ID and confirm any guild user can run all three commands there.
+5. Confirm normal guild chat remains silent until any user directly mentions Artemis or directly replies to an Artemis message in an allowed channel.
+6. Confirm `@everyone`, `@here`, an unrelated role, and a reply to another user do not trigger Artemis.
+7. Create a thread, send multiple messages, then mention or reply to Artemis from any user and verify the entire thread is represented in stored source messages.
+8. Restart Artemis and confirm the next DM and guild turns retain their respective histories without crossing contexts.
+9. Force a model failure and confirm Discord receives nothing while console and SQLite contain correlated diagnostics.
+10. Inspect the SQLite volume and confirm conversations, sessions, messages, events, application logs, and incoming-message audit rows are durable.
 
 Use test Discord credentials and non-sensitive content for this check because raw messages and model metadata are retained indefinitely.
 
