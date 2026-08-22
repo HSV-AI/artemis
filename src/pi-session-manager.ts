@@ -31,6 +31,45 @@ import { formatDiscordMessage } from "./model-context.js";
 
 const LEGACY_IMPORT_CUSTOM_TYPE = "artemis.legacy_import";
 
+/**
+ * Public PI methods exercised by Artemis's create-session, prompt, extension,
+ * compaction, and tree-editing paths. The installed SDK types check every
+ * signature here even though PI's concrete SessionManager cannot be
+ * structurally implemented because it contains private file-storage state.
+ */
+type PiSessionManagerRuntimeContract = Pick<
+  SessionManager,
+  | "isPersisted"
+  | "getCwd"
+  | "getSessionDir"
+  | "usesDefaultSessionDir"
+  | "getSessionId"
+  | "getSessionFile"
+  | "appendMessage"
+  | "appendThinkingLevelChange"
+  | "appendModelChange"
+  | "appendCompaction"
+  | "appendCustomEntry"
+  | "appendSessionInfo"
+  | "getSessionName"
+  | "appendCustomMessageEntry"
+  | "getLeafId"
+  | "getLeafEntry"
+  | "getEntry"
+  | "getChildren"
+  | "getLabel"
+  | "appendLabelChange"
+  | "getBranch"
+  | "buildContextEntries"
+  | "buildSessionContext"
+  | "getHeader"
+  | "getEntries"
+  | "getTree"
+  | "branch"
+  | "resetLeaf"
+  | "branchWithSummary"
+>;
+
 function createEntryId(existing: ReadonlyMap<string, unknown> | ReadonlySet<string>): string {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const id = randomUUID().slice(0, 8);
@@ -183,7 +222,7 @@ export function importLegacyPiSessions(
  * native entries in Artemis SQLite. Keep the cast isolated in
  * {@link asPiSessionManager} until the SDK exposes a public storage port.
  */
-export class SqlitePiSessionManager {
+export class SqlitePiSessionManager implements PiSessionManagerRuntimeContract {
   private readonly fileEntries: FileEntry[];
   private readonly byId = new Map<string, SessionEntry>();
   private readonly labelsById = new Map<string, string>();

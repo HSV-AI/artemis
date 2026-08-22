@@ -20,8 +20,8 @@
     "guardrail": "npm run lint && npm run typecheck && npm run check:scripts && npm run check:design && npm run test:coverage && npm run build"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.84.2",
-    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
     "better-sqlite3": "^13.0.3",
     "discord.js": "^14.27.0",
     "dotenv": "^17.2.3",

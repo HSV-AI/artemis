@@ -46,6 +46,8 @@ Discord message -> conversation coordinator -> active logical session ID
 
 The installed PI SDK accepts its concrete `SessionManager` but does not expose a storage-provider interface. Artemis therefore keeps a narrow adapter at that boundary. It uses PI's exported native entry types and context-building functions while directing header creation, ordered loads, appends, and format migrations through the SQLite session store. The compatibility cast is isolated to this adapter and must be removed in favor of an SDK storage port when one becomes available.
 
+Artemis pins the PI AI and coding-agent packages to the exact compatibility-tested version. The adapter implements an explicit `Pick<SessionManager, ...>` contract for every PI method used by the create-session, prompt, extension, compaction, and tree-editing paths. PI's file-session lifecycle methods are deliberately outside that contract because SQLite owns persistence. A real-SDK smoke test creates an agent session and completes a prompt through the adapter with a faux model-provider boundary. Any PI upgrade must update the exact versions, compile this contract, and pass that smoke test before publication.
+
 Every PI session begins with one native session header. Every later native entry retains PI's JSON representation, entry type, entry ID, parent ID, timestamp, and payload. Opening a session performs one ordered SQLite read and builds PI's in-memory indexes directly; it does not convert or append `StoredMessage[]`.
 
 ### Legacy import
@@ -53,6 +55,12 @@ Every PI session begins with one native session header. Every later native entry
 Migration 4 creates the native PI tables without fabricating information that the old transcript never captured. After provider validation and before Discord login, Artemis finds every logical session that has normalized messages but no native PI state and imports it once.
 
 The import preserves the available user content, structured Discord speaker metadata, assistant text, reasoning, diagnostics, saved response model, and timestamps. It cannot recover historical tool entries, compactions, tree structure, or usage. Each imported session is therefore marked `legacy_import_incomplete` in `pi_sessions.history_completeness` and receives a native `artemis.legacy_import` custom entry listing the unavailable state. Imported assistant usage is zero only as an explicitly incomplete compatibility value; it must never be presented as complete historical accounting. A repeated startup skips sessions that already have a `pi_sessions` row.
+
+## Performance considerations
+
+Each generation currently restores the selected logical session with one indexed, ordered SQLite query and parses every native entry for that session. The work is isolated from other sessions but grows linearly with the selected session's retained entry count. Artemis does not retain live PI managers across turns because a process-local cache would add eviction, concurrency, and clear-session lifecycle requirements. Issue [#35](https://github.com/HSV-AI/artemis/issues/35) tracks measurements and requires evidence before introducing such a cache.
+
+The one-time legacy import currently discovers all unimported logical sessions and materializes their normalized histories before writing native entries. That keeps the migration simple and idempotent for the current deployment scale, but it can increase startup memory for an unusually large legacy database. Issue #35 also tracks a bounded-batch importer if measurements show that eager migration is unsafe.
 
 ## Configuration
 
@@ -88,6 +96,7 @@ Application code must not deliberately insert configured credentials into either
 - Session-manager tests cover exact usage, tool results, compaction metadata, parent relationships, labels, branches, restart recovery, append failure, and archived clear-session state.
 - Legacy-import tests prove the import is idempotent, preserves structured speaker attribution, writes both incomplete markers, and does not claim historical usage is known.
 - Gateway and coordinator tests prove normal generation no longer accepts or replays `history` and continues to dispose the live PI session.
+- The SDK-compatibility test uses the real pinned PI SDK with its faux provider to create an agent session, complete a prompt, append native entries through SQLite, dispose the agent, and restore the resulting context. It does not mock `createAgentSession`.
 - `npm run check:design` and `npm run guardrail` remain the completion gates.
 
 ## References
@@ -97,3 +106,4 @@ Application code must not deliberately insert configured credentials into either
 - [Clean-room rebuild guide](rebuild-guide.md)
 - [Design document index](README.md)
 - [Issue #31](https://github.com/HSV-AI/artemis/issues/31)
+- [Performance follow-up #35](https://github.com/HSV-AI/artemis/issues/35)
