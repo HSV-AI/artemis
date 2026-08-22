@@ -95,7 +95,7 @@ describe("update-artemis-if-needed.sh", () => {
     expect(result.commands).not.toContain("docker compose");
   });
 
-  it("switches branches and rebuilds Compose", async () => {
+  it("switches branches and rebuilds Compose without a host dependency install", async () => {
     const result = await runUpdater({
       hasUpdate: true,
       currentBranch: "feature"
