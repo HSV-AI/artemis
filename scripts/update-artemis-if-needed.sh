@@ -47,11 +47,6 @@ fi
 
 MANIFEST_CHECKSUM_AFTER="$(manifest_checksum)"
 
-if [[ "${MANIFEST_CHECKSUM_BEFORE}" != "${MANIFEST_CHECKSUM_AFTER}" ]]; then
-  echo "Dependencies changed. Running npm install."
-  npm install
-fi
-
 echo "Rebuilding and restarting Artemis through Docker Compose."
 docker compose up -d --build
 
