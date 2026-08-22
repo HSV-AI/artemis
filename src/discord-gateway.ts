@@ -2,6 +2,7 @@ import {
   Client,
   Events,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   SlashCommandBuilder,
   type ChatInputCommandInteraction,
@@ -200,6 +201,8 @@ export interface DiscordGatewayOptions {
   token: string;
   channelIds: readonly string[];
   userIds: readonly string[];
+  suppressEmbeds?: boolean;
+  embedsAllowedChannelIds?: readonly string[];
   startedAt?: number;
   now?: () => number;
 }
@@ -208,6 +211,8 @@ export class DiscordGateway {
   private bound = false;
   private readonly allowedChannelIds: ReadonlySet<string>;
   private readonly allowedUserIds: ReadonlySet<string>;
+  private readonly suppressEmbeds: boolean;
+  private readonly embedsAllowedChannelIds: ReadonlySet<string>;
   private readonly startedAt: number;
   private readonly now: () => number;
 
@@ -227,6 +232,8 @@ export class DiscordGateway {
   ) {
     this.allowedChannelIds = new Set(options.channelIds);
     this.allowedUserIds = new Set(options.userIds);
+    this.suppressEmbeds = options.suppressEmbeds ?? true;
+    this.embedsAllowedChannelIds = new Set(options.embedsAllowedChannelIds ?? []);
     this.startedAt = options.startedAt ?? Date.now();
     this.now = options.now ?? (() => Date.now());
   }
@@ -244,16 +251,20 @@ export class DiscordGateway {
     if (!interaction.isChatInputCommand() || !this.isInteractionAuthorized(interaction)) {
       return;
     }
+    const channelId = this.interactionChannelId(interaction);
     switch (interaction.commandName) {
       case "ping":
-        await interaction.reply("pong");
+        await interaction.reply(this.messageOptions("pong", channelId));
         return;
       case "uptime":
-        await interaction.reply(`I've been up ${formatUptime(this.now() - this.startedAt)}.`);
+        await interaction.reply(
+          this.messageOptions(`I've been up ${formatUptime(this.now() - this.startedAt)}.`, channelId)
+        );
         return;
       case "clear-session": {
         const result = this.conversations.clearSession(this.channelRef(interaction));
-        await interaction.reply(result.cleared ? CLEAR_SESSION_SUCCESS : CLEAR_SESSION_NOTHING);
+        const text = result.cleared ? CLEAR_SESSION_SUCCESS : CLEAR_SESSION_NOTHING;
+        await interaction.reply(this.messageOptions(text, channelId));
         return;
       }
     }
@@ -317,12 +328,34 @@ export class DiscordGateway {
       return;
     }
     for (const chunk of splitDiscordMessage(response)) {
+      const options = this.messageOptions(chunk, this.messageChannelId(message));
       if (message.guildId) {
-        await message.reply(chunk);
+        await message.reply(options);
       } else {
-        await message.channel.send(chunk);
+        await message.channel.send(options);
       }
     }
+  }
+
+  private messageChannelId(message: Message): string {
+    return message.channel.isThread() ? message.channel.parentId ?? message.channelId : message.channelId;
+  }
+
+  private interactionChannelId(interaction: ChatInputCommandInteraction): string {
+    return interaction.channel?.isThread()
+      ? interaction.channel.parentId ?? interaction.channelId
+      : interaction.channelId;
+  }
+
+  private messageOptions(
+    content: string,
+    channelId: string
+  ): { content: string; flags?: MessageFlags.SuppressEmbeds } {
+    if (!this.suppressEmbeds || this.embedsAllowedChannelIds.has(channelId)) {
+      return { content };
+    }
+    const flags: MessageFlags.SuppressEmbeds = MessageFlags.SuppressEmbeds;
+    return { content, flags };
   }
 
   private bindEvents(): void {

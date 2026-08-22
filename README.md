@@ -51,6 +51,8 @@ cp .env.example .env
 | `DISCORD_TOKEN` | Yes | — | Discord bot token. |
 | `DISCORD_ALLOWED_CHANNEL_ID` | No | Empty | Comma-separated guild channel IDs where Artemis may respond. A blank list disables guild responses. Threads use their parent channel ID. |
 | `DISCORD_ALLOWED_USER_ID` | No | Empty | Comma-separated Discord user IDs allowed to converse with Artemis in DMs. A blank list disables DM responses. This setting does not govern guild messages. |
+| `DISCORD_SUPPRESS_EMBEDS` | No | `true` | When `true`, Artemis sends every outbound Discord message with link embeds suppressed, so Discord does not render link-preview cards. Set to `false` to re-enable embeds globally. |
+| `DISCORD_EMBEDS_ALLOWED_CHANNEL_ID` | No | Empty | Comma-separated channel IDs where link embeds are re-enabled even when `DISCORD_SUPPRESS_EMBEDS` is `true`. Threads use their parent channel ID. |
 | `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | Ollama's OpenAI-compatible endpoint. Compose enforces this internal URL. |
 | `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Model selected by PI. |
 | `OLLAMA_API_KEY` | No | `ollama` | Placeholder for local Ollama, or bearer token for a compatible remote endpoint. |

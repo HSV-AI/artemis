@@ -14,7 +14,7 @@ The implementation uses PI and the PI SDK as the conversational harness, Ollama 
 
 ## Design document map
 
-Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). The complete catalog is maintained in the [design document index](README.md).
+Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). [Discord link-embed suppression](discord-link-embeds.md) enforces removal of link-preview cards on every outbound Discord message at the application layer, independent of the model, with a global default and per-channel override. The complete catalog is maintained in the [design document index](README.md).
 
 ## Goals
 

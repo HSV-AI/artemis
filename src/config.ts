@@ -9,6 +9,8 @@ export interface ArtemisConfig {
   discordToken: string;
   discordAllowedChannelIds: readonly string[];
   discordUserIds: readonly string[];
+  discordSuppressEmbeds: boolean;
+  discordEmbedsAllowedChannelIds: readonly string[];
   ollamaBaseUrl: string;
   ollamaModel: string;
   ollamaApiKey: string;
@@ -73,11 +75,31 @@ function parseLogLevel(value: string): LogLevel {
   throw new Error("Invalid configuration: LOG_LEVEL must be debug, info, warn, or error");
 }
 
+function parseBoolean(value: string, name: string, defaultValue: boolean): boolean {
+  const raw = value.trim();
+  if (!raw) {
+    return defaultValue;
+  }
+  if (raw === "true") {
+    return true;
+  }
+  if (raw === "false") {
+    return false;
+  }
+  throw new Error(`Invalid configuration: ${name} must be true or false`);
+}
+
 export function parseConfig(env: Environment = process.env): ArtemisConfig {
   return {
     discordToken: required(env, "DISCORD_TOKEN"),
     discordAllowedChannelIds: parseCommaSeparatedIds(env.DISCORD_ALLOWED_CHANNEL_ID),
     discordUserIds: parseCommaSeparatedIds(env.DISCORD_ALLOWED_USER_ID),
+    discordSuppressEmbeds: parseBoolean(
+      valueOrDefault(env, "DISCORD_SUPPRESS_EMBEDS", "true"),
+      "DISCORD_SUPPRESS_EMBEDS",
+      true
+    ),
+    discordEmbedsAllowedChannelIds: parseCommaSeparatedIds(env.DISCORD_EMBEDS_ALLOWED_CHANNEL_ID),
     ollamaBaseUrl: parseUrl(
       valueOrDefault(env, "OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL),
       "OLLAMA_BASE_URL"

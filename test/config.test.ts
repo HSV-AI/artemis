@@ -17,6 +17,8 @@ describe("parseConfig", () => {
       discordToken: "token",
       discordAllowedChannelIds: [],
       discordUserIds: [],
+      discordSuppressEmbeds: true,
+      discordEmbedsAllowedChannelIds: [],
       ollamaBaseUrl: DEFAULT_OLLAMA_BASE_URL,
       ollamaModel: DEFAULT_OLLAMA_MODEL,
       ollamaApiKey: "ollama",
@@ -105,5 +107,35 @@ describe("parseConfig", () => {
       DISCORD_TOKEN: "token",
       GITHUB_ALLOWED_REPOSITORY: "owner/repo?ref=main"
     })).toThrow("GITHUB_ALLOWED_REPOSITORY");
+  });
+
+  it("suppresses Discord link embeds by default and accepts an explicit disable", () => {
+    expect(parseConfig({ DISCORD_TOKEN: "token" }).discordSuppressEmbeds).toBe(true);
+    expect(
+      parseConfig({ DISCORD_TOKEN: "token", DISCORD_SUPPRESS_EMBEDS: "false" }).discordSuppressEmbeds
+    ).toBe(false);
+    expect(
+      parseConfig({ DISCORD_TOKEN: "token", DISCORD_SUPPRESS_EMBEDS: "true" }).discordSuppressEmbeds
+    ).toBe(true);
+  });
+
+  it("rejects an invalid DISCORD_SUPPRESS_EMBEDS value", () => {
+    expect(() => parseConfig({ DISCORD_TOKEN: "token", DISCORD_SUPPRESS_EMBEDS: "yes" })).toThrow(
+      "Invalid configuration: DISCORD_SUPPRESS_EMBEDS must be true or false"
+    );
+  });
+
+  it("parses DISCORD_EMBEDS_ALLOWED_CHANNEL_ID as a trimmed, deduplicated allowlist", () => {
+    expect(
+      parseConfig({
+        DISCORD_TOKEN: "token",
+        DISCORD_EMBEDS_ALLOWED_CHANNEL_ID: " channel-one, channel-two, channel-one "
+      }).discordEmbedsAllowedChannelIds
+    ).toEqual(["channel-one", "channel-two"]);
+    expect(parseConfig({ DISCORD_TOKEN: "token" }).discordEmbedsAllowedChannelIds).toEqual([]);
+    expect(
+      parseConfig({ DISCORD_TOKEN: "token", DISCORD_EMBEDS_ALLOWED_CHANNEL_ID: ", ," })
+        .discordEmbedsAllowedChannelIds
+    ).toEqual([]);
   });
 });
