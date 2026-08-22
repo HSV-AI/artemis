@@ -50,7 +50,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   }
 }));
 
-import { PiSdkGateway, piInternals } from "../src/pi-gateway.js";
+import { PiSdkGateway, GROUP_CHANNEL_MULTI_MESSAGE_MAX, buildSystemPrompt, piInternals } from "../src/pi-gateway.js";
 
 const usage: Usage = {
   input: 1,
@@ -77,17 +77,18 @@ function assistant(overrides: Partial<AssistantMessage> = {}): AssistantMessage 
 
 describe("buildSystemPrompt", () => {
   it("includes the Capability Gap Protocol and an Available Tools section", () => {
-    const prompt = piInternals.buildSystemPrompt([]);
+    const prompt = piInternals.buildSystemPrompt("dm", []);
     expect(prompt).toContain("Treat each author ID as a distinct speaker");
     expect(prompt).toContain("## Capability Gap Protocol");
     expect(prompt).toContain("github_create");
     expect(prompt).toContain("## Available Tools");
     expect(prompt).toContain("No tools are currently registered");
     expect(prompt).not.toContain("- web_fetch");
+    expect(prompt).not.toContain("Discord Channel Limits");
   });
 
   it("registers each tool's snippet, description, and guidelines", () => {
-    const prompt = piInternals.buildSystemPrompt([
+    const prompt = piInternals.buildSystemPrompt("dm", [
       {
         name: "web_fetch",
         description: "Fetch and read the text content from a web page URL.",
@@ -110,7 +111,7 @@ describe("buildSystemPrompt", () => {
   });
 
   it("falls back to the description when a tool has no promptSnippet", () => {
-    const prompt = piInternals.buildSystemPrompt([
+    const prompt = piInternals.buildSystemPrompt("dm", [
       { name: "ad_hoc", description: "Does something useful." }
     ]);
     expect(prompt).toContain("- ad_hoc: Does something useful.");
@@ -256,7 +257,8 @@ describe("PiSdkGateway", () => {
           createdAt: "2026-08-19T00:00:00.000Z"
         }
       ],
-      prompt: "new prompt"
+      prompt: "new prompt",
+      conversationKind: "guild"
     });
     expect(mocks.appendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -306,7 +308,7 @@ describe("PiSdkGateway", () => {
       },
       vi.fn()
     );
-    await gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt" });
+    await gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt", conversationKind: "guild" });
     expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       tools: [
         "web_fetch", "github_search", "github_list", "github_fetch",
@@ -326,13 +328,114 @@ describe("PiSdkGateway", () => {
     );
     mocks.runtime.getModel.mockReturnValueOnce(undefined);
     await expect(
-      gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt" })
+      gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt", conversationKind: "guild" })
     ).rejects.toThrow("Configured Ollama model is unavailable");
 
     mocks.session.messages = [];
     await expect(
-      gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt" })
+      gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt", conversationKind: "guild" })
     ).rejects.toThrow("PI completed without an assistant message");
     expect(mocks.session.dispose).toHaveBeenCalled();
+  });
+});
+
+describe("system prompt Discord channel limits", () => {
+  async function captureSystemPrompt(kind: "dm" | "guild"): Promise<string> {
+    mocks.resourceLoaderConstructor.mockClear();
+    mocks.session.messages = [assistant()];
+    mocks.session.prompt.mockResolvedValue(undefined);
+    mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
+    const gateway = new PiSdkGateway(
+      { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
+    );
+    await gateway.generate({
+      logicalSessionId: "logical",
+      conversationKind: kind,
+      history: [],
+      prompt: "prompt"
+    });
+    const options = mocks.resourceLoaderConstructor.mock.calls.at(-1)?.[0] as
+      | { systemPrompt?: string }
+      | undefined;
+    if (!options?.systemPrompt) {
+      throw new Error("DefaultResourceLoader was not constructed with a system prompt");
+    }
+    return options.systemPrompt;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.runtime.getModel.mockReturnValue({ provider: "ollama", id: "model" });
+    mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
+    mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
+    mocks.loaderReload.mockResolvedValue(undefined);
+  });
+
+  it("exposes the GROUP_CHANNEL_MULTI_MESSAGE_MAX constant equal to 3", () => {
+    expect(GROUP_CHANNEL_MULTI_MESSAGE_MAX).toBe(3);
+  });
+
+  it("deterministically includes channel limits only for guild sessions", async () => {
+    const guild = await captureSystemPrompt("guild");
+    const dm = await captureSystemPrompt("dm");
+    expect(guild).toContain("Discord Channel Limits");
+    expect(dm).not.toContain("Discord Channel Limits");
+    expect(buildSystemPrompt("guild")).toContain("Discord Channel Limits");
+    expect(buildSystemPrompt("dm")).not.toContain("Discord Channel Limits");
+  });
+
+  it("documents the GROUP_CHANNEL_MULTI_MESSAGE_MAX constant in the guild prompt", async () => {
+    const prompt = await captureSystemPrompt("guild");
+    expect(prompt).toContain("GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3");
+  });
+
+  it("caps group/channel responses at 3 messages in the guild prompt", async () => {
+    const prompt = await captureSystemPrompt("guild");
+    expect(prompt).toContain("up to 3 messages");
+  });
+
+  it("requires each message to be a self-contained thought in the guild prompt", async () => {
+    const prompt = await captureSystemPrompt("guild");
+    expect(prompt).toContain("self-contained thought");
+    expect(prompt).toContain("never split a sentence across messages");
+  });
+
+  it("never shows channel-limit messaging to DM sessions", async () => {
+    const prompt = await captureSystemPrompt("dm");
+    expect(prompt).not.toContain("Discord Channel Limits");
+    expect(prompt).not.toContain("up to 3 messages");
+    expect(prompt).not.toContain("self-contained thought");
+    expect(prompt).not.toContain("GROUP_CHANNEL_MULTI_MESSAGE_MAX");
+  });
+
+  it("caches the resource loader per conversation kind", async () => {
+    mocks.resourceLoaderConstructor.mockClear();
+    mocks.session.messages = [assistant()];
+    mocks.session.prompt.mockResolvedValue(undefined);
+    mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
+    const gateway = new PiSdkGateway(
+      { ollamaBaseUrl: "http://ollama/v1", ollamaModel: "model", ollamaApiKey: "ollama" },
+      vi.fn()
+    );
+    await gateway.generate({
+      logicalSessionId: "logical",
+      conversationKind: "guild",
+      history: [],
+      prompt: "prompt"
+    });
+    await gateway.generate({
+      logicalSessionId: "logical",
+      conversationKind: "guild",
+      history: [],
+      prompt: "prompt"
+    });
+    await gateway.generate({
+      logicalSessionId: "logical",
+      conversationKind: "dm",
+      history: [],
+      prompt: "prompt"
+    });
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
   });
 });

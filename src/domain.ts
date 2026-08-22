@@ -54,6 +54,7 @@ export interface StoredMessage extends SourceMessage {
 
 export interface PiGenerationInput {
   logicalSessionId: string;
+  conversationKind: ConversationKind;
   history: StoredMessage[];
   prompt: string;
 }

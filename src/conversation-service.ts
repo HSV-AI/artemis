@@ -99,6 +99,7 @@ export class ConversationService {
           : formatDiscordMessage(message);
         const result = await this.pi.generate({
           logicalSessionId: session.id,
+          conversationKind: identity.kind,
           history: priorHistory,
           prompt
         });
