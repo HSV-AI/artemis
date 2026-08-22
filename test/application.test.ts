@@ -9,6 +9,8 @@ const config: ArtemisConfig = {
   discordToken: "token",
   discordAllowedChannelIds: ["channel-one", "channel-two"],
   discordUserIds: ["user-one", "user-two"],
+  discordSuppressEmbeds: true,
+  discordEmbedsAllowedChannelIds: [],
   ollamaBaseUrl: "http://ollama:11434/v1",
   ollamaModel: "model",
   ollamaApiKey: "ollama",

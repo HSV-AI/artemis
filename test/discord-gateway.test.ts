@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { Collection, Events, type Client, type Interaction, type Message, type ThreadChannel } from "discord.js";
+import { Collection, Events, MessageFlags, type Client, type Interaction, type Message, type ThreadChannel } from "discord.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationService } from "../src/conversation-service.js";
 import type { InboundMessage } from "../src/domain.js";
@@ -345,7 +345,7 @@ describe("DiscordGateway", () => {
     } as unknown as Interaction);
     await gateway.handleInteraction({ isChatInputCommand: () => false } as unknown as Interaction);
     expect(reply).toHaveBeenCalledTimes(4);
-    expect(reply).toHaveBeenNthCalledWith(1, "pong");
+    expect(reply).toHaveBeenNthCalledWith(1, expect.objectContaining({ content: "pong" }));
   });
 
   it("replies to /uptime with elapsed time since startup for authorized contexts", async () => {
@@ -368,7 +368,7 @@ describe("DiscordGateway", () => {
       user: { id: "allowed-user" },
       reply
     } as unknown as Interaction);
-    expect(reply).toHaveBeenCalledWith("I've been up 3d 4h 12m.");
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ content: "I've been up 3d 4h 12m." }));
 
     const unauthorizedReply = vi.fn().mockResolvedValue(undefined);
     await gateway.handleInteraction({
@@ -455,7 +455,7 @@ describe("DiscordGateway", () => {
         }
       })
     );
-    expect(dmSend).toHaveBeenCalledWith("response");
+    expect(dmSend).toHaveBeenCalledWith(expect.objectContaining({ content: "response" }));
     expect(dmReply).not.toHaveBeenCalled();
   });
 
@@ -610,7 +610,7 @@ describe("DiscordGateway", () => {
       reply
     } as unknown as Interaction);
     expect(clearSession).toHaveBeenLastCalledWith({ channelId: "dm" });
-    expect(reply).toHaveBeenLastCalledWith(expect.stringMatching(/cleared/i));
+    expect(reply).toHaveBeenLastCalledWith(expect.objectContaining({ content: expect.stringMatching(/cleared/i) }));
 
     // authorized guild thread, scoped to the parent channel
     await gateway.handleInteraction({
@@ -653,7 +653,7 @@ describe("DiscordGateway", () => {
       reply
     } as unknown as Interaction);
     expect(clearSession).toHaveBeenCalledWith({ channelId: "dm" });
-    expect(reply).toHaveBeenCalledWith(expect.stringMatching(/no active session/i));
+    expect(reply).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringMatching(/no active session/i) }));
   });
 
   it("ignores clear-session from unauthorized DMs and disallowed channels", async () => {
@@ -728,5 +728,194 @@ describe("DiscordGateway", () => {
     );
     gateway.stop();
     expect(client.destroy).toHaveBeenCalledOnce();
+  });
+});
+
+describe("DiscordGateway link-embed suppression", () => {
+  it("suppresses embeds on guild replies and DM sends by default", async () => {
+    const conversations = {
+      handleMessage: vi.fn().mockResolvedValue("response with https://example.com link"),
+      logMessage: vi.fn()
+    } as unknown as ConversationService;
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["channel"], userIds: ["user"] },
+      conversations,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+
+    const guildReply = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleMessage(
+      fakeMessage({
+        guildId: "guild",
+        reply: guildReply,
+        channel: {
+          isThread: () => false,
+          isSendable: () => true,
+          sendTyping: vi.fn().mockResolvedValue(undefined),
+          send: vi.fn()
+        }
+      })
+    );
+    expect(guildReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "response with https://example.com link",
+        flags: MessageFlags.SuppressEmbeds
+      })
+    );
+
+    const dmSend = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleMessage(
+      fakeMessage({
+        reply: vi.fn(),
+        channel: {
+          isThread: () => false,
+          isSendable: () => true,
+          sendTyping: vi.fn().mockResolvedValue(undefined),
+          send: dmSend
+        }
+      })
+    );
+    expect(dmSend).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: "response with https://example.com link",
+        flags: MessageFlags.SuppressEmbeds
+      })
+    );
+  });
+
+  it("suppresses embeds on slash-command replies by default", async () => {
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["group-one"], userIds: ["allowed-user"] },
+      { handleMessage: vi.fn() } as unknown as ConversationService,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+    const reply = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleInteraction({
+      isChatInputCommand: () => true,
+      commandName: "ping",
+      guildId: null,
+      channelId: "dm",
+      channel: null,
+      user: { id: "allowed-user" },
+      reply
+    } as unknown as Interaction);
+    expect(reply).toHaveBeenCalledWith(
+      expect.objectContaining({ content: "pong", flags: MessageFlags.SuppressEmbeds })
+    );
+  });
+
+  it("omits the suppress flag when suppression is globally disabled", async () => {
+    const conversations = {
+      handleMessage: vi.fn().mockResolvedValue("response https://example.com"),
+      logMessage: vi.fn()
+    } as unknown as ConversationService;
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["channel"], userIds: ["user"], suppressEmbeds: false },
+      conversations,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+    const dmSend = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleMessage(
+      fakeMessage({
+        reply: vi.fn(),
+        channel: {
+          isThread: () => false,
+          isSendable: () => true,
+          sendTyping: vi.fn().mockResolvedValue(undefined),
+          send: dmSend
+        }
+      })
+    );
+    expect(dmSend).toHaveBeenCalledWith(expect.objectContaining({ content: "response https://example.com" }));
+    expect(dmSend).not.toHaveBeenCalledWith(expect.objectContaining({ flags: expect.anything() }));
+  });
+
+  it("omits the suppress flag for channels in the embed allowlist override", async () => {
+    const conversations = {
+      handleMessage: vi.fn().mockResolvedValue("response https://example.com"),
+      logMessage: vi.fn()
+    } as unknown as ConversationService;
+    const gateway = new DiscordGateway(
+      {
+        token: "token",
+        channelIds: ["channel", "parent"],
+        userIds: ["user"],
+        embedsAllowedChannelIds: ["channel"]
+      },
+      conversations,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+    const allowedSend = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleMessage(
+      fakeMessage({
+        reply: vi.fn(),
+        channel: {
+          isThread: () => false,
+          isSendable: () => true,
+          sendTyping: vi.fn().mockResolvedValue(undefined),
+          send: allowedSend
+        }
+      })
+    );
+    expect(allowedSend).toHaveBeenCalledWith(expect.objectContaining({ content: "response https://example.com" }));
+    expect(allowedSend).not.toHaveBeenCalledWith(expect.objectContaining({ flags: expect.anything() }));
+
+    const suppressedReply = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleMessage(
+      fakeMessage({
+        guildId: "guild",
+        channelId: "other",
+        reply: suppressedReply,
+        channel: {
+          isThread: () => false,
+          isSendable: () => true,
+          sendTyping: vi.fn().mockResolvedValue(undefined),
+          send: vi.fn()
+        }
+      })
+    );
+    expect(suppressedReply).toHaveBeenCalledWith(
+      expect.objectContaining({ flags: MessageFlags.SuppressEmbeds })
+    );
+  });
+
+  it("resolves the embed override through a thread's parent channel", async () => {
+    const conversations = {
+      handleMessage: vi.fn().mockResolvedValue("response https://example.com"),
+      logMessage: vi.fn()
+    } as unknown as ConversationService;
+    const gateway = new DiscordGateway(
+      {
+        token: "token",
+        channelIds: ["parent"],
+        userIds: ["user"],
+        embedsAllowedChannelIds: ["parent"]
+      },
+      conversations,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+    const threadReply = vi.fn().mockResolvedValue(undefined);
+    await gateway.handleMessage(
+      fakeMessage({
+        guildId: "guild",
+        channelId: "thread",
+        reply: threadReply,
+        channel: {
+          id: "thread",
+          isThread: () => true,
+          parentId: "parent",
+          isSendable: () => true,
+          sendTyping: vi.fn().mockResolvedValue(undefined),
+          send: vi.fn()
+        }
+      })
+    );
+    expect(threadReply).toHaveBeenCalledWith(expect.objectContaining({ content: "response https://example.com" }));
+    expect(threadReply).not.toHaveBeenCalledWith(expect.objectContaining({ flags: expect.anything() }));
   });
 });

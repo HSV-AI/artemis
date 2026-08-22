@@ -44,7 +44,9 @@ export class ArtemisApplication {
         {
           token: config.discordToken,
           channelIds: config.discordAllowedChannelIds,
-          userIds: config.discordUserIds
+          userIds: config.discordUserIds,
+          suppressEmbeds: config.discordSuppressEmbeds,
+          embedsAllowedChannelIds: config.discordEmbedsAllowedChannelIds
         },
         conversations,
         this.logger

@@ -110,6 +110,10 @@ Discord limits message content to 2,000 characters. Split longer responses into 
 
 The 2,000-character split is a transport concern. Separately, group/channel (guild) responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) discrete Discord messages per assistant turn. This is a model-facing instruction, not a post-hoc truncation: the system prompt told the model the cap and that each message must be a complete, self-contained thought with no sentence split across messages. Direct-message responses are not subject to any message-count or response-length instruction. The channel-limit instruction is presented to the model only for guild sessions; DM sessions must never see limit messaging. Selection is deterministic from the conversation kind, so the prompt a session receives is fixed by its conversation key rather than by runtime state. The harness must build its system prompt per conversation kind and must not concatenate a single static prompt across both kinds.
 
+### Link-embed suppression
+
+By default, every outbound Discord message Artemis sends — normal chat responses, chunked responses, and slash-command replies — must be sent with the `SuppressEmbeds` message flag so Discord does not render link-preview cards. Suppression is enforced by the Discord adapter when it builds the outgoing payload, never by the model, the harness, or the system prompt. `DISCORD_SUPPRESS_EMBEDS` defaults to `true`; setting it to `false` re-enables embeds globally. `DISCORD_EMBEDS_ALLOWED_CHANNEL_ID` is a comma-separated list of channel IDs where embeds are re-enabled even when global suppression is on; a guild thread resolves the override through its parent channel. The override is strictly re-enabling and never adds suppression when the global switch is off. See [Discord link-embed suppression](discord-link-embeds.md).
+
 ### Raw message audit
 
 Before any normalization or filter, emit a structured `discord_message_received` event containing:
@@ -385,6 +389,8 @@ Load local configuration from `.env` or the process environment. Trim scalar val
 | `DISCORD_TOKEN` | Yes | None | Discord bot token. |
 | `DISCORD_ALLOWED_CHANNEL_ID` | No | Empty list | Comma-separated parent channel IDs where guild activity is allowed. |
 | `DISCORD_ALLOWED_USER_ID` | No | Empty list | Comma-separated user IDs allowed to converse in DMs. This setting does not govern guild messages. |
+| `DISCORD_SUPPRESS_EMBEDS` | No | `true` | When `true`, Artemis sends every outbound Discord message with the `SuppressEmbeds` flag so link-preview cards are not rendered. When `false`, embeds render normally. Must be `true` or `false`. |
+| `DISCORD_EMBEDS_ALLOWED_CHANNEL_ID` | No | Empty list | Comma-separated channel IDs where link embeds are re-enabled even when `DISCORD_SUPPRESS_EMBEDS` is `true`. Threads resolve through their parent channel. Blank re-enables embeds nowhere. |
 | `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | OpenAI-compatible model endpoint. |
 | `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Selected model. |
 | `OLLAMA_API_KEY` | No | `ollama` | Placeholder or bearer-token credential. |
@@ -502,6 +508,7 @@ At minimum, prove all of the following:
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Guild sessions receive the channel-limits system-prompt block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3`, self-contained-thought rule) while DM sessions receive no limit messaging; prompt selection is deterministic from the conversation kind.
+- Every outbound Discord message (guild reply, DM send, chunked response, and slash-command reply) carries the `SuppressEmbeds` flag by default; `DISCORD_SUPPRESS_EMBEDS=false` omits it globally, and `DISCORD_EMBEDS_ALLOWED_CHANNEL_ID` omits it per channel with threads resolving through the parent channel.
 - Console logs continue when SQLite log persistence fails, without recursive failures.
 - Startup fails before Discord login when configuration, database migration, or model health validation fails.
 - The application image does not contain Ollama and Compose starts it as a separate dependency.
