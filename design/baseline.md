@@ -43,6 +43,7 @@ The implementation uses PI and the PI SDK as the conversational harness, Ollama 
 | Allowed guild channels | Parse `DISCORD_ALLOWED_CHANNEL_ID` as a comma-separated channel allowlist. Accept a guild message only when its channel ID, or a thread's parent channel ID, is present. DMs remain supported independently. |
 | Explicit guild invocation | Require the triggering message in a guild channel or thread to mention the Artemis bot user or its Discord-managed bot role (`@Artemis`). `@everyone`, `@here`, unrelated roles, and reply-only mentions do not qualify. Direct messages do not require a mention. |
 | Direct-message and guild conversations | Derive a stable conversation key from the Discord context. Direct messages use the DM channel ID. Guild messages, including thread replies, use the guild ID plus the parent channel ID. |
+| Channel-aware response limits | Group/channel (guild) responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained Discord messages per turn; DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind. |
 | Isolated, persistent context | Associate each conversation key with one durable PI session and store its session state and messages in SQLite. Never query history without the conversation key. |
 | Configurable model and runtime | Read validated settings from environment variables loaded through `.env` for local use. |
 | Reconnection | Use the Discord client's reconnect and resume behavior, and log connection lifecycle events. |
@@ -228,6 +229,8 @@ If configuration, migration, or required model setup fails, startup exits with a
 11. Atomically persist the assistant response and available model diagnostics, then stop refreshing the typing indicator.
 12. Send a DM response as an ordinary channel message. Send a guild-channel or guild-thread response as a reply to the triggering message.
 
+The system prompt presented to PI is conversation-kind-aware. Guild sessions additionally receive a Discord Channel Limits block telling the model to keep responses to at most `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained messages with no sentence split across messages. DM sessions never receive that block, so direct messages are not length-restricted. The prompt is built as a pure function of the conversation kind, making the limit deterministic rather than runtime-dependent.
+
 If generation fails, Artemis records the failed attempt and sanitized diagnostics for operators. It does not fabricate an assistant turn or send anything to Discord. A later message reuses the last valid session state.
 
 ### Reconnection and restart
@@ -304,6 +307,9 @@ Required tests include:
 | Other DM users are silently ignored | DM authorization unit test asserting no reply, persistence, or model call. |
 | Each conversation reuses durable context | Persistence and coordinator tests across fresh application instances. |
 | No context leaks | Cross-key isolation tests using distinct DMs and parent guild channels, plus tests proving threads share only their own parent channel's key. |
+| Channel responses are capped at 3 self-contained messages | `buildSystemPrompt` unit tests asserting the guild prompt contains the limits block, the `GROUP_CHANNEL_MULTI_MESSAGE_MAX` constant, and the self-contained-thought rule. |
+| DM responses are not length-restricted | `buildSystemPrompt` unit tests asserting the DM prompt contains no channel-limit messaging and no `GROUP_CHANNEL_MULTI_MESSAGE_MAX` reference. |
+| Prompt selection is deterministic per conversation kind | Gateway tests driving `generate({ conversationKind })` and asserting guild vs DM receive different prompts, plus a per-kind resource-loader caching test. |
 | Model changes through configuration | Configuration and PI-boundary tests with a non-default model. |
 | Secrets remain outside the repository | `.env.example`, `.gitignore`, secret-scanning guard, and review. |
 | Activity and diagnostics are operator-accessible | Logging and persistence tests plus documented `docker compose logs` and SQLite access. |
@@ -313,6 +319,7 @@ Required tests include:
 - Guild threads are part of their parent guild channel conversation. A thread is eligible only when its parent channel ID is in `DISCORD_ALLOWED_CHANNEL_ID`. On each thread reply that directly mentions Artemis, the bot resubmits the entire ordered thread, including the new message regardless of whether the author is in `DISCORD_ALLOWED_USER_ID`.
 - SQLite has no automatic retention or deletion policy. Stored chat content, sessions, and model reasoning or diagnostics remain until an operator deliberately removes them.
 - PI or Ollama generation failures are recorded for operators but produce no Discord response.
+- The system prompt is conversation-kind-aware. Guild sessions receive a Discord Channel Limits block capping responses at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained messages; DM sessions never receive it, so direct messages remain unrestricted. Prompt construction is a pure function of the conversation kind, so the model never sees limit messaging in a DM.
 - Docker Compose starts Ollama as a separate dependency container. Ollama is not included in the Artemis Dockerfile or application container.
 
 Changes to these decisions should update this document and, when they alter observable behavior, the source issue and acceptance criteria.
