@@ -1,11 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
-  DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
+  DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
   DEFAULT_SQLITE_PATH,
+  loadConfig,
   parseConfig
 } from "../src/config.js";
+
+const providerDefinition = {
+  providerId: "configured-provider",
+  providerName: "Configured Provider",
+  baseUrl: "https://inference.example/v1",
+  modelId: "configured-model",
+  reasoning: true,
+  contextWindow: 64_000,
+  maxTokens: 8_192,
+  supportsDeveloperRole: false,
+  supportsReasoningEffort: true
+};
 
 describe("parseConfig", () => {
   it("loads required values, empty Discord allowlists, and safe defaults", () => {
@@ -19,13 +32,38 @@ describe("parseConfig", () => {
       discordUserIds: [],
       discordSuppressEmbeds: true,
       discordEmbedsAllowedChannelIds: [],
-      ollamaBaseUrl: DEFAULT_OLLAMA_BASE_URL,
-      ollamaModel: DEFAULT_OLLAMA_MODEL,
-      ollamaApiKey: "ollama",
+      model: {
+        providerId: "ollama",
+        providerName: "Ollama",
+        baseUrl: DEFAULT_OLLAMA_BASE_URL,
+        modelId: DEFAULT_OLLAMA_MODEL,
+        apiKey: "ollama",
+        reasoning: true,
+        contextWindow: 1_048_576,
+        maxTokens: 65_536,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: true
+      },
       githubToken: "",
       githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
       sqlitePath: DEFAULT_SQLITE_PATH,
       logLevel: "info"
+    });
+  });
+
+  it("retains the existing Ollama environment workflow without a model file", () => {
+    const result = parseConfig({
+      DISCORD_TOKEN: "token",
+      OLLAMA_BASE_URL: "https://ollama.example/v1/",
+      OLLAMA_MODEL: "custom-ollama-model",
+      OLLAMA_API_KEY: "ollama-secret"
+    });
+    expect(result.model).toMatchObject({
+      providerId: "ollama",
+      providerName: "Ollama",
+      baseUrl: "https://ollama.example/v1",
+      modelId: "custom-ollama-model",
+      apiKey: "ollama-secret"
     });
   });
 
@@ -34,21 +72,23 @@ describe("parseConfig", () => {
       DISCORD_TOKEN: " token ",
       DISCORD_ALLOWED_CHANNEL_ID: " channel-one, channel-two, channel-one ",
       DISCORD_ALLOWED_USER_ID: " user-one, user-two, user-one ",
-      OLLAMA_BASE_URL: "https://ollama.example/v1/",
-      OLLAMA_MODEL: "custom",
-      OLLAMA_API_KEY: "secret",
+      MODEL_API_KEY: "secret",
       GITHUB_TOKEN: " github-secret ",
       GITHUB_ALLOWED_REPOSITORY: " mbrooks/artemis, HSV-AI/artemis, MBROOKS/ARTEMIS ",
       SQLITE_PATH: ":memory:",
       LOG_LEVEL: "debug"
-    });
+    }, { ...providerDefinition, baseUrl: "https://model.example/v1/" });
     expect(result).toMatchObject({
       discordToken: "token",
       discordAllowedChannelIds: ["channel-one", "channel-two"],
       discordUserIds: ["user-one", "user-two"],
-      ollamaBaseUrl: "https://ollama.example/v1",
-      ollamaModel: "custom",
-      ollamaApiKey: "secret",
+      model: expect.objectContaining({
+        providerId: "configured-provider",
+        providerName: "Configured Provider",
+        baseUrl: "https://model.example/v1",
+        modelId: "configured-model",
+        apiKey: "secret"
+      }),
       githubToken: "github-secret",
       githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
       sqlitePath: ":memory:",
@@ -80,18 +120,71 @@ describe("parseConfig", () => {
   );
 
   it("rejects invalid URLs and log levels", () => {
+    expect(() => parseConfig({
+      DISCORD_TOKEN: "token",
+      OLLAMA_BASE_URL: "file:///tmp/ollama"
+    })).toThrow("Invalid URL configuration: model.baseUrl");
     expect(() =>
-      parseConfig({
-        DISCORD_TOKEN: "token",
-        OLLAMA_BASE_URL: "file:///tmp/ollama"
-      })
-    ).toThrow("Invalid URL configuration: OLLAMA_BASE_URL");
+      parseConfig(
+        { DISCORD_TOKEN: "token" },
+        { ...providerDefinition, baseUrl: "file:///tmp/model" }
+      )
+    ).toThrow("Invalid URL configuration: model.baseUrl");
     expect(() =>
       parseConfig({
         DISCORD_TOKEN: "token",
         LOG_LEVEL: "verbose"
       })
     ).toThrow("Invalid configuration: LOG_LEVEL");
+  });
+
+  it("loads model settings from MODEL_CONFIG_PATH", () => {
+    const readFile = vi.fn().mockReturnValue(JSON.stringify(providerDefinition));
+    const result = loadConfig(
+      { DISCORD_TOKEN: "token", MODEL_CONFIG_PATH: "model.config.json" },
+      readFile
+    );
+    expect(readFile).toHaveBeenCalledWith("model.config.json", "utf8");
+    expect(result.model).toMatchObject({
+      providerId: "configured-provider",
+      providerName: "Configured Provider",
+      baseUrl: "https://inference.example/v1",
+      modelId: "configured-model",
+      contextWindow: 64_000
+    });
+  });
+
+  it("reports unreadable and invalid model config files", () => {
+    expect(() => loadConfig(
+      { DISCORD_TOKEN: "token", MODEL_CONFIG_PATH: "missing.json" },
+      () => { throw new Error("not found"); }
+    )).toThrow("Unable to load MODEL_CONFIG_PATH missing.json: not found");
+    expect(() => loadConfig(
+      { DISCORD_TOKEN: "token", MODEL_CONFIG_PATH: "invalid.json" },
+      () => "not json"
+    )).toThrow("Unable to load MODEL_CONFIG_PATH invalid.json");
+  });
+
+  it("rejects invalid model field types", () => {
+    expect(() => parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, providerId: "" }
+    )).toThrow("providerId must be a nonblank string");
+    expect(() => parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, contextWindow: 0 }
+    )).toThrow("contextWindow must be a positive integer");
+    expect(() => parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, reasoning: "yes" }
+    )).toThrow("reasoning must be a boolean");
+    expect(() => parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, modelId: undefined }
+    )).toThrow("modelId must be a nonblank string");
+    expect(() => parseConfig({ DISCORD_TOKEN: "token" }, [])).toThrow(
+      "expected a JSON object"
+    );
   });
 
   it("allows a blank GitHub repository allowlist and rejects malformed entries", () => {

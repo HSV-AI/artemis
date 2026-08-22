@@ -96,19 +96,11 @@ export function buildSystemPrompt(
 }
 
 function createCustomTools(
-  config: Pick<
-    ArtemisConfig,
-    "ollamaBaseUrl" | "ollamaApiKey"
-  > &
-    Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories">>,
+  config: Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories">>,
   fetchImplementation: typeof fetch
 ) {
   return [
-    createWebFetchTool({
-      ollamaBaseUrl: config.ollamaBaseUrl,
-      ollamaApiKey: config.ollamaApiKey,
-      fetchImplementation
-    }),
+    createWebFetchTool({ fetchImplementation }),
     ...createGitHubTools({
       token: config.githubToken ?? "",
       allowedRepositories: config.githubAllowedRepositories ?? [],
@@ -126,7 +118,11 @@ const emptyUsage: Usage = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
 };
 
-function storedToPiMessage(message: StoredMessage, fallbackModel: string): Message {
+function storedToPiMessage(
+  message: StoredMessage,
+  providerId: string,
+  fallbackModel: string
+): Message {
   const timestamp = Date.parse(message.createdAt);
   if (message.role === "user") {
     return {
@@ -145,7 +141,7 @@ function storedToPiMessage(message: StoredMessage, fallbackModel: string): Messa
     role: "assistant",
     content,
     api: "openai-completions",
-    provider: "ollama",
+    provider: providerId,
     model: message.model ?? fallbackModel,
     ...(Array.isArray(message.diagnostics)
       ? { diagnostics: message.diagnostics as AssistantMessageDiagnostic[] }
@@ -182,11 +178,8 @@ export class PiSdkGateway implements PiGateway {
   private customTools: ReturnType<typeof createCustomTools> = [];
 
   public constructor(
-    private readonly config: Pick<ArtemisConfig, "ollamaBaseUrl" | "ollamaModel" | "ollamaApiKey"> &
-      Partial<Pick<
-        ArtemisConfig,
-        "githubToken" | "githubAllowedRepositories"
-      >>,
+    private readonly config: Pick<ArtemisConfig, "model"> &
+      Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories">>,
     private readonly fetchImplementation: typeof fetch = fetch
   ) {}
 
@@ -194,12 +187,12 @@ export class PiSdkGateway implements PiGateway {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
     try {
-      const response = await this.fetchImplementation(`${this.config.ollamaBaseUrl}/models`, {
+      const response = await this.fetchImplementation(`${this.config.model.baseUrl}/models`, {
         headers: this.authorizationHeaders(),
         signal: controller.signal
       });
       if (!response.ok) {
-        throw new Error(`Ollama health check failed with status ${response.status}`);
+        throw new Error(`Model provider health check failed with status ${response.status}`);
       }
     } finally {
       clearTimeout(timeout);
@@ -215,16 +208,21 @@ export class PiSdkGateway implements PiGateway {
       throw new Error("PI gateway failed to initialize");
     }
     const resourceLoader = await this.getResourceLoader(input.conversationKind);
-    const model = modelRuntime.getModel("ollama", this.config.ollamaModel);
+    const model = modelRuntime.getModel(
+      this.config.model.providerId,
+      this.config.model.modelId
+    );
     if (!model) {
-      throw new Error(`Configured Ollama model is unavailable: ${this.config.ollamaModel}`);
+      throw new Error(`Configured model is unavailable: ${this.config.model.modelId}`);
     }
 
     const sessionManager = SessionManager.inMemory(process.cwd(), {
       id: input.logicalSessionId
     });
     for (const message of input.history) {
-      sessionManager.appendMessage(storedToPiMessage(message, this.config.ollamaModel));
+      sessionManager.appendMessage(
+        storedToPiMessage(message, this.config.model.providerId, this.config.model.modelId)
+      );
     }
     const { session } = await createAgentSession({
       modelRuntime,
@@ -250,10 +248,15 @@ export class PiSdkGateway implements PiGateway {
   }
 
   private authorizationHeaders(): HeadersInit {
-    if (this.config.ollamaApiKey === "ollama") {
+    if (!this.usesAuthorizationHeader()) {
       return {};
     }
-    return { Authorization: `Bearer ${this.config.ollamaApiKey}` };
+    return { Authorization: `Bearer ${this.config.model.apiKey}` };
+  }
+
+  private usesAuthorizationHeader(): boolean {
+    const { providerId, apiKey } = this.config.model;
+    return Boolean(apiKey) && !(providerId === "ollama" && apiKey === "ollama");
   }
 
   private async initialize(): Promise<void> {
@@ -267,29 +270,32 @@ export class PiSdkGateway implements PiGateway {
       modelsPath: null,
       refreshOnCreate: false
     });
-    modelRuntime.registerProvider("ollama", {
-      name: "Ollama",
-      baseUrl: this.config.ollamaBaseUrl,
-      apiKey: this.config.ollamaApiKey,
+    const modelConfig = this.config.model;
+    modelRuntime.registerProvider(modelConfig.providerId, {
+      name: modelConfig.providerName,
+      baseUrl: modelConfig.baseUrl,
+      apiKey: modelConfig.apiKey,
       api: "openai-completions",
-      authHeader: this.config.ollamaApiKey !== "ollama",
+      authHeader: this.usesAuthorizationHeader(),
       models: [
         {
-          id: this.config.ollamaModel,
-          name: this.config.ollamaModel,
-          reasoning: true,
+          id: modelConfig.modelId,
+          name: modelConfig.modelId,
+          reasoning: modelConfig.reasoning,
           input: ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          contextWindow: 1_048_576,
-          maxTokens: 65_536,
+          contextWindow: modelConfig.contextWindow,
+          maxTokens: modelConfig.maxTokens,
           compat: {
-            supportsDeveloperRole: false,
-            supportsReasoningEffort: true
+            supportsDeveloperRole: modelConfig.supportsDeveloperRole,
+            supportsReasoningEffort: modelConfig.supportsReasoningEffort
           }
         }
       ]
     });
-    await modelRuntime.setRuntimeApiKey("ollama", this.config.ollamaApiKey);
+    if (modelConfig.apiKey) {
+      await modelRuntime.setRuntimeApiKey(modelConfig.providerId, modelConfig.apiKey);
+    }
     this.modelRuntime = modelRuntime;
   }
 

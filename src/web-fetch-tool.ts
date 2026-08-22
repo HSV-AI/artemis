@@ -9,20 +9,17 @@ export interface WebFetchResponse {
 }
 
 export interface WebFetchToolOptions {
-  ollamaBaseUrl: string;
-  ollamaApiKey: string;
   fetchImplementation?: typeof fetch;
 }
+
+const MAX_WEB_CONTENT_CHARS = 100_000;
+const MAX_WEB_ERROR_CHARS = 2_000;
 
 const parameters = Type.Object({
   url: Type.String({ description: "HTTP or HTTPS URL to fetch and extract content from" })
 });
 
-function ollamaHost(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
-}
-
-function validateWebUrl(value: string): void {
+function validateWebUrl(value: string): URL {
   let url: URL;
   try {
     url = new URL(value);
@@ -32,6 +29,41 @@ function validateWebUrl(value: string): void {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("web_fetch requires a valid HTTP or HTTPS URL");
   }
+  return url;
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&nbsp;/giu, " ")
+    .replace(/&amp;/giu, "&")
+    .replace(/&lt;/giu, "<")
+    .replace(/&gt;/giu, ">")
+    .replace(/&quot;/giu, '"')
+    .replace(/&#39;/giu, "'");
+}
+
+function extractHtml(html: string, sourceUrl: URL): WebFetchResponse {
+  const titleMatch = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/iu);
+  const title = decodeHtmlEntities(titleMatch?.[1]?.replace(/\s+/gu, " ").trim() ?? "") ||
+    sourceUrl.hostname;
+  const links = [...html.matchAll(/<a\b[^>]*\bhref\s*=\s*["']([^"']+)["']/giu)]
+    .map((match) => match[1])
+    .filter((link): link is string => Boolean(link))
+    .map((link) => {
+      try {
+        return new URL(link, sourceUrl).toString();
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((link): link is string => link !== undefined);
+  const content = decodeHtmlEntities(
+    html
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/giu, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/giu, " ")
+      .replace(/<[^>]+>/gu, " ")
+  ).replace(/\s+/gu, " ").trim();
+  return { title, content, links: [...new Set(links)] };
 }
 
 async function executeWebFetch(
@@ -39,32 +71,27 @@ async function executeWebFetch(
   url: string,
   signal?: AbortSignal
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: WebFetchResponse }> {
-  validateWebUrl(url);
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (options.ollamaApiKey !== "ollama") {
-    headers.Authorization = `Bearer ${options.ollamaApiKey}`;
-  }
-  const response = await (options.fetchImplementation ?? fetch)(
-    `${ollamaHost(options.ollamaBaseUrl)}/api/experimental/web_fetch`,
-    {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ url }),
-      ...(signal ? { signal } : {})
-    }
-  );
+  const requestedUrl = validateWebUrl(url);
+  const response = await (options.fetchImplementation ?? fetch)(requestedUrl, {
+    method: "GET",
+    headers: { Accept: "text/html, text/plain, application/json;q=0.9, */*;q=0.1" },
+    redirect: "follow",
+    ...(signal ? { signal } : {})
+  });
 
   if (!response.ok) {
-    if (response.status === 401) {
-      throw new Error("Unauthorized. Run `ollama signin` to authenticate.");
-    }
-    const errorText = await response.text().catch(() => "");
+    const errorText = (await response.text().catch(() => "")).slice(0, MAX_WEB_ERROR_CHARS);
     throw new Error(
-      `Ollama web_fetch failed (status ${response.status}): ${errorText || response.statusText}`
+      `web_fetch failed (status ${response.status}): ${errorText || response.statusText}`
     );
   }
 
-  const data = (await response.json()) as WebFetchResponse;
+  const responseUrl = response.url ? new URL(response.url) : requestedUrl;
+  const rawContent = (await response.text()).slice(0, MAX_WEB_CONTENT_CHARS);
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  const data = contentType.includes("text/html")
+    ? extractHtml(rawContent, responseUrl)
+    : { title: responseUrl.hostname, content: rawContent, links: [] };
   const formatted = [
     `Title: ${data.title}`,
     "",
@@ -98,4 +125,4 @@ export function createWebFetchTool(options: WebFetchToolOptions) {
   });
 }
 
-export const webFetchInternals = { executeWebFetch, ollamaHost, validateWebUrl };
+export const webFetchInternals = { executeWebFetch, extractHtml, validateWebUrl };

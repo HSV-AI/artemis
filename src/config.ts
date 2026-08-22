@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 export const DEFAULT_OLLAMA_MODEL = "deepseek-v4-flash:0731-cloud";
 export const DEFAULT_OLLAMA_BASE_URL = "http://ollama:11434/v1";
 export const DEFAULT_SQLITE_PATH = "/data/artemis.sqlite";
@@ -5,15 +7,28 @@ export const DEFAULT_GITHUB_ALLOWED_REPOSITORIES = ["mbrooks/artemis", "HSV-AI/a
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+export interface ModelProviderConfig {
+  providerId: string;
+  providerName: string;
+  baseUrl: string;
+  modelId: string;
+  apiKey: string;
+  reasoning: boolean;
+  contextWindow: number;
+  maxTokens: number;
+  supportsDeveloperRole: boolean;
+  supportsReasoningEffort: boolean;
+}
+
+type ModelProviderDefinition = Omit<ModelProviderConfig, "apiKey">;
+
 export interface ArtemisConfig {
   discordToken: string;
   discordAllowedChannelIds: readonly string[];
   discordUserIds: readonly string[];
   discordSuppressEmbeds: boolean;
   discordEmbedsAllowedChannelIds: readonly string[];
-  ollamaBaseUrl: string;
-  ollamaModel: string;
-  ollamaApiKey: string;
+  model: ModelProviderConfig;
   githubToken: string;
   githubAllowedRepositories: readonly string[];
   sqlitePath: string;
@@ -68,6 +83,65 @@ function parseUrl(value: string, name: string): string {
   return value.replace(/\/$/, "");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function configuredString(
+  config: Record<string, unknown>,
+  name: keyof ModelProviderDefinition
+): string {
+  const value = config[name];
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Invalid model configuration: ${name} must be a nonblank string`);
+  }
+  return value.trim();
+}
+
+function configuredBoolean(
+  config: Record<string, unknown>,
+  name: keyof ModelProviderDefinition
+): boolean {
+  const value = config[name];
+  if (typeof value !== "boolean") {
+    throw new Error(`Invalid model configuration: ${name} must be a boolean`);
+  }
+  return value;
+}
+
+function configuredPositiveInteger(
+  config: Record<string, unknown>,
+  name: keyof ModelProviderDefinition
+): number {
+  const value = config[name];
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new Error(`Invalid model configuration: ${name} must be a positive integer`);
+  }
+  return value as number;
+}
+
+export function parseModelConfig(
+  input: unknown,
+  apiKey = "local"
+): ModelProviderConfig {
+  if (!isRecord(input)) {
+    throw new Error("Invalid model configuration: expected a JSON object");
+  }
+  const config = input;
+  return {
+    providerId: configuredString(config, "providerId"),
+    providerName: configuredString(config, "providerName"),
+    baseUrl: parseUrl(configuredString(config, "baseUrl"), "model.baseUrl"),
+    modelId: configuredString(config, "modelId"),
+    apiKey: apiKey.trim(),
+    reasoning: configuredBoolean(config, "reasoning"),
+    contextWindow: configuredPositiveInteger(config, "contextWindow"),
+    maxTokens: configuredPositiveInteger(config, "maxTokens"),
+    supportsDeveloperRole: configuredBoolean(config, "supportsDeveloperRole"),
+    supportsReasoningEffort: configuredBoolean(config, "supportsReasoningEffort")
+  };
+}
+
 function parseLogLevel(value: string): LogLevel {
   if (value === "debug" || value === "info" || value === "warn" || value === "error") {
     return value;
@@ -89,7 +163,10 @@ function parseBoolean(value: string, name: string, defaultValue: boolean): boole
   throw new Error(`Invalid configuration: ${name} must be true or false`);
 }
 
-export function parseConfig(env: Environment = process.env): ArtemisConfig {
+export function parseConfig(
+  env: Environment = process.env,
+  modelConfig?: unknown
+): ArtemisConfig {
   return {
     discordToken: required(env, "DISCORD_TOKEN"),
     discordAllowedChannelIds: parseCommaSeparatedIds(env.DISCORD_ALLOWED_CHANNEL_ID),
@@ -100,15 +177,40 @@ export function parseConfig(env: Environment = process.env): ArtemisConfig {
       true
     ),
     discordEmbedsAllowedChannelIds: parseCommaSeparatedIds(env.DISCORD_EMBEDS_ALLOWED_CHANNEL_ID),
-    ollamaBaseUrl: parseUrl(
-      valueOrDefault(env, "OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL),
-      "OLLAMA_BASE_URL"
-    ),
-    ollamaModel: valueOrDefault(env, "OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
-    ollamaApiKey: valueOrDefault(env, "OLLAMA_API_KEY", "ollama"),
+    model: modelConfig === undefined
+      ? parseModelConfig({
+          providerId: "ollama",
+          providerName: "Ollama",
+          baseUrl: valueOrDefault(env, "OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL),
+          modelId: valueOrDefault(env, "OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
+          reasoning: true,
+          contextWindow: 1_048_576,
+          maxTokens: 65_536,
+          supportsDeveloperRole: false,
+          supportsReasoningEffort: true
+        }, valueOrDefault(env, "OLLAMA_API_KEY", "ollama"))
+      : parseModelConfig(modelConfig, valueOrDefault(env, "MODEL_API_KEY", "local")),
     githubToken: env.GITHUB_TOKEN?.trim() ?? "",
     githubAllowedRepositories: parseAllowedRepositories(env.GITHUB_ALLOWED_REPOSITORY),
     sqlitePath: valueOrDefault(env, "SQLITE_PATH", DEFAULT_SQLITE_PATH),
     logLevel: parseLogLevel(valueOrDefault(env, "LOG_LEVEL", "info"))
   };
+}
+
+export function loadConfig(
+  env: Environment = process.env,
+  readFile: (path: string, encoding: "utf8") => string = readFileSync
+): ArtemisConfig {
+  const configPath = env.MODEL_CONFIG_PATH?.trim();
+  if (!configPath) {
+    return parseConfig(env);
+  }
+  let modelConfig: unknown;
+  try {
+    modelConfig = JSON.parse(readFile(configPath, "utf8"));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Unable to load MODEL_CONFIG_PATH ${configPath}: ${message}`);
+  }
+  return parseConfig(env, modelConfig);
 }

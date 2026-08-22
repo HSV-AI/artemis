@@ -1,8 +1,8 @@
 import "dotenv/config";
 import { ArtemisApplication } from "./application.js";
-import { parseConfig } from "./config.js";
+import { loadConfig } from "./config.js";
 
-const application = new ArtemisApplication(parseConfig());
+const application = new ArtemisApplication(loadConfig());
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {

@@ -2,6 +2,7 @@ node_modules/
 dist/
 coverage/
 .env
+model.config.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

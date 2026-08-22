@@ -32,7 +32,7 @@ export class ArtemisApplication {
       {
         channelIds: config.discordAllowedChannelIds,
         userIds: config.discordUserIds,
-        model: config.ollamaModel
+        model: config.model.modelId
       },
       this.repository,
       this.pi,
@@ -56,7 +56,8 @@ export class ArtemisApplication {
   public async start(): Promise<void> {
     this.logger.info("artemis_starting", {
       channelIds: this.config.discordAllowedChannelIds,
-      model: this.config.ollamaModel
+      model: this.config.model.modelId,
+      provider: this.config.model.providerId
     });
     try {
       await this.pi.checkHealth();

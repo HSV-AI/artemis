@@ -3,7 +3,7 @@ import { ArtemisApplication } from "../src/application.js";
 import type { ArtemisConfig } from "../src/config.js";
 import type { DiscordGateway } from "../src/discord-gateway.js";
 import type { ArtemisRepository } from "../src/repository.js";
-import { createLoggerMock, createPiMock } from "./helpers.js";
+import { createLoggerMock, createPiMock, modelConfig } from "./helpers.js";
 
 const config: ArtemisConfig = {
   discordToken: "token",
@@ -11,9 +11,7 @@ const config: ArtemisConfig = {
   discordUserIds: ["user-one", "user-two"],
   discordSuppressEmbeds: true,
   discordEmbedsAllowedChannelIds: [],
-  ollamaBaseUrl: "http://ollama:11434/v1",
-  ollamaModel: "model",
-  ollamaApiKey: "ollama",
+  model: modelConfig({ modelId: "model" }),
   githubToken: "",
   githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
   sqlitePath: ":memory:",
@@ -23,7 +21,7 @@ const config: ArtemisConfig = {
 describe("ArtemisApplication", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("checks Ollama before starting Discord and closes dependencies on stop", async () => {
+  it("checks the model provider before starting Discord and closes dependencies on stop", async () => {
     const order: string[] = [];
     const pi = createPiMock();
     vi.mocked(pi.checkHealth).mockImplementation(async () => {
@@ -43,7 +41,8 @@ describe("ArtemisApplication", () => {
     expect(order).toEqual(["pi", "discord"]);
     expect(logger.info).toHaveBeenCalledWith("artemis_starting", {
       channelIds: ["channel-one", "channel-two"],
-      model: "model"
+      model: "model",
+      provider: "test-provider"
     });
 
     application.stop();
@@ -52,7 +51,7 @@ describe("ArtemisApplication", () => {
     expect(logger.info).toHaveBeenCalledWith("artemis_stopped");
   });
 
-  it("does not start Discord when Ollama health validation fails", async () => {
+  it("does not start Discord when model-provider health validation fails", async () => {
     const pi = createPiMock();
     vi.mocked(pi.checkHealth).mockRejectedValue(new Error("offline"));
     const discord = { start: vi.fn(), stop: vi.fn() } as unknown as DiscordGateway;
