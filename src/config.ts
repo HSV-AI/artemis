@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { resolvePersonaProfile, type PersonaProfile } from "./persona-profiles.js";
 
 export const DEFAULT_OLLAMA_MODEL = "deepseek-v4-flash:0731-cloud";
 export const DEFAULT_OLLAMA_BASE_URL = "http://ollama:11434/v1";
@@ -6,6 +7,17 @@ export const DEFAULT_SQLITE_PATH = "/data/artemis.sqlite";
 export const DEFAULT_GITHUB_ALLOWED_REPOSITORIES = ["mbrooks/artemis", "HSV-AI/artemis"] as const;
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
+export type ReasoningEffort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+];
 
 export interface ModelProviderConfig {
   providerId: string;
@@ -14,10 +26,10 @@ export interface ModelProviderConfig {
   modelId: string;
   apiKey: string;
   reasoning: boolean;
+  reasoningEffort?: ReasoningEffort;
   contextWindow: number;
   maxTokens: number;
   supportsDeveloperRole: boolean;
-  supportsReasoningEffort: boolean;
 }
 
 type ModelProviderDefinition = Omit<ModelProviderConfig, "apiKey">;
@@ -29,6 +41,7 @@ export interface ArtemisConfig {
   discordSuppressEmbeds: boolean;
   discordEmbedsAllowedChannelIds: readonly string[];
   model: ModelProviderConfig;
+  persona: PersonaProfile;
   githubToken: string;
   githubAllowedRepositories: readonly string[];
   sqlitePath: string;
@@ -120,6 +133,19 @@ function configuredPositiveInteger(
   return value as number;
 }
 
+function configuredReasoningEffort(config: Record<string, unknown>): ReasoningEffort | undefined {
+  const value = config.reasoningEffort;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !REASONING_EFFORTS.includes(value as ReasoningEffort)) {
+    throw new Error(
+      `Invalid model configuration: reasoningEffort must be one of ${REASONING_EFFORTS.join(", ")}`
+    );
+  }
+  return value as ReasoningEffort;
+}
+
 export function parseModelConfig(
   input: unknown,
   apiKey = "local"
@@ -128,6 +154,7 @@ export function parseModelConfig(
     throw new Error("Invalid model configuration: expected a JSON object");
   }
   const config = input;
+  const reasoningEffort = configuredReasoningEffort(config);
   return {
     providerId: configuredString(config, "providerId"),
     providerName: configuredString(config, "providerName"),
@@ -135,10 +162,10 @@ export function parseModelConfig(
     modelId: configuredString(config, "modelId"),
     apiKey: apiKey.trim(),
     reasoning: configuredBoolean(config, "reasoning"),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     contextWindow: configuredPositiveInteger(config, "contextWindow"),
     maxTokens: configuredPositiveInteger(config, "maxTokens"),
-    supportsDeveloperRole: configuredBoolean(config, "supportsDeveloperRole"),
-    supportsReasoningEffort: configuredBoolean(config, "supportsReasoningEffort")
+    supportsDeveloperRole: configuredBoolean(config, "supportsDeveloperRole")
   };
 }
 
@@ -184,12 +211,13 @@ export function parseConfig(
           baseUrl: valueOrDefault(env, "OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL),
           modelId: valueOrDefault(env, "OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
           reasoning: true,
+          reasoningEffort: "medium",
           contextWindow: 1_048_576,
           maxTokens: 65_536,
-          supportsDeveloperRole: false,
-          supportsReasoningEffort: true
+          supportsDeveloperRole: false
         }, valueOrDefault(env, "OLLAMA_API_KEY", "ollama"))
       : parseModelConfig(modelConfig, valueOrDefault(env, "MODEL_API_KEY", "local")),
+    persona: resolvePersonaProfile(env.PERSONA_PROFILE),
     githubToken: env.GITHUB_TOKEN?.trim() ?? "",
     githubAllowedRepositories: parseAllowedRepositories(env.GITHUB_ALLOWED_REPOSITORY),
     sqlitePath: valueOrDefault(env, "SQLITE_PATH", DEFAULT_SQLITE_PATH),
@@ -202,15 +230,15 @@ export function loadConfig(
   readFile: (path: string, encoding: "utf8") => string = readFileSync
 ): ArtemisConfig {
   const configPath = env.MODEL_CONFIG_PATH?.trim();
-  if (!configPath) {
-    return parseConfig(env);
-  }
   let modelConfig: unknown;
-  try {
-    modelConfig = JSON.parse(readFile(configPath, "utf8"));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Unable to load MODEL_CONFIG_PATH ${configPath}: ${message}`);
+  if (configPath) {
+    try {
+      modelConfig = JSON.parse(readFile(configPath, "utf8"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Unable to load MODEL_CONFIG_PATH ${configPath}: ${message}`);
+    }
   }
+
   return parseConfig(env, modelConfig);
 }

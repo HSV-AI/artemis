@@ -29,8 +29,6 @@ async function runUpdater(options: RunOptions): Promise<{ stdout: string; comman
   const commandLog = join(root, "commands.log");
   await mkdir(scripts);
   await mkdir(fakeBin);
-  await writeFile(join(root, "package.json"), '{"version":"before"}\n');
-  await writeFile(join(root, "package-lock.json"), '{"lockfileVersion":3}\n');
   await writeFile(join(scripts, "update-artemis-if-needed.sh"), await readFile(sourceScript));
 
   await writeExecutable(
@@ -111,9 +109,9 @@ describe("update-artemis-if-needed.sh", () => {
     expect(result.commands).toContain("docker compose up -d --build");
   });
 
-  it("rebuilds without installing dependencies when manifests are unchanged", async () => {
+  it("rebuilds without switching when already on the target branch", async () => {
     const result = await runUpdater({ hasUpdate: true });
-    expect(result.stdout).not.toContain("Dependencies changed");
+    expect(result.commands).not.toContain("git checkout -f");
     expect(result.commands).not.toContain("npm install");
     expect(result.commands).toContain("docker compose up -d --build");
   });

@@ -23,6 +23,7 @@ import type {
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
 import { formatDiscordMessage } from "./model-context.js";
+import type { PersonaProfile } from "./persona-profiles.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
 
 /**
@@ -32,8 +33,8 @@ import { createWebFetchTool } from "./web-fetch-tool.js";
  */
 export const GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3;
 
-const BASE_SYSTEM_PROMPT =
-  "You are Artemis, a helpful conversational assistant in Discord. Discord messages are provided as JSON with explicit author metadata. Treat each author ID as a distinct speaker, preserve who said what, and do not collapse different speakers into a generic 'you'. Answer the newest message directly. Do not claim to have Discord capabilities you were not given.";
+const DISCORD_BEHAVIOR_PROMPT =
+  "Discord messages are provided as JSON with explicit author metadata. Treat each author ID as a distinct speaker, preserve who said what, and do not collapse different speakers into a generic 'you'. Answer the newest message directly. Do not claim to have Discord capabilities you were not given.";
 
 /**
  * Channel multi-message limits. Only appended to the system prompt for
@@ -76,6 +77,7 @@ export interface ToolRegistryEntry {
  */
 export function buildSystemPrompt(
   kind: ConversationKind,
+  persona: PersonaProfile,
   tools: readonly ToolRegistryEntry[] = []
 ): string {
   const channelLimits = kind === "guild" ? CHANNEL_LIMITS_PROMPT_BLOCK : "";
@@ -92,7 +94,7 @@ export function buildSystemPrompt(
           return lines.join("\n");
         })
         .join("\n");
-  return `${BASE_SYSTEM_PROMPT}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}`;
+  return `${persona.instructions.trim()} ${DISCORD_BEHAVIOR_PROMPT}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}`;
 }
 
 function createCustomTools(
@@ -178,7 +180,7 @@ export class PiSdkGateway implements PiGateway {
   private customTools: ReturnType<typeof createCustomTools> = [];
 
   public constructor(
-    private readonly config: Pick<ArtemisConfig, "model"> &
+    private readonly config: Pick<ArtemisConfig, "model" | "persona"> &
       Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories">>,
     private readonly fetchImplementation: typeof fetch = fetch
   ) {}
@@ -231,7 +233,10 @@ export class PiSdkGateway implements PiGateway {
       customTools,
       resourceLoader,
       sessionManager,
-      settingsManager: SettingsManager.inMemory()
+      settingsManager: SettingsManager.inMemory(),
+      ...(this.config.model.reasoningEffort === undefined
+        ? {}
+        : { thinkingLevel: this.config.model.reasoningEffort })
     });
     try {
       await session.prompt(input.prompt, { expandPromptTemplates: false, source: "rpc" });
@@ -271,6 +276,9 @@ export class PiSdkGateway implements PiGateway {
       refreshOnCreate: false
     });
     const modelConfig = this.config.model;
+    const thinkingLevelMap = modelConfig.reasoningEffort === "xhigh" || modelConfig.reasoningEffort === "max"
+      ? { [modelConfig.reasoningEffort]: modelConfig.reasoningEffort }
+      : undefined;
     modelRuntime.registerProvider(modelConfig.providerId, {
       name: modelConfig.providerName,
       baseUrl: modelConfig.baseUrl,
@@ -282,13 +290,14 @@ export class PiSdkGateway implements PiGateway {
           id: modelConfig.modelId,
           name: modelConfig.modelId,
           reasoning: modelConfig.reasoning,
+          thinkingLevelMap,
           input: ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow: modelConfig.contextWindow,
           maxTokens: modelConfig.maxTokens,
           compat: {
             supportsDeveloperRole: modelConfig.supportsDeveloperRole,
-            supportsReasoningEffort: modelConfig.supportsReasoningEffort
+            supportsReasoningEffort: modelConfig.reasoningEffort !== undefined
           }
         }
       ]
@@ -312,7 +321,7 @@ export class PiSdkGateway implements PiGateway {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPrompt: buildSystemPrompt(kind, this.customTools)
+      systemPrompt: buildSystemPrompt(kind, this.config.persona, this.customTools)
     });
     await resourceLoader.reload();
     this.resourceLoaders.set(kind, resourceLoader);

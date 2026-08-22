@@ -33,10 +33,10 @@ export function modelConfig(
     modelId: "test-model",
     apiKey: "local",
     reasoning: true,
+    reasoningEffort: "medium",
     contextWindow: 32_000,
     maxTokens: 4_096,
     supportsDeveloperRole: false,
-    supportsReasoningEffort: true,
     ...overrides
   };
 }

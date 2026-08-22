@@ -7,6 +7,7 @@ import {
   loadConfig,
   parseConfig
 } from "../src/config.js";
+import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
 
 const providerDefinition = {
   providerId: "configured-provider",
@@ -14,10 +15,10 @@ const providerDefinition = {
   baseUrl: "https://inference.example/v1",
   modelId: "configured-model",
   reasoning: true,
+  reasoningEffort: "medium",
   contextWindow: 64_000,
   maxTokens: 8_192,
-  supportsDeveloperRole: false,
-  supportsReasoningEffort: true
+  supportsDeveloperRole: false
 };
 
 describe("parseConfig", () => {
@@ -39,11 +40,12 @@ describe("parseConfig", () => {
         modelId: DEFAULT_OLLAMA_MODEL,
         apiKey: "ollama",
         reasoning: true,
+        reasoningEffort: "medium",
         contextWindow: 1_048_576,
         maxTokens: 65_536,
-        supportsDeveloperRole: false,
-        supportsReasoningEffort: true
+        supportsDeveloperRole: false
       },
+      persona: ARTEMIS_PROFILE,
       githubToken: "",
       githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
       sqlitePath: DEFAULT_SQLITE_PATH,
@@ -165,6 +167,36 @@ describe("parseConfig", () => {
     )).toThrow("Unable to load MODEL_CONFIG_PATH invalid.json");
   });
 
+  it("selects a named persona profile", () => {
+    const result = parseConfig({ DISCORD_TOKEN: "token", PERSONA_PROFILE: " WARTERMIS " });
+    expect(result.persona.id).toBe("wartermis");
+  });
+
+  it("rejects an unknown persona profile", () => {
+    expect(() => parseConfig({ DISCORD_TOKEN: "token", PERSONA_PROFILE: "unknown" })).toThrow(
+      "PERSONA_PROFILE must be one of artemis, wartermis"
+    );
+  });
+
+  it.each(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)(
+    "accepts reasoning effort %s",
+    (reasoningEffort) => {
+      const result = parseConfig(
+        { DISCORD_TOKEN: "token" },
+        { ...providerDefinition, reasoningEffort }
+      );
+      expect(result.model.reasoningEffort).toBe(reasoningEffort);
+    }
+  );
+
+  it("allows providers without reasoning-effort support to omit it", () => {
+    const result = parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, reasoningEffort: undefined }
+    );
+    expect(result.model.reasoningEffort).toBeUndefined();
+  });
+
   it("rejects invalid model field types", () => {
     expect(() => parseConfig(
       { DISCORD_TOKEN: "token" },
@@ -178,6 +210,10 @@ describe("parseConfig", () => {
       { DISCORD_TOKEN: "token" },
       { ...providerDefinition, reasoning: "yes" }
     )).toThrow("reasoning must be a boolean");
+    expect(() => parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, reasoningEffort: "extreme" }
+    )).toThrow("reasoningEffort must be one of");
     expect(() => parseConfig(
       { DISCORD_TOKEN: "token" },
       { ...providerDefinition, modelId: undefined }
