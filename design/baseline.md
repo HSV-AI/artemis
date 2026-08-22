@@ -115,7 +115,7 @@ Configuration is loaded once at startup, parsed into a typed runtime object, and
 - An optional comma-separated list of authorized Discord DM user IDs, with no built-in default. A blank list authorizes no DM users and has no effect on guild conversations.
 - Comma-separated allowed guild channel IDs. Threads are matched by parent channel ID.
 - Ollama endpoint and model, with `deepseek-v4-flash:0731-cloud` as the default model.
-- Optional GitHub API token and a comma-separated repository allowlist defaulting to `mbrooks/artemis,HSV-AI/artemis`. A blank token or blank repository allowlist disables all GitHub tools.
+- Optional GitHub API token and a comma-separated repository allowlist defaulting to `HSV-AI/artemis`. A blank token or blank repository allowlist disables all GitHub tools.
 - SQLite database path.
 - Log level and other non-secret runtime controls.
 

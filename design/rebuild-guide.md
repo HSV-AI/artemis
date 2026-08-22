@@ -373,7 +373,7 @@ Load local configuration from `.env` or the process environment. Trim scalar val
 | `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Selected model. |
 | `OLLAMA_API_KEY` | No | `ollama` | Placeholder or bearer-token credential. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token; blank disables all GitHub tools. |
-| `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` | Comma-separated GitHub repository allowlist; blank disables GitHub tools. |
+| `GITHUB_ALLOWED_REPOSITORY` | No | `HSV-AI/artemis` | Comma-separated GitHub repository allowlist; blank disables GitHub tools. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
 | `LOG_LEVEL` | No | `info` | Minimum routine level: `debug`, `info`, `warn`, or `error`. |
 
