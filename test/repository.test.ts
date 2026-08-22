@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import type { PiGenerationResult, SourceMessage } from "../src/domain.js";
+import type { IncomingMessageRecord, PiGenerationResult, SourceMessage } from "../src/domain.js";
 import { ArtemisRepository } from "../src/repository.js";
 
 describe("ArtemisRepository", () => {
@@ -203,6 +203,83 @@ describe("ArtemisRepository", () => {
     expect(repository.getHistory(guildSession.id)).toEqual([
       expect.objectContaining({ content: "guild hello" })
     ]);
+  });
+
+  it("logs every incoming message with full audit fields and deduplicates redeliveries", () => {
+    repository = new ArtemisRepository(":memory:");
+    const record: IncomingMessageRecord = {
+      discordMessageId: "discord-1",
+      guildId: "guild-1",
+      channelId: "thread-1",
+      threadId: "thread-1",
+      parentChannelId: "parent-1",
+      authorId: "user-1",
+      authorName: "User One",
+      isBot: false,
+      mentionsBot: true,
+      repliesToBot: false,
+      content: "hello guild",
+      createdAt: "2026-08-19T00:00:00.000Z"
+    };
+    repository.logIncomingMessage(record);
+    // redelivery must not duplicate the audit row
+    repository.logIncomingMessage(record);
+
+    expect(repository.hasIncomingMessage("discord-1")).toBe(true);
+    expect(repository.hasIncomingMessage("missing")).toBe(false);
+    expect(repository.getIncomingMessage("discord-1")).toEqual(record);
+  });
+
+  it("logs DM and bot messages without optional guild/thread fields", () => {
+    repository = new ArtemisRepository(":memory:");
+    const record: IncomingMessageRecord = {
+      discordMessageId: "dm-1",
+      channelId: "dm-channel",
+      authorId: "bot-1",
+      authorName: "OtherBot",
+      isBot: true,
+      mentionsBot: false,
+      repliesToBot: false,
+      content: "",
+      createdAt: "2026-08-19T00:00:00.000Z"
+    };
+    repository.logIncomingMessage(record);
+    const stored = repository.getIncomingMessage("dm-1");
+    expect(stored).toEqual(record);
+    expect(stored?.guildId).toBeUndefined();
+    expect(stored?.threadId).toBeUndefined();
+    expect(stored?.parentChannelId).toBeUndefined();
+  });
+
+  it("adds incoming message storage when upgrading a version-two database", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-incoming-migration-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    const database = new Database(path);
+    database.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TEXT NOT NULL
+      );
+      INSERT INTO schema_migrations(version, applied_at) VALUES (1, '2026-08-19T00:00:00.000Z');
+      INSERT INTO schema_migrations(version, applied_at) VALUES (2, '2026-08-19T00:00:00.000Z');
+    `);
+    database.close();
+
+    repository = new ArtemisRepository(path);
+    expect(() =>
+      repository?.logIncomingMessage({
+        discordMessageId: "after-upgrade",
+        channelId: "channel",
+        authorId: "user",
+        isBot: false,
+        mentionsBot: false,
+        repliesToBot: false,
+        content: "logged after migration",
+        createdAt: "2026-08-19T00:00:00.000Z"
+      })
+    ).not.toThrow();
+    expect(repository?.hasIncomingMessage("after-upgrade")).toBe(true);
   });
 
   it("adds log storage when upgrading a version-one database", () => {
