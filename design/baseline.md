@@ -12,6 +12,10 @@ Artemis is a community-run Discord bot that supports AI-assisted conversations i
 
 The implementation uses PI and the PI SDK as the conversational harness, Ollama as the initial model provider, SQLite for durable sessions and chat logs, and Docker Compose for local operation. Configuration and credentials are supplied through an uncommitted `.env` file.
 
+## Design document map
+
+Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). The complete catalog is maintained in the [design document index](README.md).
+
 ## Goals
 
 - Connect reliably to Discord and operate in configured channels across guilds.

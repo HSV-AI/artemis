@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "check:design": "node scripts/check-design-docs.mjs",
     "check:scripts": "bash -n scripts/update-artemis-if-needed.sh",
     "dev": "tsx src/index.ts",
     "lint": "eslint .",
@@ -16,7 +17,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "guardrail": "npm run lint && npm run typecheck && npm run check:scripts && npm run test:coverage && npm run build"
+    "guardrail": "npm run lint && npm run typecheck && npm run check:scripts && npm run check:design && npm run test:coverage && npm run build"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.84.2",
