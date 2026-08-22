@@ -119,7 +119,7 @@ Configuration is loaded once at startup, parsed into a typed runtime object, and
 - Discord bot token and an optional comma-separated list of allowed channel IDs across guilds. A blank list disables guild responses.
 - An optional comma-separated list of authorized Discord DM user IDs, with no built-in default. A blank list authorizes no DM users and has no effect on guild conversations.
 - Comma-separated allowed guild channel IDs. Threads are matched by parent channel ID.
-- Existing Ollama endpoint, model, and API key variables, plus an optional model config path and API key. A selected JSON definition owns provider identity, endpoint, model, context limits, reasoning support, and PI compatibility flags.
+- Existing Ollama endpoint, model, and API key variables, plus an optional model config path and API key. A selected JSON definition owns provider identity, endpoint, model, context limits, explicit reasoning effort, reasoning support, and PI compatibility flags.
 - An optional persona profile path. The selected UTF-8 file must contain nonblank text and is loaded as trusted model-facing configuration at startup.
 - Optional GitHub API token and a comma-separated repository allowlist. When the variable is absent, the application fallback is `mbrooks/artemis,HSV-AI/artemis`; the supplied `.env.example` explicitly selects only `HSV-AI/artemis`. A blank token or an explicitly blank repository allowlist disables all GitHub tools.
 - SQLite database path.
@@ -172,7 +172,7 @@ Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP
 
 The system prompt is built from the conversation kind, the optional persona profile, and the tools that were actually registered. The built-in Artemis identity is used only when no profile is selected; a selected operator profile supplies the variant identity under a distinct heading. Discord speaker handling, conversation-kind limits, and capability rules remain application-owned. The Capability Gap Protocol tells Artemis to acknowledge an unavailable capability, avoid source exploration or improvised code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when that tool is available. Its Available Tools section is generated from the live custom-tool registry so the prompt does not advertise unregistered tools.
 
-Provider identity and model metadata are configuration, not conditionals embedded in application logic. Changing providers therefore requires a JSON configuration update and restart, not a code change. Model discovery and completion remain behind a narrow boundary so unit tests can substitute a deterministic fake.
+Provider identity, model metadata, and reasoning effort are configuration, not conditionals embedded in application logic. Changing providers or reasoning effort therefore requires a JSON configuration update and restart, not a code change. Model discovery and completion remain behind a narrow boundary so unit tests can substitute a deterministic fake.
 
 #### Persistence
 
@@ -270,7 +270,7 @@ Transient Discord disconnects rely on the Discord client's resume and reconnect 
 - Model provider or PI failure during a turn: persist the normalized error name and message with correlation IDs, but send nothing to Discord.
 - Discord disconnect: rely on Discord.js shard reconnect/resume behavior and log disconnect, reconnect, resume, and ready transitions.
 - Duplicate Discord event: return without a second model invocation or duplicate persisted turn.
-- Discord response too long: split at Discord-safe boundaries while retaining one assistant message in conversation history.
+- Discord response too long: split at a sentence ending when possible, then a newline or space, while retaining one assistant message in conversation history.
 
 ## Security and privacy
 

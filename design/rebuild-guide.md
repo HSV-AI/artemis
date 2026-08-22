@@ -106,7 +106,7 @@ Normal assistant output is sent in the same DM, channel, or thread that triggere
 
 After a normal message passes all authorization and duplicate checks, send a typing indicator immediately and refresh it every five seconds while generation is active, safely inside Discord's expiry window. Keep the heartbeat active until success or failure, then stop it. Ignored and duplicate messages must never show typing. A typing-indicator API failure is logged but does not prevent generation.
 
-Discord limits message content to 2,000 characters. Split longer responses into ordered chunks, preferring a newline or space in the latter half of each chunk. Persist the assistant response as one logical message even when Discord receives multiple chunks.
+Discord limits message content to 2,000 characters. Split longer responses into ordered chunks, preferring the end of a complete sentence in the latter half of each chunk, then a newline, then a space, before falling back to the hard limit. Persist the assistant response as one logical message even when Discord receives multiple chunks.
 
 The 2,000-character split is a transport concern. Separately, group/channel (guild) responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) discrete Discord messages per assistant turn. This is a model-facing instruction, not a post-hoc truncation: the system prompt told the model the cap and that each message must be a complete, self-contained thought with no sentence split across messages. Direct-message responses are not subject to any message-count or response-length instruction. The channel-limit instruction is presented to the model only for guild sessions; DM sessions must never see limit messaging. Selection is deterministic from the conversation kind, so the prompt a session receives is fixed by its conversation key rather than by runtime state. The harness must build its system prompt per conversation kind and must not concatenate a single static prompt across both kinds.
 
@@ -232,6 +232,7 @@ The array contains one object per message in oldest-to-newest order. Preserve me
 The model-facing implementation must:
 
 - Use the configured model rather than hard-coding a conditional model choice.
+- Apply the provider definition's explicit reasoning effort to every model request.
 - Supply the complete stored history for the logical session in order.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
 - Enable only `web_fetch` and, when configured, the six GitHub custom tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
@@ -291,7 +292,9 @@ The default workflow remains:
 
 When `MODEL_CONFIG_PATH` is selected, the operator-provided JSON provider
 definition and `MODEL_API_KEY` replace those Ollama settings. Upstream Artemis
-does not own any concrete alternate-provider values.
+does not own any concrete alternate-provider values. The definition must select
+one reasoning effort from `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or
+`max`; the default Ollama definition selects `medium`.
 
 Before connecting Discord, perform a bounded health check against the model service and initialize or validate the configured model. Send a bearer header only when the configured API key is nonblank.
 

@@ -69,6 +69,20 @@ describe("Discord helpers", () => {
     expect(splitDiscordMessage("abcdefghijkl", 5)).toEqual(["abcde", "fghij", "kl"]);
   });
 
+  it("prefers complete sentences over later spaces", () => {
+    expect(splitDiscordMessage(
+      "First complete sentence. Not ambitious either.",
+      30
+    )).toEqual(["First complete sentence.", "Not ambitious either."]);
+  });
+
+  it("falls back to a line break when no sentence ends in the latter half", () => {
+    expect(splitDiscordMessage("heading here\nsecond line continues", 21)).toEqual([
+      "heading here",
+      "second line continues"
+    ]);
+  });
+
   it("normalizes DMs and threads", async () => {
     const direct = toInboundMessage(fakeMessage(), "artemis-user");
     expect(direct).toMatchObject({
