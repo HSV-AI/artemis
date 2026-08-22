@@ -1,4 +1,5 @@
 import type {
+  ChannelRef,
   ConversationIdentity,
   InboundMessage,
   Logger,
@@ -15,21 +16,25 @@ export interface ConversationServiceOptions {
   model: string;
 }
 
-export function deriveConversationIdentity(message: InboundMessage): ConversationIdentity {
-  if (!message.guildId) {
+export function deriveChannelIdentity(ref: ChannelRef): ConversationIdentity {
+  if (!ref.guildId) {
     return {
-      key: `dm:${message.channelId}`,
+      key: `dm:${ref.channelId}`,
       kind: "dm",
-      channelId: message.channelId
+      channelId: ref.channelId
     };
   }
-  const channelId = message.parentChannelId ?? message.channelId;
+  const channelId = ref.parentChannelId ?? ref.channelId;
   return {
-    key: `guild:${message.guildId}:channel:${channelId}`,
+    key: `guild:${ref.guildId}:channel:${channelId}`,
     kind: "guild",
-    guildId: message.guildId,
+    guildId: ref.guildId,
     channelId
   };
+}
+
+export function deriveConversationIdentity(message: InboundMessage): ConversationIdentity {
+  return deriveChannelIdentity(message);
 }
 
 export class ConversationService {
@@ -133,5 +138,19 @@ export class ConversationService {
         message.responseIndicator?.stop();
       }
     });
+  }
+
+  public clearSession(ref: ChannelRef): { cleared: boolean } {
+    const identity = deriveChannelIdentity(ref);
+    const result = this.repository.clearActiveSession(identity.key);
+    this.repository.recordEvent("session_cleared", {
+      conversationKey: identity.key,
+      details: { cleared: result.cleared, sessionId: result.sessionId }
+    });
+    this.logger.info("session_cleared", {
+      conversationKey: identity.key,
+      cleared: result.cleared
+    });
+    return { cleared: result.cleared };
   }
 }

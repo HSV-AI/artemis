@@ -123,6 +123,88 @@ describe("ArtemisRepository", () => {
     });
   });
 
+  it("clears the active session while preserving archived history", () => {
+    repository = new ArtemisRepository(":memory:");
+    const identity = { key: "dm:one", kind: "dm" as const, channelId: "one" };
+    const session = repository.getOrCreateSession(identity, "model");
+    repository.insertSourceMessages(session.id, [
+      {
+        discordMessageId: "u1",
+        authorId: "user",
+        authorName: "User",
+        role: "user",
+        content: "hello",
+        createdAt: "2026-08-19T00:00:00.000Z"
+      }
+    ]);
+    repository.insertAssistant(session.id, { text: "hi", model: "model" });
+
+    const result = repository.clearActiveSession(identity.key);
+    expect(result).toEqual({ cleared: true, sessionId: session.id });
+
+    const next = repository.getOrCreateSession(identity, "model");
+    expect(next.id).not.toBe(session.id);
+    expect(repository.getHistory(next.id)).toEqual([]);
+    expect(repository.getHistory(session.id)).toEqual([
+      expect.objectContaining({ role: "user", content: "hello" }),
+      expect.objectContaining({ role: "assistant", content: "hi" })
+    ]);
+  });
+
+  it("reports nothing to clear when no active session exists", () => {
+    repository = new ArtemisRepository(":memory:");
+    expect(repository.clearActiveSession("dm:missing")).toEqual({ cleared: false });
+  });
+
+  it("clears only the active session for the requested conversation", () => {
+    repository = new ArtemisRepository(":memory:");
+    const dm = { key: "dm:one", kind: "dm" as const, channelId: "one" };
+    const guild = {
+      key: "guild:g:channel:c",
+      kind: "guild" as const,
+      guildId: "g",
+      channelId: "c"
+    };
+    const dmSession = repository.getOrCreateSession(dm, "model");
+    const guildSession = repository.getOrCreateSession(guild, "model");
+    repository.insertSourceMessages(dmSession.id, [
+      {
+        discordMessageId: "dm-u1",
+        authorId: "user",
+        authorName: "User",
+        role: "user",
+        content: "dm hello",
+        createdAt: "2026-08-19T00:00:00.000Z"
+      }
+    ]);
+    repository.insertSourceMessages(guildSession.id, [
+      {
+        discordMessageId: "guild-u1",
+        authorId: "user",
+        authorName: "User",
+        role: "user",
+        content: "guild hello",
+        createdAt: "2026-08-19T00:00:00.000Z"
+      }
+    ]);
+
+    repository.clearActiveSession(dm.key);
+
+    // dm archived history is preserved, but a new active session starts fresh
+    expect(repository.getHistory(dmSession.id)).toEqual([
+      expect.objectContaining({ content: "dm hello" })
+    ]);
+    const nextDm = repository.getOrCreateSession(dm, "model");
+    expect(nextDm.id).not.toBe(dmSession.id);
+    expect(repository.getHistory(nextDm.id)).toEqual([]);
+    // guild session is untouched and remains the same active session
+    const sameGuild = repository.getOrCreateSession(guild, "model");
+    expect(sameGuild.id).toBe(guildSession.id);
+    expect(repository.getHistory(guildSession.id)).toEqual([
+      expect.objectContaining({ content: "guild hello" })
+    ]);
+  });
+
   it("adds log storage when upgrading a version-one database", () => {
     const directory = mkdtempSync(join(tmpdir(), "artemis-migration-"));
     temporaryDirectories.push(directory);

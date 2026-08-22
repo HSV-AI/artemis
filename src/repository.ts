@@ -146,6 +146,28 @@ export class ArtemisRepository {
     return transaction();
   }
 
+  public clearActiveSession(conversationKey: string): { cleared: boolean; sessionId?: string } {
+    const transaction = this.database.transaction(() => {
+      const session = this.database
+        .prepare(
+          `SELECT s.id
+           FROM sessions s
+           JOIN conversations c ON c.id = s.conversation_id
+           WHERE c.conversation_key = ? AND s.status = 'active'
+           LIMIT 1`
+        )
+        .get(conversationKey) as { id: string } | undefined;
+      if (!session) {
+        return { cleared: false };
+      }
+      this.database
+        .prepare("UPDATE sessions SET status = 'closed', updated_at = ? WHERE id = ?")
+        .run(now(), session.id);
+      return { cleared: true, sessionId: session.id };
+    });
+    return transaction();
+  }
+
   public getHistory(sessionId: string): StoredMessage[] {
     const rows = this.database
       .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC")
