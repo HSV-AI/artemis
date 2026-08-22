@@ -23,6 +23,7 @@ The following behavior is fixed:
 - Model or harness failures are logged and persisted, but produce no Discord response.
 - The model may use explicitly allowlisted custom tools: `web_fetch`, plus six GitHub tools when a token is configured. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled.
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
+- Group/channel (guild) assistant responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) self-contained Discord messages per turn. DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind (`guild` vs `dm`).
 - Ollama runs as a separate Docker Compose service. It is not installed in the Artemis application image.
 
 The following may be replaced:
@@ -101,6 +102,8 @@ Normal assistant output is sent in the same DM, channel, or thread that triggere
 After a normal message passes all authorization and duplicate checks, send a typing indicator immediately and refresh it every five seconds while generation is active, safely inside Discord's expiry window. Keep the heartbeat active until success or failure, then stop it. Ignored and duplicate messages must never show typing. A typing-indicator API failure is logged but does not prevent generation.
 
 Discord limits message content to 2,000 characters. Split longer responses into ordered chunks, preferring a newline or space in the latter half of each chunk. Persist the assistant response as one logical message even when Discord receives multiple chunks.
+
+The 2,000-character split is a transport concern. Separately, group/channel (guild) responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) discrete Discord messages per assistant turn. This is a model-facing instruction, not a post-hoc truncation: the system prompt told the model the cap and that each message must be a complete, self-contained thought with no sentence split across messages. Direct-message responses are not subject to any message-count or response-length instruction. The channel-limit instruction is presented to the model only for guild sessions; DM sessions must never see limit messaging. Selection is deterministic from the conversation kind, so the prompt a session receives is fixed by its conversation key rather than by runtime state. The harness must build its system prompt per conversation kind and must not concatenate a single static prompt across both kinds.
 
 ### Raw message audit
 
@@ -225,7 +228,7 @@ The model-facing implementation must:
 - Supply the complete stored history for the logical session in order.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
 - Enable only `web_fetch` and, when configured, the six GitHub custom tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
-- Apply a system instruction equivalent to: Artemis is a helpful conversational Discord assistant, should answer the latest message directly, and must not claim Discord capabilities it was not given.
+- Apply a system instruction equivalent to: Artemis is a helpful conversational Discord assistant, should answer the latest message directly, and must not claim Discord capabilities it was not given. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. Prompt construction must be a pure function of the conversation kind plus the registered tool registry.
 - Return final assistant text separately from optional reasoning and diagnostics.
 - Treat aborted, errored, absent, and blank final responses as failures.
 
@@ -478,6 +481,7 @@ At minimum, prove all of the following:
 - `web_fetch` rejects non-HTTP(S) targets, uses the configured Ollama host and authentication, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and prevent implicit mutations.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
+- Guild sessions receive the channel-limits system-prompt block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3`, self-contained-thought rule) while DM sessions receive no limit messaging; prompt selection is deterministic from the conversation kind.
 - Console logs continue when SQLite log persistence fails, without recursive failures.
 - Startup fails before Discord login when configuration, database migration, or model health validation fails.
 - The application image does not contain Ollama and Compose starts it as a separate dependency.

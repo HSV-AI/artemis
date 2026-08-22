@@ -100,9 +100,11 @@ describe("ConversationService", () => {
     ).resolves.toBe("Hello group");
 
     expect(pi.generate).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(pi.generate).mock.calls[0]?.[0].conversationKind).toBe("guild");
     expect(vi.mocked(pi.generate).mock.calls[0]?.[0].prompt).toContain(
       '"author":{"id":"not-in-dm-user-allowlist","name":"Matt"}'
     );
+    expect(vi.mocked(pi.generate).mock.calls[1]?.[0].conversationKind).toBe("dm");
     expect(vi.mocked(pi.generate).mock.calls[1]?.[0].prompt).toContain(
       '"author":{"id":"second-user","name":"Matt"}'
     );

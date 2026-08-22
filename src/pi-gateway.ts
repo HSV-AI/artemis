@@ -15,6 +15,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import type { ArtemisConfig } from "./config.js";
 import type {
+  ConversationKind,
   PiGateway,
   PiGenerationInput,
   PiGenerationResult,
@@ -24,9 +25,33 @@ import { createGitHubTools } from "./github-tools.js";
 import { formatDiscordMessage } from "./model-context.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
 
-const SYSTEM_PROMPT_BASE =
-  "You are Artemis, a helpful conversational assistant in Discord. Discord messages are provided as JSON with explicit author metadata. Treat each author ID as a distinct speaker, preserve who said what, and do not collapse different speakers into a generic 'you'. Answer the newest message directly. Do not claim to have Discord capabilities you were not given.\n\n" +
-  "## Capability Gap Protocol\n\n" +
+/**
+ * Maximum number of Discord messages Artemis may split a single response into
+ * when replying in a group/channel. Direct messages (DMs) are not bound by this
+ * limit. Documented in the system prompt so the model enforces it.
+ */
+export const GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3;
+
+const BASE_SYSTEM_PROMPT =
+  "You are Artemis, a helpful conversational assistant in Discord. Discord messages are provided as JSON with explicit author metadata. Treat each author ID as a distinct speaker, preserve who said what, and do not collapse different speakers into a generic 'you'. Answer the newest message directly. Do not claim to have Discord capabilities you were not given.";
+
+/**
+ * Channel multi-message limits. Only appended to the system prompt for
+ * group/channel (guild) sessions. Direct messages never receive this block so
+ * the model is not told any length limitation for DMs. Selection is driven by
+ * {@link buildSystemPrompt} from the conversation kind, making it deterministic.
+ */
+const CHANNEL_LIMITS_PROMPT_BLOCK = `
+
+## Discord Channel Limits
+Write responses like a Discord message — concise and conversational. One or two sentences usually does it. Use code blocks for code/config. Don't pad.
+
+In group/channel messages, you may respond in up to ${GROUP_CHANNEL_MULTI_MESSAGE_MAX} messages. Each message must be a complete, self-contained thought — never split a sentence across messages.
+
+(GROUP_CHANNEL_MULTI_MESSAGE_MAX = ${GROUP_CHANNEL_MULTI_MESSAGE_MAX})`;
+
+const CAPABILITY_GAP_PROMPT_BLOCK =
+  "\n\n## Capability Gap Protocol\n\n" +
   "When you encounter a missing capability or tool, you MUST NOT explore source code, generate code, or jury-rig a workaround. Do not self-modify. Follow this protocol instead:\n" +
   "1. Acknowledge the gap — tell the user plainly that you cannot fulfill the request with your current tools.\n" +
   "2. File a GitHub issue — use the `github_create` tool with resource `issue` against the HSV-AI/artemis project to request the missing tool or capability.\n" +
@@ -43,7 +68,17 @@ export interface ToolRegistryEntry {
   promptGuidelines?: string[];
 }
 
-export function buildSystemPrompt(tools: readonly ToolRegistryEntry[]): string {
+/**
+ * Build the system prompt deterministically from the conversation kind and the
+ * registered tools. Guild/channel sessions get the channel-limits block; DM
+ * sessions never see limit messaging. The Capability Gap Protocol and Available
+ * Tools sections are always included so the model knows its real boundaries.
+ */
+export function buildSystemPrompt(
+  kind: ConversationKind,
+  tools: readonly ToolRegistryEntry[] = []
+): string {
+  const channelLimits = kind === "guild" ? CHANNEL_LIMITS_PROMPT_BLOCK : "";
   const registry = tools.length === 0
     ? "No tools are currently registered. Apply the Capability Gap Protocol for any task that needs a tool."
     : tools
@@ -57,7 +92,7 @@ export function buildSystemPrompt(tools: readonly ToolRegistryEntry[]): string {
           return lines.join("\n");
         })
         .join("\n");
-  return `${SYSTEM_PROMPT_BASE}\n\n${registry}`;
+  return `${BASE_SYSTEM_PROMPT}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}`;
 }
 
 function createCustomTools(
@@ -143,7 +178,7 @@ function extractGeneration(message: AssistantMessage): PiGenerationResult {
 
 export class PiSdkGateway implements PiGateway {
   private modelRuntime: ModelRuntime | undefined;
-  private resourceLoader: DefaultResourceLoader | undefined;
+  private readonly resourceLoaders = new Map<ConversationKind, DefaultResourceLoader>();
   private customTools: ReturnType<typeof createCustomTools> = [];
 
   public constructor(
@@ -176,10 +211,10 @@ export class PiSdkGateway implements PiGateway {
     await this.initialize();
     const customTools = this.customTools;
     const modelRuntime = this.modelRuntime;
-    const resourceLoader = this.resourceLoader;
-    if (!modelRuntime || !resourceLoader) {
+    if (!modelRuntime) {
       throw new Error("PI gateway failed to initialize");
     }
+    const resourceLoader = await this.getResourceLoader(input.conversationKind);
     const model = modelRuntime.getModel("ollama", this.config.ollamaModel);
     if (!model) {
       throw new Error(`Configured Ollama model is unavailable: ${this.config.ollamaModel}`);
@@ -222,7 +257,7 @@ export class PiSdkGateway implements PiGateway {
   }
 
   private async initialize(): Promise<void> {
-    if (this.modelRuntime && this.resourceLoader) {
+    if (this.modelRuntime) {
       return;
     }
     this.customTools = createCustomTools(this.config, this.fetchImplementation);
@@ -255,7 +290,14 @@ export class PiSdkGateway implements PiGateway {
       ]
     });
     await modelRuntime.setRuntimeApiKey("ollama", this.config.ollamaApiKey);
+    this.modelRuntime = modelRuntime;
+  }
 
+  private async getResourceLoader(kind: ConversationKind): Promise<DefaultResourceLoader> {
+    const existing = this.resourceLoaders.get(kind);
+    if (existing) {
+      return existing;
+    }
     const resourceLoader = new DefaultResourceLoader({
       cwd: process.cwd(),
       agentDir: process.cwd(),
@@ -264,11 +306,11 @@ export class PiSdkGateway implements PiGateway {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPrompt: buildSystemPrompt(this.customTools)
+      systemPrompt: buildSystemPrompt(kind, this.customTools)
     });
     await resourceLoader.reload();
-    this.modelRuntime = modelRuntime;
-    this.resourceLoader = resourceLoader;
+    this.resourceLoaders.set(kind, resourceLoader);
+    return resourceLoader;
   }
 }
 
