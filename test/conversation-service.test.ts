@@ -3,7 +3,12 @@ import {
   ConversationService,
   deriveConversationIdentity
 } from "../src/conversation-service.js";
-import type { PiGateway, PiGenerationResult, SourceMessage } from "../src/domain.js";
+import type {
+  InboundMessage,
+  PiGateway,
+  PiGenerationResult,
+  SourceMessage
+} from "../src/domain.js";
 import { ArtemisRepository } from "../src/repository.js";
 import { createLoggerMock, createPiMock, inbound } from "./helpers.js";
 
@@ -32,6 +37,87 @@ describe("conversation identity", () => {
     });
   });
 
+});
+
+describe("ConversationService incoming message logging", () => {
+  let repository: ArtemisRepository | undefined;
+
+  afterEach(() => repository?.close());
+
+  function createService(pi = createPiMock()) {
+    repository = new ArtemisRepository(":memory:");
+    const logger = createLoggerMock();
+    return { service: new ConversationService(options, repository, pi, logger), pi, logger };
+  }
+
+  it("logs every incoming message to the repository even when the response pipeline ignores it", () => {
+    const { service, pi } = createService();
+    const ignored: InboundMessage[] = [
+      inbound({ discordMessageId: "bot", isBot: true, content: "beep" }),
+      inbound({ discordMessageId: "empty", content: "   " }),
+      inbound({
+        discordMessageId: "unmentioned",
+        guildId: "guild-1",
+        channelId: "group-1",
+        mentionsBot: false,
+        repliesToBot: false
+      }),
+      inbound({ discordMessageId: "unauthorized-dm", authorId: "stranger" })
+    ];
+    for (const message of ignored) {
+      service.logMessage(message);
+    }
+
+    expect(pi.generate).not.toHaveBeenCalled();
+    for (const message of ignored) {
+      expect(repository?.hasIncomingMessage(message.discordMessageId)).toBe(true);
+      expect(repository?.getIncomingMessage(message.discordMessageId)?.content).toBe(
+        message.content
+      );
+    }
+  });
+
+  it("logs interactive messages without triggering a response itself", () => {
+    const { service, pi } = createService();
+    service.logMessage(inbound({ discordMessageId: "interactive" }));
+    expect(pi.generate).not.toHaveBeenCalled();
+    expect(repository?.hasIncomingMessage("interactive")).toBe(true);
+  });
+
+  it("preserves thread and parent channel context for guild thread messages", () => {
+    const { service } = createService();
+    service.logMessage(
+      inbound({
+        discordMessageId: "thread-msg",
+        guildId: "guild-1",
+        channelId: "thread-1",
+        parentChannelId: "group-1",
+        threadId: "thread-1",
+        content: "thread chat"
+      })
+    );
+    expect(repository?.getIncomingMessage("thread-msg")).toEqual(
+      expect.objectContaining({
+        guildId: "guild-1",
+        channelId: "thread-1",
+        parentChannelId: "group-1",
+        threadId: "thread-1",
+        content: "thread chat"
+      })
+    );
+  });
+
+  it("records a logger error and never throws when persistence fails", () => {
+    repository = new ArtemisRepository(":memory:");
+    const logger = createLoggerMock();
+    const service = new ConversationService(options, repository, createPiMock(), logger);
+    repository.close();
+    expect(() => service.logMessage(inbound({ discordMessageId: "boom" }))).not.toThrow();
+    expect(logger.error).toHaveBeenCalledWith(
+      "incoming_message_log_failed",
+      expect.objectContaining({ discordMessageId: "boom" })
+    );
+  });
 });
 
 describe("ConversationService clearing", () => {

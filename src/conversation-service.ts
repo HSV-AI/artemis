@@ -2,6 +2,7 @@ import type {
   ChannelRef,
   ConversationIdentity,
   InboundMessage,
+  IncomingMessageRecord,
   Logger,
   PiGateway
 } from "./domain.js";
@@ -50,6 +51,32 @@ export class ConversationService {
   ) {
     this.authorizedUserIds = new Set(options.userIds);
     this.allowedChannelIds = new Set(options.channelIds);
+  }
+
+  public logMessage(message: InboundMessage): void {
+    const record: IncomingMessageRecord = {
+      discordMessageId: message.discordMessageId,
+      channelId: message.channelId,
+      authorId: message.authorId,
+      authorName: message.authorName,
+      isBot: message.isBot,
+      mentionsBot: message.mentionsBot,
+      repliesToBot: message.repliesToBot,
+      content: message.content,
+      createdAt: message.createdAt,
+      ...(message.guildId !== undefined ? { guildId: message.guildId } : {}),
+      ...(message.parentChannelId !== undefined ? { parentChannelId: message.parentChannelId } : {}),
+      ...(message.threadId !== undefined ? { threadId: message.threadId } : {})
+    };
+    try {
+      this.repository.logIncomingMessage(record);
+    } catch (error) {
+      this.logger.error("incoming_message_log_failed", {
+        discordMessageId: message.discordMessageId,
+        channelId: message.channelId,
+        ...safeError(error)
+      });
+    }
   }
 
   public async handleMessage(message: InboundMessage): Promise<string | null> {

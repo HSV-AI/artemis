@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import type {
   ConversationIdentity,
+  IncomingMessageRecord,
   LogEntry,
   PiGenerationResult,
   SessionRecord,
@@ -45,6 +46,23 @@ interface MessageRow {
   created_at: string;
 }
 
+interface IncomingMessageRow {
+  id: number;
+  discord_message_id: string;
+  guild_id: string | null;
+  channel_id: string;
+  thread_id: string | null;
+  parent_channel_id: string | null;
+  author_id: string;
+  author_name: string | null;
+  is_bot: number;
+  mentions_bot: number;
+  replies_to_bot: number;
+  content: string;
+  created_at: string;
+  logged_at: string;
+}
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -75,6 +93,46 @@ export class ArtemisRepository {
       .prepare("SELECT 1 FROM messages WHERE discord_message_id = ? LIMIT 1")
       .get(discordMessageId);
     return row !== undefined;
+  }
+
+  public hasIncomingMessage(discordMessageId: string): boolean {
+    const row = this.database
+      .prepare("SELECT 1 FROM incoming_messages WHERE discord_message_id = ? LIMIT 1")
+      .get(discordMessageId);
+    return row !== undefined;
+  }
+
+  public getIncomingMessage(discordMessageId: string): IncomingMessageRecord | undefined {
+    const row = this.database
+      .prepare("SELECT * FROM incoming_messages WHERE discord_message_id = ? LIMIT 1")
+      .get(discordMessageId) as IncomingMessageRow | undefined;
+    return row ? this.mapIncomingMessage(row) : undefined;
+  }
+
+  public logIncomingMessage(record: IncomingMessageRecord): void {
+    this.database
+      .prepare(
+        `INSERT OR IGNORE INTO incoming_messages
+         (discord_message_id, guild_id, channel_id, thread_id, parent_channel_id,
+          author_id, author_name, is_bot, mentions_bot, replies_to_bot, content,
+          created_at, logged_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        record.discordMessageId,
+        record.guildId ?? null,
+        record.channelId,
+        record.threadId ?? null,
+        record.parentChannelId ?? null,
+        record.authorId,
+        record.authorName ?? null,
+        record.isBot ? 1 : 0,
+        record.mentionsBot ? 1 : 0,
+        record.repliesToBot ? 1 : 0,
+        record.content,
+        record.createdAt,
+        now()
+      );
   }
 
   public getOrCreateSession(identity: ConversationIdentity, model: string): SessionRecord {
@@ -348,6 +406,41 @@ export class ArtemisRepository {
       });
       transaction();
     }
+
+    const incomingApplied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 3")
+      .get();
+    if (!incomingApplied) {
+      const transaction = this.database.transaction(() => {
+        this.database.exec(`
+          CREATE TABLE incoming_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_message_id TEXT NOT NULL UNIQUE,
+            guild_id TEXT,
+            channel_id TEXT NOT NULL,
+            thread_id TEXT,
+            parent_channel_id TEXT,
+            author_id TEXT NOT NULL,
+            author_name TEXT,
+            is_bot INTEGER NOT NULL DEFAULT 0,
+            mentions_bot INTEGER NOT NULL DEFAULT 0,
+            replies_to_bot INTEGER NOT NULL DEFAULT 0,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            logged_at TEXT NOT NULL
+          );
+
+          CREATE INDEX incoming_messages_by_channel
+            ON incoming_messages(channel_id, id);
+
+          CREATE INDEX incoming_messages_by_created_at
+            ON incoming_messages(created_at, id);
+
+          INSERT INTO schema_migrations(version, applied_at) VALUES (3, '${now()}');
+        `);
+      });
+      transaction();
+    }
   }
 
   private mapSession(row: SessionRow): SessionRecord {
@@ -379,6 +472,27 @@ export class ArtemisRepository {
       ...(diagnostics !== undefined ? { diagnostics } : {}),
       ...(model ? { model } : {}),
       createdAt: row.created_at
+    };
+  }
+
+  private mapIncomingMessage(row: IncomingMessageRow): IncomingMessageRecord {
+    const guildId = optional(row.guild_id);
+    const threadId = optional(row.thread_id);
+    const parentChannelId = optional(row.parent_channel_id);
+    const authorName = optional(row.author_name);
+    return {
+      discordMessageId: row.discord_message_id,
+      channelId: row.channel_id,
+      authorId: row.author_id,
+      isBot: row.is_bot === 1,
+      mentionsBot: row.mentions_bot === 1,
+      repliesToBot: row.replies_to_bot === 1,
+      content: row.content,
+      createdAt: row.created_at,
+      ...(guildId ? { guildId } : {}),
+      ...(threadId ? { threadId } : {}),
+      ...(parentChannelId ? { parentChannelId } : {}),
+      ...(authorName ? { authorName } : {})
     };
   }
 }

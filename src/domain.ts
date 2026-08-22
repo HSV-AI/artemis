@@ -58,6 +58,21 @@ export interface StoredMessage extends SourceMessage {
   model?: string;
 }
 
+export interface IncomingMessageRecord {
+  discordMessageId: string;
+  channelId: string;
+  authorId: string;
+  authorName?: string;
+  isBot: boolean;
+  mentionsBot: boolean;
+  repliesToBot: boolean;
+  content: string;
+  createdAt: string;
+  guildId?: string;
+  parentChannelId?: string;
+  threadId?: string;
+}
+
 export interface PiGenerationInput {
   logicalSessionId: string;
   conversationKind: ConversationKind;

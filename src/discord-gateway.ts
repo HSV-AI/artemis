@@ -304,6 +304,7 @@ export class DiscordGateway {
       ...toInboundMessage(message, this.client.user?.id),
       responseIndicator: createTypingIndicator(message, this.logger)
     };
+    this.conversations.logMessage(inbound);
     const response = await this.conversations.handleMessage(inbound);
     if (!response) {
       return;

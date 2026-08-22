@@ -385,7 +385,8 @@ describe("DiscordGateway", () => {
 
   it("sends generated responses in Discord-safe chunks", async () => {
     const conversations = {
-      handleMessage: vi.fn().mockResolvedValue(`${"a".repeat(2_000)} ${"b".repeat(10)}`)
+      handleMessage: vi.fn().mockResolvedValue(`${"a".repeat(2_000)} ${"b".repeat(10)}`),
+      logMessage: vi.fn()
     } as unknown as ConversationService;
     const client = new FakeClient();
     const gateway = new DiscordGateway(
@@ -413,7 +414,8 @@ describe("DiscordGateway", () => {
         await message.responseIndicator?.start();
         message.responseIndicator?.stop();
         return message.guildId ? `${"a".repeat(2_000)} ${"b".repeat(10)}` : "response";
-      })
+      }),
+      logMessage: vi.fn()
     } as unknown as ConversationService;
     const gateway = new DiscordGateway(
       { token: "token", channelIds: ["channel"], userIds: ["user"] },
@@ -458,7 +460,10 @@ describe("DiscordGateway", () => {
   });
 
   it("logs every Discord message with its content before routing", async () => {
-    const conversations = { handleMessage: vi.fn().mockResolvedValue(null) };
+    const conversations = {
+      handleMessage: vi.fn().mockResolvedValue(null),
+      logMessage: vi.fn()
+    };
     const logger = createLoggerMock();
     const gateway = new DiscordGateway(
       { token: "token", channelIds: ["group-one"], userIds: ["user"] },
@@ -504,8 +509,63 @@ describe("DiscordGateway", () => {
     );
   });
 
+  it("persists every incoming message to the history log independently of the response", async () => {
+    const conversations = {
+      handleMessage: vi.fn().mockResolvedValue(null),
+      logMessage: vi.fn()
+    };
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["group-one"], userIds: ["user"] },
+      conversations as unknown as ConversationService,
+      createLoggerMock(),
+      new FakeClient() as unknown as Client
+    );
+
+    const botMessage = fakeMessage({
+      id: "bot-message",
+      guildId: "guild",
+      author: { id: "other-bot", username: "other-bot", globalName: null, bot: true },
+      content: "other bot chatter"
+    });
+    const unmentioned = fakeMessage({
+      id: "unmentioned",
+      guildId: "guild",
+      channelId: "group-one",
+      content: "channel chatter"
+    });
+    const dm = fakeMessage({ id: "dm-message", guildId: null, content: "hi" });
+
+    await gateway.handleMessage(botMessage);
+    await gateway.handleMessage(unmentioned);
+    await gateway.handleMessage(dm);
+
+    expect(conversations.logMessage).toHaveBeenCalledTimes(3);
+    expect(conversations.logMessage).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        discordMessageId: "bot-message",
+        isBot: true,
+        content: "other bot chatter"
+      })
+    );
+    expect(conversations.logMessage).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ discordMessageId: "unmentioned", mentionsBot: false })
+    );
+    expect(conversations.logMessage).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ discordMessageId: "dm-message", channelId: "channel", content: "hi" })
+    );
+    const dmLogged = vi.mocked(conversations.logMessage).mock.calls[2]?.[0];
+    expect(dmLogged?.guildId).toBeUndefined();
+    // logging happens before the response pipeline is invoked
+    expect(vi.mocked(conversations.logMessage).mock.invocationCallOrder[0]).toBeLessThan(
+      conversations.handleMessage.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER
+    );
+  });
+
   it("does not send null responses and warns for non-sendable channels", async () => {
-    const conversations = { handleMessage: vi.fn().mockResolvedValue(null) };
+    const conversations = { handleMessage: vi.fn().mockResolvedValue(null), logMessage: vi.fn() };
     const logger = createLoggerMock();
     const gateway = new DiscordGateway(
       { token: "token", channelIds: ["group-one"], userIds: ["user"] },
