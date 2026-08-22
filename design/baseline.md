@@ -10,11 +10,11 @@ Last updated: 2026-08-22
 
 Artemis is a community-run Discord bot that supports AI-assisted conversations in direct messages and selected guild chats. The current application allows configured users to converse with the model in DMs and any user to converse in configured channels across guilds, exposes context-aware `/ping`, `/uptime`, and `/clear-session` commands, and preserves each chat's context across restarts until an authorized user starts a fresh session.
 
-The implementation uses PI and the PI SDK as the conversational harness, SQLite for durable sessions and chat logs, and Docker Compose for local operation. The existing Ollama-backed workflow remains the default; an optional operator-provided JSON file selects another OpenAI-compatible provider. A named [persona profile](persona-profile.md) supplies identity and style instructions without replacing Artemis's fixed rules. Environment configuration and credentials are supplied through an uncommitted `.env` file. [Configurable model provider](model-provider.md) owns the detailed provider and web-fetch contract.
+The implementation uses PI and the PI SDK as the conversational harness, SQLite for durable sessions and chat logs, and Docker Compose for local operation. The existing Ollama-backed workflow remains the default; an optional operator-provided JSON file selects another OpenAI-compatible provider. A named [persona profile](persona-profile.md) supplies identity and style instructions without replacing Artemis's fixed rules. The Wartermis profile adds explicit, conversation-scoped [Dgraph memory](wartermis-memory.md). Environment configuration and credentials are supplied through an uncommitted `.env` file. [Configurable model provider](model-provider.md) owns the detailed provider and web-fetch contract.
 
 ## Design document map
 
-Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). [Discord link-embed suppression](discord-link-embeds.md) enforces removal of link-preview cards on every outbound Discord message at the application layer, independent of the model, with a global default and per-channel override. [Persona profiles](persona-profile.md) let deployments vary identity and tone while preserving the common behavioral boundary. The complete catalog is maintained in the [design document index](README.md).
+Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). [Discord link-embed suppression](discord-link-embeds.md) enforces removal of link-preview cards on every outbound Discord message at the application layer, independent of the model, with a global default and per-channel override. [Persona profiles](persona-profile.md) let deployments vary identity and tone while preserving the common behavioral boundary. [Wartermis graph memory](wartermis-memory.md) defines its Dgraph-backed fact lifecycle and PI tools. The complete catalog is maintained in the [design document index](README.md).
 
 ## Goals
 
@@ -26,6 +26,7 @@ Detailed protocols and major features live in focused subdocuments so this basel
 - Make the model and runtime settings configurable without code changes.
 - Let deployments select a distinct bot identity and conversational style without forking application code or replacing fixed safety and capability rules.
 - Let the model fetch web pages and, when configured, operate on GitHub through explicitly allowlisted custom tools while keeping built-in coding tools disabled.
+- Let Wartermis explicitly retain, correct, forget, recall, and audit facts without sharing them across Discord conversation keys.
 - Show a typing indicator while generating and attach every guild response to its triggering question with a Discord reply.
 - Let a guild user continue a conversation by replying directly to an Artemis message without repeating a mention.
 - Record enough activity, errors, chat history, and available model diagnostics for operators to debug conversations.
@@ -51,6 +52,7 @@ Detailed protocols and major features live in focused subdocuments so this basel
 | Direct-message and guild conversations | Derive a stable conversation key from the Discord context. Direct messages use the DM channel ID. Guild messages, including thread replies, use the guild ID plus the parent channel ID. |
 | Channel-aware response limits | Group/channel (guild) responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained Discord messages per turn; DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind. |
 | Isolated, persistent context | Associate each conversation key with one active logical session and store its messages in SQLite. Reconstruct PI input from that session's ordered history, and never query history without the conversation key. |
+| Wartermis long-term memory | Bind each memory tool call to the immutable Discord conversation key, author ID, and source message ID; persist facts and tombstones in Dgraph across PI sessions. |
 | Configurable model and runtime | Read provider metadata from an optional local JSON file and credentials plus other runtime settings from environment variables loaded through `.env`. |
 | Reconnection | Use the Discord client's reconnect and resume behavior, and log connection lifecycle events. |
 | Debuggable operation | Emit structured application logs and persist sessions, chat messages, model metadata, and available reasoning or diagnostics. |
@@ -97,8 +99,10 @@ flowchart LR
         Sessions --> PI[PI harness SDK]
         PI --> WebFetch[web_fetch tool<br/>sanitized external content]
         PI --> GitHub[GitHub tools<br/>token-gated and sanitized]
+        PI --> Memory[Wartermis memory tools<br/>explicit and conversation-scoped]
         WebFetch --> Web[HTTP or HTTPS page]
         GitHub --> GitHubAPI[GitHub API]
+        Memory --> Dgraph[(Dgraph<br/>durable facts and tombstones)]
         PI --> Model[Configured OpenAI-compatible endpoint<br/>Ollama default or operator-selected provider]
         Model --> PI
         PI -- Reasoning and diagnostics --> Store
@@ -122,6 +126,7 @@ Configuration is loaded once at startup, parsed into a typed runtime object, and
 - Existing Ollama endpoint, model, and API key variables, plus an optional model config path and API key. A selected JSON definition owns provider identity, endpoint, model, context limits, optional explicit reasoning effort, reasoning support, and PI compatibility flags.
 - A named persona profile, defaulting to `artemis`, selected from complete source-controlled profiles under `src/personas/`.
 - Optional GitHub API token and a comma-separated repository allowlist. When the variable is absent, the application fallback is `mbrooks/artemis,HSV-AI/artemis`; the supplied `.env.example` explicitly selects only `HSV-AI/artemis`. A blank token or an explicitly blank repository allowlist disables all GitHub tools.
+- A Dgraph HTTP endpoint, defaulting to `http://dgraph:8080`, used only when the selected profile is Wartermis.
 - SQLite database path.
 - Log level and other non-secret runtime controls.
 
@@ -168,7 +173,7 @@ An authorized `/clear-session` closes the active session for the same conversati
 
 PI is the base conversational harness and owns interaction with the configured OpenAI-compatible model endpoint. Application code supplies the isolated conversation session and user message, then consumes the assistant response plus any available reasoning or diagnostic metadata. [Configurable model provider](model-provider.md) defines the provider file and startup contract.
 
-Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, fetches it directly as a PI custom tool, bounds and extracts its content, and sanitizes the returned page independently of the model provider. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers `github_search`, `github_list`, `github_fetch`, `github_create`, `github_update`, and `github_upload_image`. Every operation resolves its repository against that case-insensitive allowlist before making a request; repository-scoped calls require explicit `owner` and `repo` arguments. Searches may omit them to run separately within every allowed repository and never perform a global GitHub search. The tools sanitize GitHub read results as untrusted content. The tool descriptions instruct PI to perform a GitHub mutation only when the current Discord user explicitly requested that specific change; the execution functions enforce repository and parameter validation but do not independently reconstruct conversational intent. CASE-specific watch creation and git-origin discovery are intentionally not ported. PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Tool failures follow the normal generation-failure path and produce no Discord response.
+Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, fetches it directly as a PI custom tool, bounds and extracts its content, and sanitizes the returned page independently of the model provider. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers the six documented GitHub tools behind their repository allowlist. The Wartermis profile additionally registers six Dgraph-backed memory tools bound to the current conversation key, Discord author, and source message. Memory writes require an explicit user request and use tombstones for correction or forgetting; [Wartermis graph memory](wartermis-memory.md) owns the detailed contract. PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Tool failures follow the normal generation-failure path and produce no Discord response.
 
 The system prompt is built from the conversation kind, the selected persona profile, and the tools that were actually registered. Each profile supplies its complete identity from a dedicated file under `src/personas/`; prompt construction does not special-case the default profile. Discord speaker handling, conversation-kind limits, and capability rules remain application-owned. The Capability Gap Protocol tells Artemis to acknowledge an unavailable capability, avoid source exploration or improvised code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when that tool is available. Its Available Tools section is generated from the live custom-tool registry so the prompt does not advertise unregistered tools.
 
@@ -190,6 +195,8 @@ Foreign keys and WAL mode are enabled. Conversation keys, source Discord message
 
 The SQLite file lives on a persistent Docker volume and remains available across container restarts and upgrades. Schema migrations run before Discord connects and must be backward-safe for existing local data.
 
+Wartermis facts are stored separately in Dgraph under the same stable conversation key. The `dgraph-data` volume survives restarts and `/clear-session`; memory has no automatic expiration, and correction or forgetting retains ended facts for audit.
+
 There is no automatic retention or deletion policy. Chat content, session data, and model reasoning or diagnostics remain in SQLite indefinitely unless an operator deliberately removes records or deletes the local data volume.
 
 #### Logging and operator access
@@ -202,7 +209,7 @@ Chat content, PI session history, and model-provided reasoning or diagnostics ar
 
 #### Container topology
 
-Base Docker Compose retains three services: `ollama`, the one-shot `ollama-model` pull job, and `artemis`. A deployment-owned override may select an external provider without changing the upstream topology. Artemis performs a bounded `/models` health check before Discord login.
+Base Docker Compose contains `ollama`, the one-shot `ollama-model` pull job, `dgraph`, and `artemis`. A deployment-owned override may select an external provider without changing the upstream topology. Artemis performs a bounded `/models` health check before Discord login. Wartermis also applies the Dgraph fact schema before login; other profiles do not contact Dgraph.
 
 ## Runtime flows
 
@@ -211,8 +218,9 @@ Base Docker Compose retains three services: `ollama`, the one-shot `ollama-model
 1. Load and validate environment configuration.
 2. Open SQLite, enable foreign keys, and apply migrations.
 3. Load the model provider definition and health-check its OpenAI-compatible `/models` endpoint.
-4. Connect the Discord client and register the three global slash commands when Discord reports ready.
-5. Log a successful ready event including the connected bot identity and allowed channel IDs, but no secrets.
+4. When Wartermis is selected, apply the Dgraph memory schema and fail if Dgraph is unavailable.
+5. Connect the Discord client and register the three global slash commands when Discord reports ready.
+6. Log a successful ready event including the connected bot identity and allowed channel IDs, but no secrets.
 
 If configuration, migration, or required model setup fails, startup exits with a clear error instead of connecting in a partially working state.
 
@@ -250,7 +258,7 @@ If configuration, migration, or required model setup fails, startup exits with a
 7. Start Discord's typing indicator and refresh it every five seconds while generation remains active.
 8. For an accepted message in a thread, fetch the complete thread in Discord order, including the new message.
 9. Restore or create the durable PI session and persist any new inbound messages.
-10. Submit the current message, or the complete thread snapshot for a thread reply, to PI through the configured model provider.
+10. Submit the current message, or the complete thread snapshot for a thread reply, to PI through the configured model provider. Include the stable conversation key, triggering author ID, and Discord message ID so Wartermis memory tools can bind scope and provenance.
 11. Atomically persist the assistant response and available model diagnostics, then stop refreshing the typing indicator.
 12. Send a DM response as an ordinary channel message. Send a guild-channel or guild-thread response as a reply to the triggering message.
 
@@ -268,6 +276,7 @@ Transient Discord disconnects rely on the Discord client's resume and reconnect 
 - SQLite unavailable or migration failure: fail startup; do not accept messages without persistence.
 - Model provider unavailable during startup validation: report the provider/model failure and remain unhealthy.
 - Model provider or PI failure during a turn: persist the normalized error name and message with correlation IDs, but send nothing to Discord.
+- Required Wartermis Dgraph schema initialization failure: fail startup before Discord login. A Dgraph tool failure during a turn follows the PI failure path.
 - Discord disconnect: rely on Discord.js shard reconnect/resume behavior and log disconnect, reconnect, resume, and ready transitions.
 - Duplicate Discord event: return without a second model invocation or duplicate persisted turn.
 - Discord response too long: split at Discord-safe boundaries while retaining one assistant message in conversation history.
@@ -277,6 +286,7 @@ Transient Discord disconnects rely on the Discord client's resume and reconnect 
 - Keep Discord and model credentials only in the local environment or an operator-provided secret mechanism; never commit `.env`.
 - Ignore DMs from users outside the DM user allowlist before reading conversation state or invoking the model.
 - Scope every persistence query by the stable conversation identifier.
+- Bind memory scope, author, and source-message provenance in application code rather than accepting those values from the model.
 - Do not expose chat history, model reasoning, or tokens in routine application logs. Errors are reduced to a name and message, but operator logs remain sensitive because provider messages may contain request context.
 - Run containers as a non-root user where practical and grant write access only to the data volume.
 - Bind locally exposed service ports to loopback by default.
@@ -316,7 +326,7 @@ Required tests include:
 - Configuration defaults and validation behave as documented, including the default model.
 - Persistence transactions, migrations, and error paths preserve the last valid session state.
 - PI or model-provider failures are logged without creating an assistant turn or sending a Discord response.
-- Only `web_fetch` and token-gated GitHub custom tools are enabled; they sanitize external content, populate the Available Tools prompt registry, include the Capability Gap Protocol, and never enable built-in coding tools.
+- Only `web_fetch`, token-gated GitHub tools, and Wartermis-only scoped memory tools are enabled; they populate the Available Tools prompt registry and never enable built-in coding tools.
 - Every Discord message is emitted through the log-level-independent audit path and deduplicated in `incoming_messages` before conversation filtering.
 - Discord reconnect lifecycle events are handled without losing durable context.
 
@@ -356,5 +366,6 @@ Required tests include:
 - PI or model-provider generation failures are recorded for operators but produce no Discord response.
 - The system prompt is conversation-kind-aware. Guild sessions receive a Discord Channel Limits block capping responses at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained messages; DM sessions never receive it, so direct messages remain unrestricted. Prompt construction is a pure function of the conversation kind, so the model never sees limit messaging in a DM.
 - Base Docker Compose retains Ollama and model preparation. Alternate-provider topology and values belong to deployment-owned overrides.
+- Wartermis memory persists in Dgraph across PI sessions and `/clear-session`; the default Artemis profile never registers memory tools.
 
 Changes to these decisions should update this document and, when they alter observable behavior, the source issue and acceptance criteria.

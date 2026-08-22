@@ -17,6 +17,7 @@ The product and implementation baseline is documented in [design/baseline.md](de
 - An accepted thread reply submits the complete ordered thread, including the new message, to PI.
 - After accepting a normal message, Artemis shows and refreshes Discord's typing indicator every five seconds until generation finishes. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary direct messages.
 - PI may use the explicitly registered `web_fetch` tool to read a user-provided HTTP or HTTPS page directly. When `GITHUB_TOKEN` is configured, PI may also search, list, fetch, create, and update GitHub resources and upload issue images, but only within `GITHUB_ALLOWED_REPOSITORY`. External content is labeled as untrusted and sanitized before it reaches the model; built-in coding tools remain disabled.
+- The `wartermis` profile additionally receives explicit Dgraph-backed tools to remember, recall, correct, forget, and audit facts within the current DM or parent guild-channel scope. Memory persists across sessions; the default `artemis` profile receives no memory tools.
 - PI and model-provider failures are written to operator logs and SQLite; nothing is sent to Discord.
 - Sessions, chat content, reasoning, and diagnostics are retained in SQLite until an operator removes them.
 - Every newly received Discord message is logged with its raw content and metadata before filtering, regardless of `LOG_LEVEL`. This includes DMs, guild messages, bot messages, unauthorized messages, and unmentioned messages.
@@ -61,6 +62,7 @@ cp .env.example .env
 | `PERSONA_PROFILE` | No | `artemis` | Named profile: `artemis` or `wartermis`. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token. A blank value disables every GitHub tool. Grant only the repository permissions needed for the desired read or write operations. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `HSV-AI/artemis` | Comma-separated `owner/repository` allowlist. A blank list disables every GitHub tool. Matching is case-insensitive. |
+| `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint used by the `wartermis` memory tools. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error`. |
 
@@ -113,6 +115,11 @@ The selected profile supplies the complete identity instructions. Fixed Discord,
 tool, and capability rules are composed after it and remain application-owned.
 Changing a profile requires rebuilding and restarting Artemis.
 
+Wartermis also enables the [graph memory protocol](design/wartermis-memory.md).
+Memory writes occur only when a Discord user explicitly asks to remember,
+correct, or forget a fact. `/clear-session` clears PI chat context but retains
+memory for the same DM or parent guild channel.
+
 ## Run locally with Compose
 
 Start the unchanged Ollama-backed development stack:
@@ -121,15 +128,16 @@ Start the unchanged Ollama-backed development stack:
 docker compose up --build
 ```
 
-The base Compose file starts `ollama`, the `ollama-model` pull job, and `artemis`
-exactly as before. Deployments using another provider should layer their own
-Compose override over this file. Artemis checks the selected provider's
-`/models` endpoint before connecting to Discord.
+The base Compose file starts `ollama`, the `ollama-model` pull job, Dgraph, and
+`artemis`. Deployments using another provider should layer their own Compose
+override over this file. Artemis checks the selected provider's `/models`
+endpoint before connecting to Discord. Wartermis then initializes the Dgraph
+schema before login; other profiles do not contact Dgraph.
 
 View operator logs with:
 
 ```sh
-docker compose logs -f artemis ollama
+docker compose logs -f artemis ollama dgraph
 ```
 
 Stop without deleting durable data:
@@ -156,7 +164,8 @@ ARTEMIS_UPDATE_REMOTE=personal ARTEMIS_UPDATE_BRANCH=main ./scripts/update-artem
 
 This is a deployment script: it switches branches with `git checkout -f` and resets tracked files with `git reset --hard`. Do not run it in a development checkout containing uncommitted work. Persistent Docker volumes and `.env` are not removed.
 
-Deleting base-Compose volumes permanently removes conversations, reasoning, diagnostics, and Ollama state:
+Deleting base-Compose volumes permanently removes conversations, reasoning,
+diagnostics, Wartermis memory, and Ollama state:
 
 ```sh
 docker compose down --volumes
@@ -189,6 +198,7 @@ Global statement, branch, function, and line coverage thresholds are all enforce
 - At container startup, Artemis repairs ownership of its `/data` volume and then runs the application as the unprivileged `node` user.
 - Application logs are written as structured JSON to standard output and duplicated in SQLite's `application_logs` table. Credentials are excluded. The `discord_message_received` event intentionally includes raw message bodies from every Discord message event.
 - Chat content, model reasoning, and diagnostics are stored in SQLite and do not expire automatically.
+- Wartermis facts are stored in the `dgraph-data` volume and do not expire automatically. Forgetting creates an audit tombstone rather than physically deleting a fact.
 - If base-Compose model preparation fails, repeat the Ollama sign-in and inspect `docker compose logs ollama ollama-model`.
 - If an optional provider fails validation, inspect its `baseUrl`, `modelId`, `MODEL_API_KEY`, and `/models` response.
 - If messages are ignored, verify the allowed channel and user IDs, Message Content Intent, channel/thread permissions, and that guild messages directly mention the bot.

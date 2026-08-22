@@ -84,9 +84,10 @@ PI custom tool -> web_fetch -> target HTTP(S) URL -> sanitize -> PI
 | `MODEL_CONFIG_PATH` | None | Optional local JSON provider definition. Omission preserves the `OLLAMA_*` workflow. |
 | `MODEL_API_KEY` | `local` | Bearer value supplied only to the configured model endpoint. Blank disables the header. |
 
-Base `compose.yaml` is unchanged and starts Ollama, the model pull job, and
-Artemis. Concrete alternate-provider configuration and Compose overrides belong
-to deployment repositories rather than upstream Artemis.
+Base `compose.yaml` starts Ollama, the model pull job, Dgraph, and Artemis.
+Dgraph supports the independent Wartermis memory protocol and does not affect
+provider selection. Concrete alternate-provider configuration and Compose
+overrides belong to deployment repositories rather than upstream Artemis.
 
 ## Persistence
 

@@ -22,14 +22,16 @@ This protocol owns:
 - startup validation for named selection
 - deterministic composition of the selected instructions with the fixed system prompt
 
-It does not change Discord authorization, tools, provider selection,
-persistence, response delivery, or the default Artemis behavior.
+It does not change Discord authorization, provider selection, response delivery,
+or the default Artemis behavior. A selected profile may opt into a documented
+profile-specific tool protocol; Wartermis enables [graph memory](wartermis-memory.md).
 
 ## Observable behavior
 
 The default `artemis` profile behaves exactly as before. Selecting `wartermis`
 gives every DM and guild generation the bundled Wartermis identity and style
-instructions. Slash commands do not invoke the model and are unaffected.
+instructions plus its conversation-scoped memory tools. Slash commands do not
+invoke the model and are unaffected.
 Profile changes become visible after rebuilding and restarting Artemis.
 
 ## Configuration
@@ -69,6 +71,8 @@ selected profile ID is included in the `artemis_starting` log; instructions are
 held in process memory and applied when PI reconstructs a session.
 After a restart, existing conversations therefore use the profile selected by
 the new process without changing their stored message history.
+Wartermis memory is independently persisted in Dgraph under the stable
+conversation key.
 
 ## Security and privacy
 

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
-import type { StoredMessage } from "../src/domain.js";
+import type { PiGenerationInput, StoredMessage } from "../src/domain.js";
 import { type PersonaProfile } from "../src/persona-profiles.js";
 import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
 import { WARTERMIS_PROFILE } from "../src/personas/wartermis.js";
@@ -81,6 +81,19 @@ function assistant(overrides: Partial<AssistantMessage> = {}): AssistantMessage 
 
 function artemisGatewayConfig(model: ReturnType<typeof modelConfig>) {
   return { model, persona: ARTEMIS_PROFILE };
+}
+
+function generationInput(overrides: Partial<PiGenerationInput> = {}): PiGenerationInput {
+  return {
+    logicalSessionId: "logical",
+    conversationKey: "guild:guild:channel:channel",
+    conversationKind: "guild",
+    sourceMessageId: "message",
+    authorId: "user",
+    history: [],
+    prompt: "prompt",
+    ...overrides
+  };
 }
 
 describe("buildSystemPrompt", () => {
@@ -228,6 +241,7 @@ describe("PiSdkGateway", () => {
       fetchMock
     );
     await gateway.checkHealth();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
       "http://inference/v1/models",
       expect.objectContaining({ headers: {} })
@@ -254,12 +268,7 @@ describe("PiSdkGateway", () => {
       vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
     );
     await gateway.checkHealth();
-    await gateway.generate({
-      logicalSessionId: "logical",
-      history: [],
-      prompt: "prompt",
-      conversationKind: "guild"
-    });
+    await gateway.generate(generationInput());
     expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
       "test-provider",
       expect.objectContaining({
@@ -282,12 +291,7 @@ describe("PiSdkGateway", () => {
       vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
     );
     await gateway.checkHealth();
-    await gateway.generate({
-      logicalSessionId: "logical",
-      history: [],
-      prompt: "prompt",
-      conversationKind: "guild"
-    });
+    await gateway.generate(generationInput());
     expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
       "test-provider",
       expect.objectContaining({
@@ -360,8 +364,7 @@ describe("PiSdkGateway", () => {
       },
       vi.fn()
     );
-    const result = await gateway.generate({
-      logicalSessionId: "logical",
+    const result = await gateway.generate(generationInput({
       history: [
         {
           id: 1,
@@ -374,9 +377,8 @@ describe("PiSdkGateway", () => {
           createdAt: "2026-08-19T00:00:00.000Z"
         }
       ],
-      prompt: "new prompt",
-      conversationKind: "guild"
-    });
+      prompt: "new prompt"
+    }));
     expect(mocks.appendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining(
@@ -429,7 +431,7 @@ describe("PiSdkGateway", () => {
       },
       vi.fn()
     );
-    await gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt", conversationKind: "guild" });
+    await gateway.generate(generationInput());
     expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       tools: [
         "web_fetch", "github_search", "github_list", "github_fetch",
@@ -442,6 +444,48 @@ describe("PiSdkGateway", () => {
     }));
   });
 
+  it("registers scoped Dgraph memory tools only for Wartermis", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response('{"data":{}}', { status: 200 }));
+    const gateway = new PiSdkGateway(
+      {
+        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
+        persona: WARTERMIS_PROFILE,
+        dgraphUrl: "http://dgraph:8080"
+      },
+      fetchMock
+    );
+
+    await gateway.checkHealth();
+    await gateway.generate(generationInput({
+      conversationKey: "dm:memory-channel",
+      conversationKind: "dm",
+      sourceMessageId: "memory-message",
+      authorId: "memory-author"
+    }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://dgraph:8080/alter",
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      tools: expect.arrayContaining([
+        "memory_remember",
+        "memory_recall",
+        "memory_supersede",
+        "memory_forget",
+        "memory_believed_at",
+        "memory_audit"
+      ]),
+      customTools: expect.arrayContaining([
+        expect.objectContaining({ name: "memory_remember" }),
+        expect.objectContaining({ name: "memory_recall" })
+      ])
+    }));
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringContaining("memory_remember")
+    }));
+  });
+
   it("rejects a missing configured model and a missing assistant response", async () => {
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
@@ -449,12 +493,12 @@ describe("PiSdkGateway", () => {
     );
     mocks.runtime.getModel.mockReturnValueOnce(undefined);
     await expect(
-      gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt", conversationKind: "guild" })
+      gateway.generate(generationInput())
     ).rejects.toThrow("Configured model is unavailable");
 
     mocks.session.messages = [];
     await expect(
-      gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt", conversationKind: "guild" })
+      gateway.generate(generationInput())
     ).rejects.toThrow("PI completed without an assistant message");
     expect(mocks.session.dispose).toHaveBeenCalled();
   });
@@ -470,12 +514,10 @@ describe("system prompt Discord channel limits", () => {
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
       vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
     );
-    await gateway.generate({
-      logicalSessionId: "logical",
+    await gateway.generate(generationInput({
       conversationKind: kind,
-      history: [],
-      prompt: "prompt"
-    });
+      conversationKey: kind === "dm" ? "dm:channel" : "guild:guild:channel:channel"
+    }));
     const options = mocks.resourceLoaderConstructor.mock.calls.at(-1)?.[0] as
       | { systemPrompt?: string }
       | undefined;
@@ -510,24 +552,12 @@ describe("system prompt Discord channel limits", () => {
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
       vi.fn()
     );
-    await gateway.generate({
-      logicalSessionId: "logical",
-      conversationKind: "guild",
-      history: [],
-      prompt: "prompt"
-    });
-    await gateway.generate({
-      logicalSessionId: "logical",
-      conversationKind: "guild",
-      history: [],
-      prompt: "prompt"
-    });
-    await gateway.generate({
-      logicalSessionId: "logical",
+    await gateway.generate(generationInput());
+    await gateway.generate(generationInput());
+    await gateway.generate(generationInput({
       conversationKind: "dm",
-      history: [],
-      prompt: "prompt"
-    });
+      conversationKey: "dm:channel"
+    }));
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
   });
 });
