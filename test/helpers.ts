@@ -37,7 +37,6 @@ export function modelConfig(
     contextWindow: 32_000,
     maxTokens: 4_096,
     supportsDeveloperRole: false,
-    supportsReasoningEffort: true,
     ...overrides
   };
 }

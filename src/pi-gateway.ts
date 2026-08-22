@@ -234,7 +234,9 @@ export class PiSdkGateway implements PiGateway {
       resourceLoader,
       sessionManager,
       settingsManager: SettingsManager.inMemory(),
-      thinkingLevel: this.config.model.reasoningEffort
+      ...(this.config.model.reasoningEffort === undefined
+        ? {}
+        : { thinkingLevel: this.config.model.reasoningEffort })
     });
     try {
       await session.prompt(input.prompt, { expandPromptTemplates: false, source: "rpc" });
@@ -295,7 +297,7 @@ export class PiSdkGateway implements PiGateway {
           maxTokens: modelConfig.maxTokens,
           compat: {
             supportsDeveloperRole: modelConfig.supportsDeveloperRole,
-            supportsReasoningEffort: modelConfig.supportsReasoningEffort
+            supportsReasoningEffort: modelConfig.reasoningEffort !== undefined
           }
         }
       ]

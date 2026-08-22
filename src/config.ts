@@ -26,11 +26,10 @@ export interface ModelProviderConfig {
   modelId: string;
   apiKey: string;
   reasoning: boolean;
-  reasoningEffort: ReasoningEffort;
+  reasoningEffort?: ReasoningEffort;
   contextWindow: number;
   maxTokens: number;
   supportsDeveloperRole: boolean;
-  supportsReasoningEffort: boolean;
 }
 
 type ModelProviderDefinition = Omit<ModelProviderConfig, "apiKey">;
@@ -134,8 +133,11 @@ function configuredPositiveInteger(
   return value as number;
 }
 
-function configuredReasoningEffort(config: Record<string, unknown>): ReasoningEffort {
+function configuredReasoningEffort(config: Record<string, unknown>): ReasoningEffort | undefined {
   const value = config.reasoningEffort;
+  if (value === undefined) {
+    return undefined;
+  }
   if (typeof value !== "string" || !REASONING_EFFORTS.includes(value as ReasoningEffort)) {
     throw new Error(
       `Invalid model configuration: reasoningEffort must be one of ${REASONING_EFFORTS.join(", ")}`
@@ -152,6 +154,7 @@ export function parseModelConfig(
     throw new Error("Invalid model configuration: expected a JSON object");
   }
   const config = input;
+  const reasoningEffort = configuredReasoningEffort(config);
   return {
     providerId: configuredString(config, "providerId"),
     providerName: configuredString(config, "providerName"),
@@ -159,11 +162,10 @@ export function parseModelConfig(
     modelId: configuredString(config, "modelId"),
     apiKey: apiKey.trim(),
     reasoning: configuredBoolean(config, "reasoning"),
-    reasoningEffort: configuredReasoningEffort(config),
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     contextWindow: configuredPositiveInteger(config, "contextWindow"),
     maxTokens: configuredPositiveInteger(config, "maxTokens"),
-    supportsDeveloperRole: configuredBoolean(config, "supportsDeveloperRole"),
-    supportsReasoningEffort: configuredBoolean(config, "supportsReasoningEffort")
+    supportsDeveloperRole: configuredBoolean(config, "supportsDeveloperRole")
   };
 }
 
@@ -212,8 +214,7 @@ export function parseConfig(
           reasoningEffort: "medium",
           contextWindow: 1_048_576,
           maxTokens: 65_536,
-          supportsDeveloperRole: false,
-          supportsReasoningEffort: true
+          supportsDeveloperRole: false
         }, valueOrDefault(env, "OLLAMA_API_KEY", "ollama"))
       : parseModelConfig(modelConfig, valueOrDefault(env, "MODEL_API_KEY", "local")),
     persona: resolvePersonaProfile(env.PERSONA_PROFILE),

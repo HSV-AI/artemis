@@ -232,7 +232,7 @@ The array contains one object per message in oldest-to-newest order. Preserve me
 The model-facing implementation must:
 
 - Use the configured model rather than hard-coding a conditional model choice.
-- Apply the provider definition's explicit reasoning effort to every model request.
+- Apply a provider definition's explicit reasoning effort to every model request when configured.
 - Supply the complete stored history for the logical session in order.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
 - Enable only `web_fetch` and, when configured, the six GitHub custom tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
@@ -294,7 +294,9 @@ When `MODEL_CONFIG_PATH` is selected, the operator-provided JSON provider
 definition and `MODEL_API_KEY` replace those Ollama settings. Upstream Artemis
 does not own any concrete alternate-provider values. The definition must select
 one reasoning effort from `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or
-`max`; the default Ollama definition selects `medium`.
+`max` when its provider supports that parameter. Omission means the provider does
+not support configurable reasoning effort. The default Ollama definition selects
+`medium`.
 
 Before connecting Discord, perform a bounded health check against the model service and initialize or validate the configured model. Send a bearer header only when the configured API key is nonblank.
 

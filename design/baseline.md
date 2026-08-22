@@ -119,7 +119,7 @@ Configuration is loaded once at startup, parsed into a typed runtime object, and
 - Discord bot token and an optional comma-separated list of allowed channel IDs across guilds. A blank list disables guild responses.
 - An optional comma-separated list of authorized Discord DM user IDs, with no built-in default. A blank list authorizes no DM users and has no effect on guild conversations.
 - Comma-separated allowed guild channel IDs. Threads are matched by parent channel ID.
-- Existing Ollama endpoint, model, and API key variables, plus an optional model config path and API key. A selected JSON definition owns provider identity, endpoint, model, context limits, explicit reasoning effort, reasoning support, and PI compatibility flags.
+- Existing Ollama endpoint, model, and API key variables, plus an optional model config path and API key. A selected JSON definition owns provider identity, endpoint, model, context limits, optional explicit reasoning effort, reasoning support, and PI compatibility flags.
 - A named persona profile, defaulting to `artemis`, selected from complete source-controlled profiles under `src/personas/`.
 - Optional GitHub API token and a comma-separated repository allowlist. When the variable is absent, the application fallback is `mbrooks/artemis,HSV-AI/artemis`; the supplied `.env.example` explicitly selects only `HSV-AI/artemis`. A blank token or an explicitly blank repository allowlist disables all GitHub tools.
 - SQLite database path.

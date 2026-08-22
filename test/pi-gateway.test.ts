@@ -263,12 +263,40 @@ describe("PiSdkGateway", () => {
     expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
       "test-provider",
       expect.objectContaining({
-        models: [expect.objectContaining({ thinkingLevelMap })]
+        models: [expect.objectContaining({
+          thinkingLevelMap,
+          compat: expect.objectContaining({ supportsReasoningEffort: true })
+        })]
       })
     );
     expect(mocks.createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({ thinkingLevel: reasoningEffort })
     );
+  });
+
+  it("does not advertise reasoning-effort support when no effort is configured", async () => {
+    const config = modelConfig({ baseUrl: "http://inference/v1", modelId: "model" });
+    delete config.reasoningEffort;
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(config),
+      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
+    );
+    await gateway.checkHealth();
+    await gateway.generate({
+      logicalSessionId: "logical",
+      history: [],
+      prompt: "prompt",
+      conversationKind: "guild"
+    });
+    expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
+      "test-provider",
+      expect.objectContaining({
+        models: [expect.objectContaining({
+          compat: expect.objectContaining({ supportsReasoningEffort: false })
+        })]
+      })
+    );
+    expect(mocks.createAgentSession.mock.calls[0]?.[0]).not.toHaveProperty("thinkingLevel");
   });
 
   it("preserves unauthenticated access for the legacy Ollama placeholder", async () => {

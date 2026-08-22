@@ -17,7 +17,7 @@ deployment from selecting another provider without code changes.
 This protocol owns:
 
 - model-provider metadata loaded from a local JSON file
-- explicit model reasoning effort selected by that provider definition
+- optional model reasoning effort selected by that provider definition
 - model API-key injection from the environment
 - dynamic PI provider and model registration
 - startup model discovery through the configured `/models` endpoint
@@ -51,15 +51,16 @@ mention, managed bot-role mention, or reply to Artemis.
 ## Contracts and data flow
 
 `MODEL_CONFIG_PATH` selects a JSON object that defines `providerId`,
-`providerName`, `baseUrl`, `modelId`, `reasoning`, `reasoningEffort`,
-`contextWindow`, `maxTokens`, `supportsDeveloperRole`, and
-`supportsReasoningEffort`. Every field is required; the loader supplies no
-alternate-provider identity, endpoint, model, or reasoning-effort defaults. It
-validates strings, the HTTP(S) base URL, booleans, positive integer limits, and a
-reasoning effort of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
-Artemis passes that effort explicitly when creating every PI session and
-registers the selected extended `xhigh` or `max` level for custom models. The
-legacy Ollama workflow explicitly selects `medium`.
+`providerName`, `baseUrl`, `modelId`, `reasoning`, `contextWindow`, `maxTokens`,
+and `supportsDeveloperRole`. Those fields are required; the loader supplies no
+alternate-provider identity, endpoint, or model defaults. It validates strings,
+the HTTP(S) base URL, booleans, and positive integer limits. A provider that
+supports configurable reasoning effort may also select `reasoningEffort` from
+`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Its presence enables
+PI reasoning-effort compatibility; omission means Artemis sends no explicit
+reasoning-effort parameter. Artemis passes a selected effort when creating every
+PI session and registers the selected extended `xhigh` or `max` level for custom
+models. The legacy Ollama workflow explicitly selects `medium`.
 `MODEL_API_KEY` remains outside the JSON file and is attached to model discovery
 and completion requests. An empty API key sends no authorization header. In the
 legacy Ollama workflow, the default `OLLAMA_API_KEY=ollama` value remains a

@@ -18,8 +18,7 @@ const providerDefinition = {
   reasoningEffort: "medium",
   contextWindow: 64_000,
   maxTokens: 8_192,
-  supportsDeveloperRole: false,
-  supportsReasoningEffort: true
+  supportsDeveloperRole: false
 };
 
 describe("parseConfig", () => {
@@ -44,8 +43,7 @@ describe("parseConfig", () => {
         reasoningEffort: "medium",
         contextWindow: 1_048_576,
         maxTokens: 65_536,
-        supportsDeveloperRole: false,
-        supportsReasoningEffort: true
+        supportsDeveloperRole: false
       },
       persona: ARTEMIS_PROFILE,
       githubToken: "",
@@ -190,6 +188,14 @@ describe("parseConfig", () => {
       expect(result.model.reasoningEffort).toBe(reasoningEffort);
     }
   );
+
+  it("allows providers without reasoning-effort support to omit it", () => {
+    const result = parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, reasoningEffort: undefined }
+    );
+    expect(result.model.reasoningEffort).toBeUndefined();
+  });
 
   it("rejects invalid model field types", () => {
     expect(() => parseConfig(
