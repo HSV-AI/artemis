@@ -53,22 +53,10 @@ export function splitDiscordMessage(content: string, limit = DISCORD_MESSAGE_LIM
   let remaining = content;
   while (remaining.length > limit) {
     const candidate = remaining.slice(0, limit);
-    const minimumBoundary = Math.floor(limit / 2);
-    const sentenceBoundaries = [...candidate.matchAll(/[.!?]["')\]]*\s+/gu)];
-    const sentenceBoundary = sentenceBoundaries.at(-1);
-    const sentenceEnd = sentenceBoundary?.index === undefined
-      ? -1
-      : sentenceBoundary.index + sentenceBoundary[0].trimEnd().length;
     const lineBreak = candidate.lastIndexOf("\n");
     const space = candidate.lastIndexOf(" ");
-    let boundary = limit;
-    if (sentenceEnd > minimumBoundary) {
-      boundary = sentenceEnd;
-    } else if (lineBreak > minimumBoundary) {
-      boundary = lineBreak;
-    } else if (space > minimumBoundary) {
-      boundary = space;
-    }
+    const splitAt = Math.max(lineBreak, space);
+    const boundary = splitAt > Math.floor(limit / 2) ? splitAt : limit;
     chunks.push(remaining.slice(0, boundary).trimEnd());
     remaining = remaining.slice(boundary).trimStart();
   }

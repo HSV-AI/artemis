@@ -106,7 +106,7 @@ Normal assistant output is sent in the same DM, channel, or thread that triggere
 
 After a normal message passes all authorization and duplicate checks, send a typing indicator immediately and refresh it every five seconds while generation is active, safely inside Discord's expiry window. Keep the heartbeat active until success or failure, then stop it. Ignored and duplicate messages must never show typing. A typing-indicator API failure is logged but does not prevent generation.
 
-Discord limits message content to 2,000 characters. Split longer responses into ordered chunks, preferring the end of a complete sentence in the latter half of each chunk, then a newline, then a space, before falling back to the hard limit. Persist the assistant response as one logical message even when Discord receives multiple chunks.
+Discord limits message content to 2,000 characters. Split longer responses into ordered chunks, preferring a newline or space in the latter half of each chunk. Persist the assistant response as one logical message even when Discord receives multiple chunks.
 
 The 2,000-character split is a transport concern. Separately, group/channel (guild) responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) discrete Discord messages per assistant turn. This is a model-facing instruction, not a post-hoc truncation: the system prompt told the model the cap and that each message must be a complete, self-contained thought with no sentence split across messages. Direct-message responses are not subject to any message-count or response-length instruction. The channel-limit instruction is presented to the model only for guild sessions; DM sessions must never see limit messaging. Selection is deterministic from the conversation kind, so the prompt a session receives is fixed by its conversation key rather than by runtime state. The harness must build its system prompt per conversation kind and must not concatenate a single static prompt across both kinds.
 
@@ -236,7 +236,7 @@ The model-facing implementation must:
 - Supply the complete stored history for the logical session in order.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
 - Enable only `web_fetch` and, when configured, the six GitHub custom tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
-- Apply a system instruction equivalent to: the assistant should treat each author ID as a distinct speaker, answer the latest message directly, and must not claim Discord capabilities it was not given. `PERSONA_PROFILE` defaults to `artemis`, with `wartermis` as a bundled alternative. `PERSONA_PATH` takes precedence and creates a profile from trimmed operator instructions. For any non-default profile, omit the Artemis identity and append its instructions under a distinct `Persona Profile` heading while retaining the fixed Discord instruction. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, and tool registry.
+- Apply the complete identity instructions from the profile selected by `PERSONA_PROFILE`, which defaults to `artemis` and includes `wartermis` as a bundled alternative. Keep each profile in its own source file and compose the fixed Discord instruction after it. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, and tool registry.
 - Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
 - Treat aborted, errored, absent, and blank final responses as failures.
@@ -390,7 +390,7 @@ Application code must not deliberately insert configured secrets into logs or SQ
 
 ## Configuration contract
 
-Load local environment configuration from `.env` or the process environment, optional provider metadata from `MODEL_CONFIG_PATH`, a named profile from `PERSONA_PROFILE`, and an optional profile override from `PERSONA_PATH`. Trim scalar values and fail startup with an actionable field name when required or selected configuration is blank or invalid.
+Load local environment configuration from `.env` or the process environment, optional provider metadata from `MODEL_CONFIG_PATH`, and a named profile from `PERSONA_PROFILE`. Trim scalar values and fail startup with an actionable field name when required or selected configuration is blank or invalid.
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
@@ -405,7 +405,6 @@ Load local environment configuration from `.env` or the process environment, opt
 | `MODEL_CONFIG_PATH` | No | Empty | Optional local JSON provider definition that replaces the Ollama settings. |
 | `MODEL_API_KEY` | No | `local` | Bearer value for the selected provider definition; blank sends no authorization header. |
 | `PERSONA_PROFILE` | No | `artemis` | Named profile ID: `artemis` or `wartermis`. |
-| `PERSONA_PATH` | No | Empty | Optional UTF-8 text or Markdown profile appended to the fixed system instruction. A selected file must be readable and nonblank. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token; blank disables all GitHub tools. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` in application code | Comma-separated GitHub repository allowlist; blank disables GitHub tools. The supplied `.env.example` explicitly sets only `HSV-AI/artemis`. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |

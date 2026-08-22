@@ -10,7 +10,7 @@ Last updated: 2026-08-22
 
 Artemis is a community-run Discord bot that supports AI-assisted conversations in direct messages and selected guild chats. The current application allows configured users to converse with the model in DMs and any user to converse in configured channels across guilds, exposes context-aware `/ping`, `/uptime`, and `/clear-session` commands, and preserves each chat's context across restarts until an authorized user starts a fresh session.
 
-The implementation uses PI and the PI SDK as the conversational harness, SQLite for durable sessions and chat logs, and Docker Compose for local operation. The existing Ollama-backed workflow remains the default; an optional operator-provided JSON file selects another OpenAI-compatible provider. A named or deployment-overridden [persona profile](persona-profile.md) adds identity and style instructions without replacing Artemis's fixed rules. Environment configuration and credentials are supplied through an uncommitted `.env` file. [Configurable model provider](model-provider.md) owns the detailed provider and web-fetch contract.
+The implementation uses PI and the PI SDK as the conversational harness, SQLite for durable sessions and chat logs, and Docker Compose for local operation. The existing Ollama-backed workflow remains the default; an optional operator-provided JSON file selects another OpenAI-compatible provider. A named [persona profile](persona-profile.md) supplies identity and style instructions without replacing Artemis's fixed rules. Environment configuration and credentials are supplied through an uncommitted `.env` file. [Configurable model provider](model-provider.md) owns the detailed provider and web-fetch contract.
 
 ## Design document map
 
@@ -120,7 +120,7 @@ Configuration is loaded once at startup, parsed into a typed runtime object, and
 - An optional comma-separated list of authorized Discord DM user IDs, with no built-in default. A blank list authorizes no DM users and has no effect on guild conversations.
 - Comma-separated allowed guild channel IDs. Threads are matched by parent channel ID.
 - Existing Ollama endpoint, model, and API key variables, plus an optional model config path and API key. A selected JSON definition owns provider identity, endpoint, model, context limits, explicit reasoning effort, reasoning support, and PI compatibility flags.
-- A named persona profile, defaulting to `artemis`, plus an optional UTF-8 file override loaded as trusted model-facing configuration at startup.
+- A named persona profile, defaulting to `artemis`, selected from complete source-controlled profiles under `src/personas/`.
 - Optional GitHub API token and a comma-separated repository allowlist. When the variable is absent, the application fallback is `mbrooks/artemis,HSV-AI/artemis`; the supplied `.env.example` explicitly selects only `HSV-AI/artemis`. A blank token or an explicitly blank repository allowlist disables all GitHub tools.
 - SQLite database path.
 - Log level and other non-secret runtime controls.
@@ -170,7 +170,7 @@ PI is the base conversational harness and owns interaction with the configured O
 
 Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, fetches it directly as a PI custom tool, bounds and extracts its content, and sanitizes the returned page independently of the model provider. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers `github_search`, `github_list`, `github_fetch`, `github_create`, `github_update`, and `github_upload_image`. Every operation resolves its repository against that case-insensitive allowlist before making a request; repository-scoped calls require explicit `owner` and `repo` arguments. Searches may omit them to run separately within every allowed repository and never perform a global GitHub search. The tools sanitize GitHub read results as untrusted content. The tool descriptions instruct PI to perform a GitHub mutation only when the current Discord user explicitly requested that specific change; the execution functions enforce repository and parameter validation but do not independently reconstruct conversational intent. CASE-specific watch creation and git-origin discovery are intentionally not ported. PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Tool failures follow the normal generation-failure path and produce no Discord response.
 
-The system prompt is built from the conversation kind, the selected persona profile, and the tools that were actually registered. The default `artemis` profile retains the built-in identity; `wartermis` or a file override supplies a variant identity under a distinct heading. Discord speaker handling, conversation-kind limits, and capability rules remain application-owned. The Capability Gap Protocol tells Artemis to acknowledge an unavailable capability, avoid source exploration or improvised code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when that tool is available. Its Available Tools section is generated from the live custom-tool registry so the prompt does not advertise unregistered tools.
+The system prompt is built from the conversation kind, the selected persona profile, and the tools that were actually registered. Each profile supplies its complete identity from a dedicated file under `src/personas/`; prompt construction does not special-case the default profile. Discord speaker handling, conversation-kind limits, and capability rules remain application-owned. The Capability Gap Protocol tells Artemis to acknowledge an unavailable capability, avoid source exploration or improvised code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when that tool is available. Its Available Tools section is generated from the live custom-tool registry so the prompt does not advertise unregistered tools.
 
 Provider identity, model metadata, and reasoning effort are configuration, not conditionals embedded in application logic. Changing providers or reasoning effort therefore requires a JSON configuration update and restart, not a code change. Model discovery and completion remain behind a narrow boundary so unit tests can substitute a deterministic fake.
 
@@ -270,7 +270,7 @@ Transient Discord disconnects rely on the Discord client's resume and reconnect 
 - Model provider or PI failure during a turn: persist the normalized error name and message with correlation IDs, but send nothing to Discord.
 - Discord disconnect: rely on Discord.js shard reconnect/resume behavior and log disconnect, reconnect, resume, and ready transitions.
 - Duplicate Discord event: return without a second model invocation or duplicate persisted turn.
-- Discord response too long: split at a sentence ending when possible, then a newline or space, while retaining one assistant message in conversation history.
+- Discord response too long: split at Discord-safe boundaries while retaining one assistant message in conversation history.
 
 ## Security and privacy
 

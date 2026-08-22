@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type { StoredMessage } from "../src/domain.js";
 import { type PersonaProfile } from "../src/persona-profiles.js";
+import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
+import { WARTERMIS_PROFILE } from "../src/personas/wartermis.js";
 import { modelConfig } from "./helpers.js";
 
 const mocks = vi.hoisted(() => {
@@ -119,16 +121,14 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("- ad_hoc: Does something useful.");
   });
 
-  it("appends an optional persona without replacing invariant instructions", () => {
-    const prompt = buildSystemPrompt("guild", [], "  Be a theatrical rival.  ");
-    expect(prompt).toContain("You are a helpful conversational assistant in Discord");
+  it("uses the selected profile without replacing invariant instructions", () => {
+    const prompt = buildSystemPrompt("guild", [], WARTERMIS_PROFILE);
+    expect(prompt).toContain("You are Wartermis");
     expect(prompt).not.toContain("You are Artemis,");
-    expect(prompt).toContain("## Persona Profile\n\nBe a theatrical rival.");
     expect(prompt).toContain("## Discord Channel Limits");
     expect(prompt).toContain("## Capability Gap Protocol");
     const defaultPrompt = buildSystemPrompt("dm");
     expect(defaultPrompt).toContain("You are Artemis, a helpful conversational assistant");
-    expect(defaultPrompt).not.toContain("## Persona Profile");
   });
 });
 
@@ -218,7 +218,10 @@ describe("PiSdkGateway", () => {
   it("checks health, registers the configured provider, and omits empty auth headers", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     const gateway = new PiSdkGateway(
-      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model", apiKey: "" }) },
+      {
+        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model", apiKey: "" }),
+        persona: ARTEMIS_PROFILE
+      },
       fetchMock
     );
     await gateway.checkHealth();
@@ -239,7 +242,8 @@ describe("PiSdkGateway", () => {
           baseUrl: "http://inference/v1",
           modelId: "model",
           reasoningEffort: "max"
-        })
+        }),
+        persona: ARTEMIS_PROFILE
       },
       vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
     );
@@ -271,7 +275,8 @@ describe("PiSdkGateway", () => {
           baseUrl: "http://ollama:11434/v1",
           modelId: "local-model",
           apiKey: "ollama"
-        })
+        }),
+        persona: ARTEMIS_PROFILE
       },
       fetchMock
     );
@@ -290,7 +295,10 @@ describe("PiSdkGateway", () => {
   it("uses bearer auth for a configured remote key", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     const gateway = new PiSdkGateway(
-      { model: modelConfig({ baseUrl: "https://model.example/v1", modelId: "model", apiKey: "secret" }) },
+      {
+        model: modelConfig({ baseUrl: "https://model.example/v1", modelId: "model", apiKey: "secret" }),
+        persona: ARTEMIS_PROFILE
+      },
       fetchMock
     );
     await gateway.checkHealth();
@@ -302,7 +310,10 @@ describe("PiSdkGateway", () => {
 
   it("rejects an unhealthy provider", async () => {
     const gateway = new PiSdkGateway(
-      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }) },
+      {
+        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
+        persona: ARTEMIS_PROFILE
+      },
       vi.fn().mockResolvedValue(new Response("no", { status: 503 }))
     );
     await expect(gateway.checkHealth()).rejects.toThrow("status 503");
@@ -363,7 +374,7 @@ describe("PiSdkGateway", () => {
     );
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(
       expect.objectContaining({
-        systemPrompt: expect.stringContaining("## Persona Profile\n\nBe a theatrical rival.")
+        systemPrompt: expect.stringContaining("Be a theatrical rival.")
       })
     );
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(
@@ -384,6 +395,7 @@ describe("PiSdkGateway", () => {
     const gateway = new PiSdkGateway(
       {
         model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
+        persona: ARTEMIS_PROFILE,
         githubToken: "github-token",
         githubAllowedRepositories: ["owner/repo", "other/repo"]
       },
@@ -404,7 +416,10 @@ describe("PiSdkGateway", () => {
 
   it("rejects a missing configured model and a missing assistant response", async () => {
     const gateway = new PiSdkGateway(
-      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }) },
+      {
+        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
+        persona: ARTEMIS_PROFILE
+      },
       vi.fn()
     );
     mocks.runtime.getModel.mockReturnValueOnce(undefined);
@@ -427,7 +442,10 @@ describe("system prompt Discord channel limits", () => {
     mocks.session.prompt.mockResolvedValue(undefined);
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
     const gateway = new PiSdkGateway(
-      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }) },
+      {
+        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
+        persona: ARTEMIS_PROFILE
+      },
       vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
     );
     await gateway.generate({
@@ -496,7 +514,10 @@ describe("system prompt Discord channel limits", () => {
     mocks.session.prompt.mockResolvedValue(undefined);
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
     const gateway = new PiSdkGateway(
-      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }) },
+      {
+        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
+        persona: ARTEMIS_PROFILE
+      },
       vi.fn()
     );
     await gateway.generate({

@@ -3,7 +3,7 @@ import { ArtemisApplication } from "../src/application.js";
 import type { ArtemisConfig } from "../src/config.js";
 import type { DiscordGateway } from "../src/discord-gateway.js";
 import type { ArtemisRepository } from "../src/repository.js";
-import { PERSONA_PROFILES } from "../src/persona-profiles.js";
+import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
 import { createLoggerMock, createPiMock, modelConfig } from "./helpers.js";
 
 const config: ArtemisConfig = {
@@ -13,7 +13,7 @@ const config: ArtemisConfig = {
   discordSuppressEmbeds: true,
   discordEmbedsAllowedChannelIds: [],
   model: modelConfig({ modelId: "model" }),
-  persona: PERSONA_PROFILES.artemis,
+  persona: ARTEMIS_PROFILE,
   githubToken: "",
   githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
   sqlitePath: ":memory:",
