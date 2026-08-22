@@ -12,6 +12,7 @@ const config: ArtemisConfig = {
   discordSuppressEmbeds: true,
   discordEmbedsAllowedChannelIds: [],
   model: modelConfig({ modelId: "model" }),
+  persona: "",
   githubToken: "",
   githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
   sqlitePath: ":memory:",

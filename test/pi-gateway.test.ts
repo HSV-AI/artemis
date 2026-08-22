@@ -117,6 +117,18 @@ describe("buildSystemPrompt", () => {
     ]);
     expect(prompt).toContain("- ad_hoc: Does something useful.");
   });
+
+  it("appends an optional persona without replacing invariant instructions", () => {
+    const prompt = buildSystemPrompt("guild", [], "  Be a theatrical rival.  ");
+    expect(prompt).toContain("You are a helpful conversational assistant in Discord");
+    expect(prompt).not.toContain("You are Artemis,");
+    expect(prompt).toContain("## Persona Profile\n\nBe a theatrical rival.");
+    expect(prompt).toContain("## Discord Channel Limits");
+    expect(prompt).toContain("## Capability Gap Protocol");
+    const defaultPrompt = buildSystemPrompt("dm");
+    expect(defaultPrompt).toContain("You are Artemis, a helpful conversational assistant");
+    expect(defaultPrompt).not.toContain("## Persona Profile");
+  });
 });
 
 describe("pi message conversion", () => {
@@ -268,7 +280,10 @@ describe("PiSdkGateway", () => {
 
   it("reconstructs history, prompts PI, and disposes the session", async () => {
     const gateway = new PiSdkGateway(
-      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }) },
+      {
+        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
+        persona: "Be a theatrical rival."
+      },
       vi.fn()
     );
     const result = await gateway.generate({
@@ -309,6 +324,11 @@ describe("PiSdkGateway", () => {
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(
       expect.objectContaining({
         systemPrompt: expect.stringContaining("Treat each author ID as a distinct speaker")
+      })
+    );
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemPrompt: expect.stringContaining("## Persona Profile\n\nBe a theatrical rival.")
       })
     );
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(

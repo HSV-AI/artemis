@@ -235,7 +235,7 @@ The model-facing implementation must:
 - Supply the complete stored history for the logical session in order.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
 - Enable only `web_fetch` and, when configured, the six GitHub custom tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
-- Apply a system instruction equivalent to: Artemis is a helpful conversational Discord assistant, should treat each author ID as a distinct speaker, answer the latest message directly, and must not claim Discord capabilities it was not given. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind plus that registry.
+- Apply a system instruction equivalent to: the assistant should treat each author ID as a distinct speaker, answer the latest message directly, and must not claim Discord capabilities it was not given. Without `PERSONA_PATH`, identify the assistant as Artemis exactly as before. When `PERSONA_PATH` selects a profile, omit that default identity and append the trimmed profile under a distinct `Persona Profile` heading while retaining the fixed Discord instruction. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, optional persona, and tool registry.
 - Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
 - Treat aborted, errored, absent, and blank final responses as failures.
@@ -387,7 +387,7 @@ Application code must not deliberately insert configured secrets into logs or SQ
 
 ## Configuration contract
 
-Load local environment configuration from `.env` or the process environment and optional provider metadata from `MODEL_CONFIG_PATH`. Trim scalar values and fail startup with an actionable field name when required configuration is blank or invalid.
+Load local environment configuration from `.env` or the process environment, optional provider metadata from `MODEL_CONFIG_PATH`, and an optional persona profile from `PERSONA_PATH`. Trim scalar values and fail startup with an actionable field name when required or selected configuration is blank or invalid.
 
 | Variable | Required | Default | Meaning |
 | --- | --- | --- | --- |
@@ -401,6 +401,7 @@ Load local environment configuration from `.env` or the process environment and 
 | `OLLAMA_API_KEY` | No | `ollama` | Existing placeholder or bearer credential. |
 | `MODEL_CONFIG_PATH` | No | Empty | Optional local JSON provider definition that replaces the Ollama settings. |
 | `MODEL_API_KEY` | No | `local` | Bearer value for the selected provider definition; blank sends no authorization header. |
+| `PERSONA_PATH` | No | Empty | Optional UTF-8 text or Markdown profile appended to the fixed system instruction. A selected file must be readable and nonblank. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token; blank disables all GitHub tools. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` in application code | Comma-separated GitHub repository allowlist; blank disables GitHub tools. The supplied `.env.example` explicitly sets only `HSV-AI/artemis`. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |

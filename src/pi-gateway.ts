@@ -32,8 +32,12 @@ import { createWebFetchTool } from "./web-fetch-tool.js";
  */
 export const GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3;
 
-const BASE_SYSTEM_PROMPT =
-  "You are Artemis, a helpful conversational assistant in Discord. Discord messages are provided as JSON with explicit author metadata. Treat each author ID as a distinct speaker, preserve who said what, and do not collapse different speakers into a generic 'you'. Answer the newest message directly. Do not claim to have Discord capabilities you were not given.";
+const DEFAULT_IDENTITY_PROMPT =
+  "You are Artemis, a helpful conversational assistant in Discord.";
+const VARIANT_IDENTITY_PROMPT =
+  "You are a helpful conversational assistant in Discord.";
+const DISCORD_BEHAVIOR_PROMPT =
+  "Discord messages are provided as JSON with explicit author metadata. Treat each author ID as a distinct speaker, preserve who said what, and do not collapse different speakers into a generic 'you'. Answer the newest message directly. Do not claim to have Discord capabilities you were not given.";
 
 /**
  * Channel multi-message limits. Only appended to the system prompt for
@@ -76,8 +80,14 @@ export interface ToolRegistryEntry {
  */
 export function buildSystemPrompt(
   kind: ConversationKind,
-  tools: readonly ToolRegistryEntry[] = []
+  tools: readonly ToolRegistryEntry[] = [],
+  persona = ""
 ): string {
+  const configuredPersona = persona.trim();
+  const identityPrompt = configuredPersona ? VARIANT_IDENTITY_PROMPT : DEFAULT_IDENTITY_PROMPT;
+  const personaBlock = configuredPersona
+    ? `\n\n## Persona Profile\n\n${configuredPersona}`
+    : "";
   const channelLimits = kind === "guild" ? CHANNEL_LIMITS_PROMPT_BLOCK : "";
   const registry = tools.length === 0
     ? "No tools are currently registered. Apply the Capability Gap Protocol for any task that needs a tool."
@@ -92,7 +102,7 @@ export function buildSystemPrompt(
           return lines.join("\n");
         })
         .join("\n");
-  return `${BASE_SYSTEM_PROMPT}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}`;
+  return `${identityPrompt} ${DISCORD_BEHAVIOR_PROMPT}${personaBlock}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}`;
 }
 
 function createCustomTools(
@@ -179,7 +189,7 @@ export class PiSdkGateway implements PiGateway {
 
   public constructor(
     private readonly config: Pick<ArtemisConfig, "model"> &
-      Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories">>,
+      Partial<Pick<ArtemisConfig, "persona" | "githubToken" | "githubAllowedRepositories">>,
     private readonly fetchImplementation: typeof fetch = fetch
   ) {}
 
@@ -312,7 +322,7 @@ export class PiSdkGateway implements PiGateway {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPrompt: buildSystemPrompt(kind, this.customTools)
+      systemPrompt: buildSystemPrompt(kind, this.customTools, this.config.persona)
     });
     await resourceLoader.reload();
     this.resourceLoaders.set(kind, resourceLoader);

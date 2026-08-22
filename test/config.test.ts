@@ -44,6 +44,7 @@ describe("parseConfig", () => {
         supportsDeveloperRole: false,
         supportsReasoningEffort: true
       },
+      persona: "",
       githubToken: "",
       githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
       sqlitePath: DEFAULT_SQLITE_PATH,
@@ -163,6 +164,27 @@ describe("parseConfig", () => {
       { DISCORD_TOKEN: "token", MODEL_CONFIG_PATH: "invalid.json" },
       () => "not json"
     )).toThrow("Unable to load MODEL_CONFIG_PATH invalid.json");
+  });
+
+  it("loads and trims a persona from PERSONA_PATH", () => {
+    const readFile = vi.fn().mockReturnValue("\n  Be theatrical but helpful.  \n");
+    const result = loadConfig(
+      { DISCORD_TOKEN: "token", PERSONA_PATH: "persona.md" },
+      readFile
+    );
+    expect(readFile).toHaveBeenCalledWith("persona.md", "utf8");
+    expect(result.persona).toBe("Be theatrical but helpful.");
+  });
+
+  it("reports unreadable and blank persona files", () => {
+    expect(() => loadConfig(
+      { DISCORD_TOKEN: "token", PERSONA_PATH: "missing.md" },
+      () => { throw new Error("not found"); }
+    )).toThrow("Unable to load PERSONA_PATH missing.md: not found");
+    expect(() => loadConfig(
+      { DISCORD_TOKEN: "token", PERSONA_PATH: "blank.md" },
+      () => " \n "
+    )).toThrow("Unable to load PERSONA_PATH blank.md: file must contain nonblank text");
   });
 
   it("rejects invalid model field types", () => {

@@ -29,6 +29,7 @@ export interface ArtemisConfig {
   discordSuppressEmbeds: boolean;
   discordEmbedsAllowedChannelIds: readonly string[];
   model: ModelProviderConfig;
+  persona: string;
   githubToken: string;
   githubAllowedRepositories: readonly string[];
   sqlitePath: string;
@@ -165,7 +166,8 @@ function parseBoolean(value: string, name: string, defaultValue: boolean): boole
 
 export function parseConfig(
   env: Environment = process.env,
-  modelConfig?: unknown
+  modelConfig?: unknown,
+  persona = ""
 ): ArtemisConfig {
   return {
     discordToken: required(env, "DISCORD_TOKEN"),
@@ -190,6 +192,7 @@ export function parseConfig(
           supportsReasoningEffort: true
         }, valueOrDefault(env, "OLLAMA_API_KEY", "ollama"))
       : parseModelConfig(modelConfig, valueOrDefault(env, "MODEL_API_KEY", "local")),
+    persona: persona.trim(),
     githubToken: env.GITHUB_TOKEN?.trim() ?? "",
     githubAllowedRepositories: parseAllowedRepositories(env.GITHUB_ALLOWED_REPOSITORY),
     sqlitePath: valueOrDefault(env, "SQLITE_PATH", DEFAULT_SQLITE_PATH),
@@ -202,15 +205,29 @@ export function loadConfig(
   readFile: (path: string, encoding: "utf8") => string = readFileSync
 ): ArtemisConfig {
   const configPath = env.MODEL_CONFIG_PATH?.trim();
-  if (!configPath) {
-    return parseConfig(env);
-  }
   let modelConfig: unknown;
-  try {
-    modelConfig = JSON.parse(readFile(configPath, "utf8"));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Unable to load MODEL_CONFIG_PATH ${configPath}: ${message}`);
+  if (configPath) {
+    try {
+      modelConfig = JSON.parse(readFile(configPath, "utf8"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Unable to load MODEL_CONFIG_PATH ${configPath}: ${message}`);
+    }
   }
-  return parseConfig(env, modelConfig);
+
+  const personaPath = env.PERSONA_PATH?.trim();
+  let persona = "";
+  if (personaPath) {
+    try {
+      persona = readFile(personaPath, "utf8").trim();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Unable to load PERSONA_PATH ${personaPath}: ${message}`);
+    }
+    if (!persona) {
+      throw new Error(`Unable to load PERSONA_PATH ${personaPath}: file must contain nonblank text`);
+    }
+  }
+
+  return parseConfig(env, modelConfig, persona);
 }
