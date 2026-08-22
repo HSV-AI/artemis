@@ -11,7 +11,6 @@ const sourceScript = new URL("../scripts/update-artemis-if-needed.sh", import.me
 
 interface RunOptions {
   hasUpdate: boolean;
-  dependenciesChanged?: boolean;
   currentBranch?: string;
   remote?: string;
   branch?: string;
@@ -30,8 +29,6 @@ async function runUpdater(options: RunOptions): Promise<{ stdout: string; comman
   const commandLog = join(root, "commands.log");
   await mkdir(scripts);
   await mkdir(fakeBin);
-  await writeFile(join(root, "package.json"), '{"version":"before"}\n');
-  await writeFile(join(root, "package-lock.json"), '{"lockfileVersion":3}\n');
   await writeFile(join(scripts, "update-artemis-if-needed.sh"), await readFile(sourceScript));
 
   await writeExecutable(
@@ -45,9 +42,6 @@ elif [[ "$1 $2" == "rev-parse HEAD" ]]; then
   if [[ -f "$FAKE_REPO/.updated" ]]; then printf 'new\n'; else printf 'old\n'; fi
 elif [[ "$1" == "reset" && "$FAKE_HAS_UPDATE" == "1" ]]; then
   touch "$FAKE_REPO/.updated"
-  if [[ "$FAKE_DEPENDENCIES_CHANGED" == "1" ]]; then
-    printf '{"version":"after"}\n' > "$FAKE_REPO/package.json"
-  fi
 fi
 `
   );
@@ -72,7 +66,6 @@ printf 'docker %s\n' "$*" >> "$FAKE_COMMAND_LOG"
       FAKE_COMMAND_LOG: commandLog,
       FAKE_REPO: root,
       FAKE_HAS_UPDATE: options.hasUpdate ? "1" : "0",
-      FAKE_DEPENDENCIES_CHANGED: options.dependenciesChanged ? "1" : "0",
       FAKE_CURRENT_BRANCH: options.currentBranch ?? "main",
       ARTEMIS_UPDATE_REMOTE: options.remote ?? "origin",
       ARTEMIS_UPDATE_BRANCH: options.branch ?? "main"
@@ -102,25 +95,23 @@ describe("update-artemis-if-needed.sh", () => {
     expect(result.commands).not.toContain("docker compose");
   });
 
-  it("switches branches, installs changed dependencies, and rebuilds Compose", async () => {
+  it("switches branches and rebuilds Compose", async () => {
     const result = await runUpdater({
       hasUpdate: true,
-      dependenciesChanged: true,
       currentBranch: "feature"
     });
     expect(result.stdout).toContain("switching to 'main'");
-    expect(result.stdout).toContain("Dependencies changed. Running npm install.");
     expect(result.stdout).toContain("Update complete");
     expect(result.commands).toContain("git checkout -f main");
     expect(result.commands).toContain("git reset --hard origin/main");
     expect(result.commands).toContain("git pull --ff-only origin main");
-    expect(result.commands).toContain("npm install");
+    expect(result.commands).not.toContain("npm install");
     expect(result.commands).toContain("docker compose up -d --build");
   });
 
-  it("rebuilds without installing dependencies when manifests are unchanged", async () => {
+  it("rebuilds without switching when already on the target branch", async () => {
     const result = await runUpdater({ hasUpdate: true });
-    expect(result.stdout).not.toContain("Dependencies changed");
+    expect(result.commands).not.toContain("git checkout -f");
     expect(result.commands).not.toContain("npm install");
     expect(result.commands).toContain("docker compose up -d --build");
   });

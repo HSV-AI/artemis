@@ -58,6 +58,7 @@ cp .env.example .env
 | `OLLAMA_API_KEY` | No | `ollama` | Existing Ollama placeholder or bearer credential. |
 | `MODEL_CONFIG_PATH` | No | Empty | Runtime path to an optional JSON provider definition. When absent, Artemis uses the existing `OLLAMA_*` settings. |
 | `MODEL_API_KEY` | No | `local` | Bearer value used only with `MODEL_CONFIG_PATH`. A blank value sends no authorization header. |
+| `PERSONA_PROFILE` | No | `artemis` | Named profile: `artemis` or `wartermis`. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token. A blank value disables every GitHub tool. Grant only the repository permissions needed for the desired read or write operations. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `HSV-AI/artemis` | Comma-separated `owner/repository` allowlist. A blank list disables every GitHub tool. Matching is case-insensitive. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
@@ -83,13 +84,34 @@ The `ollama-data` volume retains the sign-in and model manifest. Local Ollama mo
 
 Set `MODEL_CONFIG_PATH` to an operator-owned JSON file to select another
 OpenAI-compatible provider. The file must define `providerId`, `providerName`,
-`baseUrl`, `modelId`, `reasoning`, `contextWindow`, `maxTokens`,
-`supportsDeveloperRole`, and `supportsReasoningEffort`. Keep bearer credentials
-in `MODEL_API_KEY`, not the JSON file.
+`baseUrl`, `modelId`, `reasoning`, `contextWindow`, `maxTokens`, and
+`supportsDeveloperRole`. Keep bearer credentials in `MODEL_API_KEY`, not the
+JSON file.
+
+Providers that support configurable reasoning effort may also define
+`reasoningEffort` as `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+Its presence enables PI reasoning-effort compatibility and passes the selected
+value to every session. Omit it for providers that do not support the parameter.
+The default Ollama workflow uses `medium`.
 
 Artemis intentionally does not ship a concrete alternate-provider file.
 Deployment repositories should own those values and mount the file through a
 Compose override or another runtime secret/configuration mechanism.
+
+## Persona profiles
+
+`PERSONA_PROFILE` selects a named profile. `artemis` preserves the default identity;
+`wartermis` selects the bundled Wartermis Works profile. Each complete profile
+lives in its own file under `src/personas/`, so identity changes are isolated and
+visible in review.
+
+```dotenv
+PERSONA_PROFILE=wartermis
+```
+
+The selected profile supplies the complete identity instructions. Fixed Discord,
+tool, and capability rules are composed after it and remain application-owned.
+Changing a profile requires rebuilding and restarting Artemis.
 
 ## Run locally with Compose
 
@@ -118,7 +140,7 @@ docker compose down
 
 ## Automated updates
 
-[`scripts/update-artemis-if-needed.sh`](scripts/update-artemis-if-needed.sh) checks a remote branch for a new commit. When an update exists, it force-aligns the local checkout, refreshes host dependencies if `package.json` or `package-lock.json` changed, and runs `docker compose up -d --build`.
+[`scripts/update-artemis-if-needed.sh`](scripts/update-artemis-if-needed.sh) checks a remote branch for a new commit. When an update exists, it force-aligns the local checkout and runs `docker compose up -d --build`.
 
 Run it on demand from any directory:
 

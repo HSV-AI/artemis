@@ -57,7 +57,8 @@ export class ArtemisApplication {
     this.logger.info("artemis_starting", {
       channelIds: this.config.discordAllowedChannelIds,
       model: this.config.model.modelId,
-      provider: this.config.model.providerId
+      provider: this.config.model.providerId,
+      personaProfile: this.config.persona.id
     });
     try {
       await this.pi.checkHealth();

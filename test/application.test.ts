@@ -3,6 +3,7 @@ import { ArtemisApplication } from "../src/application.js";
 import type { ArtemisConfig } from "../src/config.js";
 import type { DiscordGateway } from "../src/discord-gateway.js";
 import type { ArtemisRepository } from "../src/repository.js";
+import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
 import { createLoggerMock, createPiMock, modelConfig } from "./helpers.js";
 
 const config: ArtemisConfig = {
@@ -12,6 +13,7 @@ const config: ArtemisConfig = {
   discordSuppressEmbeds: true,
   discordEmbedsAllowedChannelIds: [],
   model: modelConfig({ modelId: "model" }),
+  persona: ARTEMIS_PROFILE,
   githubToken: "",
   githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
   sqlitePath: ":memory:",
@@ -42,7 +44,8 @@ describe("ArtemisApplication", () => {
     expect(logger.info).toHaveBeenCalledWith("artemis_starting", {
       channelIds: ["channel-one", "channel-two"],
       model: "model",
-      provider: "test-provider"
+      provider: "test-provider",
+      personaProfile: "artemis"
     });
 
     application.stop();
