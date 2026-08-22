@@ -24,8 +24,63 @@ import { createGitHubTools } from "./github-tools.js";
 import { formatDiscordMessage } from "./model-context.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
 
-const SYSTEM_PROMPT =
-  "You are Artemis, a helpful conversational assistant in Discord. Discord messages are provided as JSON with explicit author metadata. Treat each author ID as a distinct speaker, preserve who said what, and do not collapse different speakers into a generic 'you'. Answer the newest message directly. Do not claim to have Discord capabilities you were not given.";
+const SYSTEM_PROMPT_BASE =
+  "You are Artemis, a helpful conversational assistant in Discord. Discord messages are provided as JSON with explicit author metadata. Treat each author ID as a distinct speaker, preserve who said what, and do not collapse different speakers into a generic 'you'. Answer the newest message directly. Do not claim to have Discord capabilities you were not given.\n\n" +
+  "## Capability Gap Protocol\n\n" +
+  "When you encounter a missing capability or tool, you MUST NOT explore source code, generate code, or jury-rig a workaround. Do not self-modify. Follow this protocol instead:\n" +
+  "1. Acknowledge the gap — tell the user plainly that you cannot fulfill the request with your current tools.\n" +
+  "2. File a GitHub issue — use the `github_create` tool with resource `issue` against the HSV-AI/artemis project to request the missing tool or capability.\n" +
+  "3. Define requirements — in the issue body specify the inputs, outputs, error cases, and acceptance criteria the new capability must satisfy.\n" +
+  "4. Wait for implementation — the coder agent builds it; you do not self-modify or improvise.\n\n" +
+  "Stop immediately when you realize a tool is missing. Do not attempt partial workarounds. Never generate code to compensate for a missing capability.\n\n" +
+  "## Available Tools\n\n" +
+  "The tools listed below are registered and available to you. Any capability not listed here is a gap: apply the Capability Gap Protocol instead of improvising.";
+
+export interface ToolRegistryEntry {
+  name: string;
+  description: string;
+  promptSnippet?: string;
+  promptGuidelines?: string[];
+}
+
+export function buildSystemPrompt(tools: readonly ToolRegistryEntry[]): string {
+  const registry = tools.length === 0
+    ? "No tools are currently registered. Apply the Capability Gap Protocol for any task that needs a tool."
+    : tools
+        .map((tool) => {
+          const lines = [`- ${tool.name}: ${tool.promptSnippet ?? tool.description}`];
+          if (tool.promptGuidelines?.length) {
+            for (const guideline of tool.promptGuidelines) {
+              lines.push(`  - ${guideline}`);
+            }
+          }
+          return lines.join("\n");
+        })
+        .join("\n");
+  return `${SYSTEM_PROMPT_BASE}\n\n${registry}`;
+}
+
+function createCustomTools(
+  config: Pick<
+    ArtemisConfig,
+    "ollamaBaseUrl" | "ollamaApiKey"
+  > &
+    Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories">>,
+  fetchImplementation: typeof fetch
+) {
+  return [
+    createWebFetchTool({
+      ollamaBaseUrl: config.ollamaBaseUrl,
+      ollamaApiKey: config.ollamaApiKey,
+      fetchImplementation
+    }),
+    ...createGitHubTools({
+      token: config.githubToken ?? "",
+      allowedRepositories: config.githubAllowedRepositories ?? [],
+      fetchImplementation
+    })
+  ];
+}
 
 const emptyUsage: Usage = {
   input: 0,
@@ -89,6 +144,7 @@ function extractGeneration(message: AssistantMessage): PiGenerationResult {
 export class PiSdkGateway implements PiGateway {
   private modelRuntime: ModelRuntime | undefined;
   private resourceLoader: DefaultResourceLoader | undefined;
+  private customTools: ReturnType<typeof createCustomTools> = [];
 
   public constructor(
     private readonly config: Pick<ArtemisConfig, "ollamaBaseUrl" | "ollamaModel" | "ollamaApiKey"> &
@@ -118,6 +174,7 @@ export class PiSdkGateway implements PiGateway {
 
   public async generate(input: PiGenerationInput): Promise<PiGenerationResult> {
     await this.initialize();
+    const customTools = this.customTools;
     const modelRuntime = this.modelRuntime;
     const resourceLoader = this.resourceLoader;
     if (!modelRuntime || !resourceLoader) {
@@ -134,18 +191,6 @@ export class PiSdkGateway implements PiGateway {
     for (const message of input.history) {
       sessionManager.appendMessage(storedToPiMessage(message, this.config.ollamaModel));
     }
-    const customTools = [
-      createWebFetchTool({
-        ollamaBaseUrl: this.config.ollamaBaseUrl,
-        ollamaApiKey: this.config.ollamaApiKey,
-        fetchImplementation: this.fetchImplementation
-      }),
-      ...createGitHubTools({
-        token: this.config.githubToken ?? "",
-        allowedRepositories: this.config.githubAllowedRepositories ?? [],
-        fetchImplementation: this.fetchImplementation
-      })
-    ];
     const { session } = await createAgentSession({
       modelRuntime,
       model,
@@ -180,6 +225,7 @@ export class PiSdkGateway implements PiGateway {
     if (this.modelRuntime && this.resourceLoader) {
       return;
     }
+    this.customTools = createCustomTools(this.config, this.fetchImplementation);
     const credentials = new InMemoryCredentialStore();
     const modelRuntime = await ModelRuntime.create({
       credentials,
@@ -218,7 +264,7 @@ export class PiSdkGateway implements PiGateway {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPrompt: SYSTEM_PROMPT
+      systemPrompt: buildSystemPrompt(this.customTools)
     });
     await resourceLoader.reload();
     this.modelRuntime = modelRuntime;
@@ -226,4 +272,4 @@ export class PiSdkGateway implements PiGateway {
   }
 }
 
-export const piInternals = { storedToPiMessage, extractGeneration };
+export const piInternals = { storedToPiMessage, extractGeneration, buildSystemPrompt };
