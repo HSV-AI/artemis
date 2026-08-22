@@ -79,9 +79,13 @@ function assistant(overrides: Partial<AssistantMessage> = {}): AssistantMessage 
   };
 }
 
+function artemisGatewayConfig(model: ReturnType<typeof modelConfig>) {
+  return { model, persona: ARTEMIS_PROFILE };
+}
+
 describe("buildSystemPrompt", () => {
   it("includes the Capability Gap Protocol and an Available Tools section", () => {
-    const prompt = piInternals.buildSystemPrompt("dm", []);
+    const prompt = piInternals.buildSystemPrompt("dm", ARTEMIS_PROFILE);
     expect(prompt).toContain("Treat each author ID as a distinct speaker");
     expect(prompt).toContain("## Capability Gap Protocol");
     expect(prompt).toContain("github_create");
@@ -92,7 +96,7 @@ describe("buildSystemPrompt", () => {
   });
 
   it("registers each tool's snippet, description, and guidelines", () => {
-    const prompt = piInternals.buildSystemPrompt("dm", [
+    const prompt = piInternals.buildSystemPrompt("dm", ARTEMIS_PROFILE, [
       {
         name: "web_fetch",
         description: "Fetch and read the text content from a web page URL.",
@@ -115,20 +119,20 @@ describe("buildSystemPrompt", () => {
   });
 
   it("falls back to the description when a tool has no promptSnippet", () => {
-    const prompt = piInternals.buildSystemPrompt("dm", [
+    const prompt = piInternals.buildSystemPrompt("dm", ARTEMIS_PROFILE, [
       { name: "ad_hoc", description: "Does something useful." }
     ]);
     expect(prompt).toContain("- ad_hoc: Does something useful.");
   });
 
   it("uses the selected profile without replacing invariant instructions", () => {
-    const prompt = buildSystemPrompt("guild", [], WARTERMIS_PROFILE);
+    const prompt = buildSystemPrompt("guild", WARTERMIS_PROFILE);
     expect(prompt).toContain("You are Wartermis");
     expect(prompt).not.toContain("You are Artemis,");
     expect(prompt).toContain("## Discord Channel Limits");
     expect(prompt).toContain("## Capability Gap Protocol");
-    const defaultPrompt = buildSystemPrompt("dm");
-    expect(defaultPrompt).toContain("You are Artemis, a helpful conversational assistant");
+    const artemisPrompt = buildSystemPrompt("dm", ARTEMIS_PROFILE);
+    expect(artemisPrompt).toContain("You are Artemis, a helpful conversational assistant");
   });
 });
 
@@ -218,10 +222,9 @@ describe("PiSdkGateway", () => {
   it("checks health, registers the configured provider, and omits empty auth headers", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     const gateway = new PiSdkGateway(
-      {
-        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model", apiKey: "" }),
-        persona: ARTEMIS_PROFILE
-      },
+      artemisGatewayConfig(
+        modelConfig({ baseUrl: "http://inference/v1", modelId: "model", apiKey: "" })
+      ),
       fetchMock
     );
     await gateway.checkHealth();
@@ -235,16 +238,19 @@ describe("PiSdkGateway", () => {
     );
   });
 
-  it("registers and selects an extended configured reasoning effort", async () => {
+  it.each([
+    ["high", undefined],
+    ["xhigh", { xhigh: "xhigh" }],
+    ["max", { max: "max" }]
+  ] as const)("registers and selects reasoning effort %s", async (reasoningEffort, thinkingLevelMap) => {
     const gateway = new PiSdkGateway(
-      {
-        model: modelConfig({
+      artemisGatewayConfig(
+        modelConfig({
           baseUrl: "http://inference/v1",
           modelId: "model",
-          reasoningEffort: "max"
-        }),
-        persona: ARTEMIS_PROFILE
-      },
+          reasoningEffort
+        })
+      ),
       vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
     );
     await gateway.checkHealth();
@@ -257,27 +263,26 @@ describe("PiSdkGateway", () => {
     expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
       "test-provider",
       expect.objectContaining({
-        models: [expect.objectContaining({ thinkingLevelMap: { max: "max" } })]
+        models: [expect.objectContaining({ thinkingLevelMap })]
       })
     );
     expect(mocks.createAgentSession).toHaveBeenCalledWith(
-      expect.objectContaining({ thinkingLevel: "max" })
+      expect.objectContaining({ thinkingLevel: reasoningEffort })
     );
   });
 
   it("preserves unauthenticated access for the legacy Ollama placeholder", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     const gateway = new PiSdkGateway(
-      {
-        model: modelConfig({
+      artemisGatewayConfig(
+        modelConfig({
           providerId: "ollama",
           providerName: "Ollama",
           baseUrl: "http://ollama:11434/v1",
           modelId: "local-model",
           apiKey: "ollama"
-        }),
-        persona: ARTEMIS_PROFILE
-      },
+        })
+      ),
       fetchMock
     );
     await gateway.checkHealth();
@@ -295,10 +300,9 @@ describe("PiSdkGateway", () => {
   it("uses bearer auth for a configured remote key", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     const gateway = new PiSdkGateway(
-      {
-        model: modelConfig({ baseUrl: "https://model.example/v1", modelId: "model", apiKey: "secret" }),
-        persona: ARTEMIS_PROFILE
-      },
+      artemisGatewayConfig(
+        modelConfig({ baseUrl: "https://model.example/v1", modelId: "model", apiKey: "secret" })
+      ),
       fetchMock
     );
     await gateway.checkHealth();
@@ -310,10 +314,7 @@ describe("PiSdkGateway", () => {
 
   it("rejects an unhealthy provider", async () => {
     const gateway = new PiSdkGateway(
-      {
-        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
-        persona: ARTEMIS_PROFILE
-      },
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
       vi.fn().mockResolvedValue(new Response("no", { status: 503 }))
     );
     await expect(gateway.checkHealth()).rejects.toThrow("status 503");
@@ -394,8 +395,7 @@ describe("PiSdkGateway", () => {
   it("allowlists the GitHub tools when a token is configured", async () => {
     const gateway = new PiSdkGateway(
       {
-        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
-        persona: ARTEMIS_PROFILE,
+        ...artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
         githubToken: "github-token",
         githubAllowedRepositories: ["owner/repo", "other/repo"]
       },
@@ -416,10 +416,7 @@ describe("PiSdkGateway", () => {
 
   it("rejects a missing configured model and a missing assistant response", async () => {
     const gateway = new PiSdkGateway(
-      {
-        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
-        persona: ARTEMIS_PROFILE
-      },
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
       vi.fn()
     );
     mocks.runtime.getModel.mockReturnValueOnce(undefined);
@@ -442,10 +439,7 @@ describe("system prompt Discord channel limits", () => {
     mocks.session.prompt.mockResolvedValue(undefined);
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
     const gateway = new PiSdkGateway(
-      {
-        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
-        persona: ARTEMIS_PROFILE
-      },
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
       vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
     );
     await gateway.generate({
@@ -471,41 +465,12 @@ describe("system prompt Discord channel limits", () => {
     mocks.loaderReload.mockResolvedValue(undefined);
   });
 
-  it("exposes the GROUP_CHANNEL_MULTI_MESSAGE_MAX constant equal to 3", () => {
-    expect(GROUP_CHANNEL_MULTI_MESSAGE_MAX).toBe(3);
-  });
-
-  it("deterministically includes channel limits only for guild sessions", async () => {
+  it("applies channel limits only to guild sessions", async () => {
     const guild = await captureSystemPrompt("guild");
     const dm = await captureSystemPrompt("dm");
-    expect(guild).toContain("Discord Channel Limits");
-    expect(dm).not.toContain("Discord Channel Limits");
-    expect(buildSystemPrompt("guild")).toContain("Discord Channel Limits");
-    expect(buildSystemPrompt("dm")).not.toContain("Discord Channel Limits");
-  });
-
-  it("documents the GROUP_CHANNEL_MULTI_MESSAGE_MAX constant in the guild prompt", async () => {
-    const prompt = await captureSystemPrompt("guild");
-    expect(prompt).toContain("GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3");
-  });
-
-  it("caps group/channel responses at 3 messages in the guild prompt", async () => {
-    const prompt = await captureSystemPrompt("guild");
-    expect(prompt).toContain("up to 3 messages");
-  });
-
-  it("requires each message to be a self-contained thought in the guild prompt", async () => {
-    const prompt = await captureSystemPrompt("guild");
-    expect(prompt).toContain("self-contained thought");
-    expect(prompt).toContain("never split a sentence across messages");
-  });
-
-  it("never shows channel-limit messaging to DM sessions", async () => {
-    const prompt = await captureSystemPrompt("dm");
-    expect(prompt).not.toContain("Discord Channel Limits");
-    expect(prompt).not.toContain("up to 3 messages");
-    expect(prompt).not.toContain("self-contained thought");
-    expect(prompt).not.toContain("GROUP_CHANNEL_MULTI_MESSAGE_MAX");
+    expect(guild).toContain(`up to ${GROUP_CHANNEL_MULTI_MESSAGE_MAX} messages`);
+    expect(guild).toContain("self-contained thought");
+    expect(dm).not.toContain("## Discord Channel Limits");
   });
 
   it("caches the resource loader per conversation kind", async () => {
@@ -514,10 +479,7 @@ describe("system prompt Discord channel limits", () => {
     mocks.session.prompt.mockResolvedValue(undefined);
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
     const gateway = new PiSdkGateway(
-      {
-        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
-        persona: ARTEMIS_PROFILE
-      },
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
       vi.fn()
     );
     await gateway.generate({

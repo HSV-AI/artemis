@@ -24,7 +24,6 @@ import type {
 import { createGitHubTools } from "./github-tools.js";
 import { formatDiscordMessage } from "./model-context.js";
 import type { PersonaProfile } from "./persona-profiles.js";
-import { ARTEMIS_PROFILE } from "./personas/artemis.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
 
 /**
@@ -78,8 +77,8 @@ export interface ToolRegistryEntry {
  */
 export function buildSystemPrompt(
   kind: ConversationKind,
-  tools: readonly ToolRegistryEntry[] = [],
-  persona: PersonaProfile = ARTEMIS_PROFILE
+  persona: PersonaProfile,
+  tools: readonly ToolRegistryEntry[] = []
 ): string {
   const channelLimits = kind === "guild" ? CHANNEL_LIMITS_PROMPT_BLOCK : "";
   const registry = tools.length === 0
@@ -320,7 +319,7 @@ export class PiSdkGateway implements PiGateway {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPrompt: buildSystemPrompt(kind, this.customTools, this.config.persona)
+      systemPrompt: buildSystemPrompt(kind, this.config.persona, this.customTools)
     });
     await resourceLoader.reload();
     this.resourceLoaders.set(kind, resourceLoader);

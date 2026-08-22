@@ -109,8 +109,9 @@ describe("update-artemis-if-needed.sh", () => {
     expect(result.commands).toContain("docker compose up -d --build");
   });
 
-  it("rebuilds when an update is available", async () => {
+  it("rebuilds without switching when already on the target branch", async () => {
     const result = await runUpdater({ hasUpdate: true });
+    expect(result.commands).not.toContain("git checkout -f");
     expect(result.commands).not.toContain("npm install");
     expect(result.commands).toContain("docker compose up -d --build");
   });

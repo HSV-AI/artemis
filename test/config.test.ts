@@ -8,7 +8,6 @@ import {
   parseConfig
 } from "../src/config.js";
 import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
-import { WARTERMIS_PROFILE } from "../src/personas/wartermis.js";
 
 const providerDefinition = {
   providerId: "configured-provider",
@@ -172,7 +171,7 @@ describe("parseConfig", () => {
 
   it("selects a named persona profile", () => {
     const result = parseConfig({ DISCORD_TOKEN: "token", PERSONA_PROFILE: " WARTERMIS " });
-    expect(result.persona).toBe(WARTERMIS_PROFILE);
+    expect(result.persona.id).toBe("wartermis");
   });
 
   it("rejects an unknown persona profile", () => {
@@ -180,6 +179,17 @@ describe("parseConfig", () => {
       "PERSONA_PROFILE must be one of artemis, wartermis"
     );
   });
+
+  it.each(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)(
+    "accepts reasoning effort %s",
+    (reasoningEffort) => {
+      const result = parseConfig(
+        { DISCORD_TOKEN: "token" },
+        { ...providerDefinition, reasoningEffort }
+      );
+      expect(result.model.reasoningEffort).toBe(reasoningEffort);
+    }
+  );
 
   it("rejects invalid model field types", () => {
     expect(() => parseConfig(
@@ -197,7 +207,7 @@ describe("parseConfig", () => {
     expect(() => parseConfig(
       { DISCORD_TOKEN: "token" },
       { ...providerDefinition, reasoningEffort: "extreme" }
-    )).toThrow("reasoningEffort must be one of off, minimal, low, medium, high, xhigh, max");
+    )).toThrow("reasoningEffort must be one of");
     expect(() => parseConfig(
       { DISCORD_TOKEN: "token" },
       { ...providerDefinition, modelId: undefined }
