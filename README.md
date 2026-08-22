@@ -84,9 +84,14 @@ The `ollama-data` volume retains the sign-in and model manifest. Local Ollama mo
 
 Set `MODEL_CONFIG_PATH` to an operator-owned JSON file to select another
 OpenAI-compatible provider. The file must define `providerId`, `providerName`,
-`baseUrl`, `modelId`, `reasoning`, `contextWindow`, `maxTokens`,
+`baseUrl`, `modelId`, `reasoning`, `reasoningEffort`, `contextWindow`, `maxTokens`,
 `supportsDeveloperRole`, and `supportsReasoningEffort`. Keep bearer credentials
 in `MODEL_API_KEY`, not the JSON file.
+
+`reasoningEffort` must be `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or
+`max`. Artemis passes the selected value to every PI session. The default Ollama
+workflow uses `medium`; deployment-owned provider definitions may select another
+level supported by their endpoint.
 
 Artemis intentionally does not ship a concrete alternate-provider file.
 Deployment repositories should own those values and mount the file through a

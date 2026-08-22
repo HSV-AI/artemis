@@ -14,6 +14,7 @@ const providerDefinition = {
   baseUrl: "https://inference.example/v1",
   modelId: "configured-model",
   reasoning: true,
+  reasoningEffort: "medium",
   contextWindow: 64_000,
   maxTokens: 8_192,
   supportsDeveloperRole: false,
@@ -39,6 +40,7 @@ describe("parseConfig", () => {
         modelId: DEFAULT_OLLAMA_MODEL,
         apiKey: "ollama",
         reasoning: true,
+        reasoningEffort: "medium",
         contextWindow: 1_048_576,
         maxTokens: 65_536,
         supportsDeveloperRole: false,
@@ -200,6 +202,10 @@ describe("parseConfig", () => {
       { DISCORD_TOKEN: "token" },
       { ...providerDefinition, reasoning: "yes" }
     )).toThrow("reasoning must be a boolean");
+    expect(() => parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, reasoningEffort: "extreme" }
+    )).toThrow("reasoningEffort must be one of off, minimal, low, medium, high, xhigh, max");
     expect(() => parseConfig(
       { DISCORD_TOKEN: "token" },
       { ...providerDefinition, modelId: undefined }

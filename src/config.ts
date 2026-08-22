@@ -6,6 +6,17 @@ export const DEFAULT_SQLITE_PATH = "/data/artemis.sqlite";
 export const DEFAULT_GITHUB_ALLOWED_REPOSITORIES = ["mbrooks/artemis", "HSV-AI/artemis"] as const;
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
+export type ReasoningEffort = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+];
 
 export interface ModelProviderConfig {
   providerId: string;
@@ -14,6 +25,7 @@ export interface ModelProviderConfig {
   modelId: string;
   apiKey: string;
   reasoning: boolean;
+  reasoningEffort: ReasoningEffort;
   contextWindow: number;
   maxTokens: number;
   supportsDeveloperRole: boolean;
@@ -121,6 +133,16 @@ function configuredPositiveInteger(
   return value as number;
 }
 
+function configuredReasoningEffort(config: Record<string, unknown>): ReasoningEffort {
+  const value = config.reasoningEffort;
+  if (typeof value !== "string" || !REASONING_EFFORTS.includes(value as ReasoningEffort)) {
+    throw new Error(
+      `Invalid model configuration: reasoningEffort must be one of ${REASONING_EFFORTS.join(", ")}`
+    );
+  }
+  return value as ReasoningEffort;
+}
+
 export function parseModelConfig(
   input: unknown,
   apiKey = "local"
@@ -136,6 +158,7 @@ export function parseModelConfig(
     modelId: configuredString(config, "modelId"),
     apiKey: apiKey.trim(),
     reasoning: configuredBoolean(config, "reasoning"),
+    reasoningEffort: configuredReasoningEffort(config),
     contextWindow: configuredPositiveInteger(config, "contextWindow"),
     maxTokens: configuredPositiveInteger(config, "maxTokens"),
     supportsDeveloperRole: configuredBoolean(config, "supportsDeveloperRole"),
@@ -186,6 +209,7 @@ export function parseConfig(
           baseUrl: valueOrDefault(env, "OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL),
           modelId: valueOrDefault(env, "OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
           reasoning: true,
+          reasoningEffort: "medium",
           contextWindow: 1_048_576,
           maxTokens: 65_536,
           supportsDeveloperRole: false,

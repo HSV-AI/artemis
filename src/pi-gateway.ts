@@ -241,7 +241,8 @@ export class PiSdkGateway implements PiGateway {
       customTools,
       resourceLoader,
       sessionManager,
-      settingsManager: SettingsManager.inMemory()
+      settingsManager: SettingsManager.inMemory(),
+      thinkingLevel: this.config.model.reasoningEffort
     });
     try {
       await session.prompt(input.prompt, { expandPromptTemplates: false, source: "rpc" });
@@ -281,6 +282,9 @@ export class PiSdkGateway implements PiGateway {
       refreshOnCreate: false
     });
     const modelConfig = this.config.model;
+    const thinkingLevelMap = modelConfig.reasoningEffort === "xhigh" || modelConfig.reasoningEffort === "max"
+      ? { [modelConfig.reasoningEffort]: modelConfig.reasoningEffort }
+      : undefined;
     modelRuntime.registerProvider(modelConfig.providerId, {
       name: modelConfig.providerName,
       baseUrl: modelConfig.baseUrl,
@@ -292,6 +296,7 @@ export class PiSdkGateway implements PiGateway {
           id: modelConfig.modelId,
           name: modelConfig.modelId,
           reasoning: modelConfig.reasoning,
+          thinkingLevelMap,
           input: ["text"],
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
           contextWindow: modelConfig.contextWindow,

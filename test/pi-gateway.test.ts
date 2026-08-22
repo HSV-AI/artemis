@@ -231,6 +231,35 @@ describe("PiSdkGateway", () => {
     );
   });
 
+  it("registers and selects an extended configured reasoning effort", async () => {
+    const gateway = new PiSdkGateway(
+      {
+        model: modelConfig({
+          baseUrl: "http://inference/v1",
+          modelId: "model",
+          reasoningEffort: "max"
+        })
+      },
+      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
+    );
+    await gateway.checkHealth();
+    await gateway.generate({
+      logicalSessionId: "logical",
+      history: [],
+      prompt: "prompt",
+      conversationKind: "guild"
+    });
+    expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
+      "test-provider",
+      expect.objectContaining({
+        models: [expect.objectContaining({ thinkingLevelMap: { max: "max" } })]
+      })
+    );
+    expect(mocks.createAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({ thinkingLevel: "max" })
+    );
+  });
+
   it("preserves unauthenticated access for the legacy Ollama placeholder", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
     const gateway = new PiSdkGateway(
@@ -318,7 +347,8 @@ describe("PiSdkGateway", () => {
     expect(mocks.createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({
         tools: ["web_fetch"],
-        customTools: [expect.objectContaining({ name: "web_fetch" })]
+        customTools: [expect.objectContaining({ name: "web_fetch" })],
+        thinkingLevel: "medium"
       })
     );
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(
