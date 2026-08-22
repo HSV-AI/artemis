@@ -327,7 +327,7 @@ export class PiSdkGateway implements PiGateway {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPrompt: buildSystemPrompt(kind, this.customTools, this.config.persona)
+      systemPrompt: buildSystemPrompt(kind, this.customTools, this.config.persona?.instructions)
     });
     await resourceLoader.reload();
     this.resourceLoaders.set(kind, resourceLoader);

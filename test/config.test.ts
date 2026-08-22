@@ -7,6 +7,7 @@ import {
   loadConfig,
   parseConfig
 } from "../src/config.js";
+import { PERSONA_PROFILES } from "../src/persona-profiles.js";
 
 const providerDefinition = {
   providerId: "configured-provider",
@@ -46,7 +47,7 @@ describe("parseConfig", () => {
         supportsDeveloperRole: false,
         supportsReasoningEffort: true
       },
-      persona: "",
+      persona: PERSONA_PROFILES.artemis,
       githubToken: "",
       githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
       sqlitePath: DEFAULT_SQLITE_PATH,
@@ -168,14 +169,37 @@ describe("parseConfig", () => {
     )).toThrow("Unable to load MODEL_CONFIG_PATH invalid.json");
   });
 
-  it("loads and trims a persona from PERSONA_PATH", () => {
+  it("selects a named persona profile", () => {
+    const result = parseConfig({ DISCORD_TOKEN: "token", PERSONA_PROFILE: " WARTERMIS " });
+    expect(result.persona).toMatchObject({
+      id: "wartermis",
+      name: "Wartermis",
+      instructions: expect.stringContaining("You run Wartermis Works")
+    });
+  });
+
+  it("rejects an unknown persona profile", () => {
+    expect(() => parseConfig({ DISCORD_TOKEN: "token", PERSONA_PROFILE: "unknown" })).toThrow(
+      "PERSONA_PROFILE must be one of artemis, wartermis"
+    );
+  });
+
+  it("loads and trims a persona override from PERSONA_PATH", () => {
     const readFile = vi.fn().mockReturnValue("\n  Be theatrical but helpful.  \n");
     const result = loadConfig(
-      { DISCORD_TOKEN: "token", PERSONA_PATH: "persona.md" },
+      {
+        DISCORD_TOKEN: "token",
+        PERSONA_PROFILE: "wartermis",
+        PERSONA_PATH: "persona.md"
+      },
       readFile
     );
     expect(readFile).toHaveBeenCalledWith("persona.md", "utf8");
-    expect(result.persona).toBe("Be theatrical but helpful.");
+    expect(result.persona).toEqual({
+      id: "override",
+      name: "Deployment override",
+      instructions: "Be theatrical but helpful."
+    });
   });
 
   it("reports unreadable and blank persona files", () => {

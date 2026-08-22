@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { resolvePersonaProfile, type PersonaProfile } from "./persona-profiles.js";
 
 export const DEFAULT_OLLAMA_MODEL = "deepseek-v4-flash:0731-cloud";
 export const DEFAULT_OLLAMA_BASE_URL = "http://ollama:11434/v1";
@@ -41,7 +42,7 @@ export interface ArtemisConfig {
   discordSuppressEmbeds: boolean;
   discordEmbedsAllowedChannelIds: readonly string[];
   model: ModelProviderConfig;
-  persona: string;
+  persona: PersonaProfile;
   githubToken: string;
   githubAllowedRepositories: readonly string[];
   sqlitePath: string;
@@ -190,7 +191,7 @@ function parseBoolean(value: string, name: string, defaultValue: boolean): boole
 export function parseConfig(
   env: Environment = process.env,
   modelConfig?: unknown,
-  persona = ""
+  persona?: PersonaProfile
 ): ArtemisConfig {
   return {
     discordToken: required(env, "DISCORD_TOKEN"),
@@ -216,7 +217,7 @@ export function parseConfig(
           supportsReasoningEffort: true
         }, valueOrDefault(env, "OLLAMA_API_KEY", "ollama"))
       : parseModelConfig(modelConfig, valueOrDefault(env, "MODEL_API_KEY", "local")),
-    persona: persona.trim(),
+    persona: persona ?? resolvePersonaProfile(env.PERSONA_PROFILE),
     githubToken: env.GITHUB_TOKEN?.trim() ?? "",
     githubAllowedRepositories: parseAllowedRepositories(env.GITHUB_ALLOWED_REPOSITORY),
     sqlitePath: valueOrDefault(env, "SQLITE_PATH", DEFAULT_SQLITE_PATH),
@@ -240,17 +241,19 @@ export function loadConfig(
   }
 
   const personaPath = env.PERSONA_PATH?.trim();
-  let persona = "";
+  let persona: PersonaProfile | undefined;
   if (personaPath) {
+    let instructions: string;
     try {
-      persona = readFile(personaPath, "utf8").trim();
+      instructions = readFile(personaPath, "utf8").trim();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Unable to load PERSONA_PATH ${personaPath}: ${message}`);
     }
-    if (!persona) {
+    if (!instructions) {
       throw new Error(`Unable to load PERSONA_PATH ${personaPath}: file must contain nonblank text`);
     }
+    persona = { id: "override", name: "Deployment override", instructions };
   }
 
   return parseConfig(env, modelConfig, persona);

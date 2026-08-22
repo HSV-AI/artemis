@@ -58,7 +58,8 @@ cp .env.example .env
 | `OLLAMA_API_KEY` | No | `ollama` | Existing Ollama placeholder or bearer credential. |
 | `MODEL_CONFIG_PATH` | No | Empty | Runtime path to an optional JSON provider definition. When absent, Artemis uses the existing `OLLAMA_*` settings. |
 | `MODEL_API_KEY` | No | `local` | Bearer value used only with `MODEL_CONFIG_PATH`. A blank value sends no authorization header. |
-| `PERSONA_PATH` | No | Empty | Runtime path to an optional UTF-8 persona profile appended to the fixed Artemis system instructions. |
+| `PERSONA_PROFILE` | No | `artemis` | Named profile: `artemis` or `wartermis`. |
+| `PERSONA_PATH` | No | Empty | Runtime path to a UTF-8 profile override. When set, it takes precedence over `PERSONA_PROFILE`. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token. A blank value disables every GitHub tool. Grant only the repository permissions needed for the desired read or write operations. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `HSV-AI/artemis` | Comma-separated `owner/repository` allowlist. A blank list disables every GitHub tool. Matching is case-insensitive. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
@@ -97,13 +98,21 @@ Artemis intentionally does not ship a concrete alternate-provider file.
 Deployment repositories should own those values and mount the file through a
 Compose override or another runtime secret/configuration mechanism.
 
-## Optional persona profile
+## Persona profiles
 
-Set `PERSONA_PATH` to an operator-owned text or Markdown file to give a deployment
-a distinct identity, tone, or conversational style. Artemis trims the file and
-uses it instead of the built-in Artemis identity under a `Persona Profile`
-section. The fixed Discord, tool, and capability rules remain in force. An
-unreadable or blank selected file fails startup.
+`PERSONA_PROFILE` selects a named profile. `artemis` preserves the default identity;
+`wartermis` selects the bundled Wartermis Works profile. Both are represented by
+the same profile data model containing an ID, display name, and instructions.
+
+```dotenv
+PERSONA_PROFILE=wartermis
+```
+
+Set `PERSONA_PATH` to an operator-owned text or Markdown file to override the named
+profile with deployment-specific instructions. Artemis trims the file and uses it
+instead of the selected identity under a `Persona Profile` section. The fixed
+Discord, tool, and capability rules remain in force. An unreadable or blank
+selected file fails startup.
 
 For example, a deployment override can mount a profile read-only:
 

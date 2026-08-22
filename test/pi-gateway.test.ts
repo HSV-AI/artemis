@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type { StoredMessage } from "../src/domain.js";
+import { type PersonaProfile } from "../src/persona-profiles.js";
 import { modelConfig } from "./helpers.js";
 
 const mocks = vi.hoisted(() => {
@@ -311,7 +312,11 @@ describe("PiSdkGateway", () => {
     const gateway = new PiSdkGateway(
       {
         model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
-        persona: "Be a theatrical rival."
+        persona: {
+          id: "rival",
+          name: "Rival",
+          instructions: "Be a theatrical rival."
+        } satisfies PersonaProfile
       },
       vi.fn()
     );
