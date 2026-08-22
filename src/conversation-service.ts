@@ -117,7 +117,6 @@ export class ConversationService {
       const session = this.repository.getOrCreateSession(identity, this.options.model);
       await message.responseIndicator?.start();
       try {
-        const priorHistory = this.repository.getHistory(session.id);
         const sourceMessages = message.loadThread ? await message.loadThread() : [message];
         const normalized = sourceMessages.some(
           (candidate) => candidate.discordMessageId === message.discordMessageId
@@ -135,7 +134,6 @@ export class ConversationService {
           conversationKind: identity.kind,
           sourceMessageId: message.discordMessageId,
           authorId: message.authorId,
-          history: priorHistory,
           prompt
         });
         if (!result.text.trim()) {

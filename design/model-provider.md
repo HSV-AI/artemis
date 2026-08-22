@@ -91,9 +91,16 @@ belong to deployment repositories rather than upstream Artemis.
 
 ## Persistence
 
-No schema changes are required. Sessions continue to store the configured model
-ID, and assistant messages retain the actual response model reported by PI.
-Existing SQLite data is reconstructed under the currently configured provider.
+Sessions continue to store the configured model ID, and normalized assistant
+messages retain the actual response model reported by PI. Native PI entries,
+including the provider/model identity and exact usage reported for new turns,
+are stored in the SQLite session schema described by
+[Native PI session persistence](pi-session-persistence.md).
+
+The one-time legacy import cannot recover the provider identity that PI used
+historically. Imported assistant entries therefore use the current configured
+provider plus their saved response model when present, and the entire imported
+session is explicitly marked incomplete.
 
 ## Security and privacy
 
@@ -122,7 +129,8 @@ and sanitized before entering model context.
 
 - `test/config.test.ts` covers defaults, JSON loading, reasoning effort, overrides, and validation.
 - `test/pi-gateway.test.ts` covers dynamic provider registration, authentication,
-  configured reasoning effort, model lookup, reconstructed history, and health failure.
+  configured reasoning effort, model lookup, native session creation, legacy import,
+  and health failure.
 - `test/web-fetch-tool.test.ts` covers direct HTTP, HTML extraction, link limits,
   sanitization, plain text, invalid schemes, and upstream errors.
 - `test/application.test.ts` proves provider validation precedes Discord startup.

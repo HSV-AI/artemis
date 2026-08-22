@@ -2,17 +2,10 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   ModelRuntime,
-  SessionManager,
   SettingsManager
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import type {
-  AssistantMessage,
-  AssistantMessageDiagnostic,
-  Message,
-  ThinkingContent,
-  Usage
-} from "@earendil-works/pi-ai";
+import type { AssistantMessage, ThinkingContent } from "@earendil-works/pi-ai";
 import { DEFAULT_DGRAPH_URL, type ArtemisConfig } from "./config.js";
 import { DgraphClient, GraphMemory } from "./dgraph-memory.js";
 import type {
@@ -20,12 +13,16 @@ import type {
   PiGateway,
   PiGenerationInput,
   PiGenerationResult,
-  StoredMessage
+  PiSessionStore
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
 import { createMemoryTools } from "./memory-tools.js";
-import { formatDiscordMessage } from "./model-context.js";
 import type { PersonaProfile } from "./persona-profiles.js";
+import {
+  asPiSessionManager,
+  importLegacyPiSessions,
+  SqlitePiSessionManager
+} from "./pi-session-manager.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
 
 /**
@@ -113,49 +110,6 @@ function createCustomTools(
   ];
 }
 
-const emptyUsage: Usage = {
-  input: 0,
-  output: 0,
-  cacheRead: 0,
-  cacheWrite: 0,
-  totalTokens: 0,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-};
-
-function storedToPiMessage(
-  message: StoredMessage,
-  providerId: string,
-  fallbackModel: string
-): Message {
-  const timestamp = Date.parse(message.createdAt);
-  if (message.role === "user") {
-    return {
-      role: "user",
-      content: formatDiscordMessage(message),
-      timestamp
-    };
-  }
-
-  const content: AssistantMessage["content"] = [];
-  if (message.reasoning) {
-    content.push({ type: "thinking", thinking: message.reasoning });
-  }
-  content.push({ type: "text", text: message.content });
-  return {
-    role: "assistant",
-    content,
-    api: "openai-completions",
-    provider: providerId,
-    model: message.model ?? fallbackModel,
-    ...(Array.isArray(message.diagnostics)
-      ? { diagnostics: message.diagnostics as AssistantMessageDiagnostic[] }
-      : {}),
-    usage: emptyUsage,
-    stopReason: "stop",
-    timestamp
-  };
-}
-
 function extractGeneration(message: AssistantMessage): PiGenerationResult {
   if (message.stopReason === "error" || message.stopReason === "aborted") {
     throw new Error(message.errorMessage ?? `PI generation stopped: ${message.stopReason}`);
@@ -185,6 +139,7 @@ export class PiSdkGateway implements PiGateway {
   public constructor(
     private readonly config: Pick<ArtemisConfig, "model" | "persona"> &
       Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories" | "dgraphUrl">>,
+    private readonly sessionStore: PiSessionStore,
     private readonly fetchImplementation: typeof fetch = fetch
   ) {
     this.memory = new GraphMemory(
@@ -208,6 +163,12 @@ export class PiSdkGateway implements PiGateway {
     }
     await this.memory.initialize();
     await this.initialize();
+    importLegacyPiSessions(
+      this.sessionStore,
+      process.cwd(),
+      this.config.model.providerId,
+      this.config.model.modelId
+    );
   }
 
   public async generate(input: PiGenerationInput): Promise<PiGenerationResult> {
@@ -233,21 +194,18 @@ export class PiSdkGateway implements PiGateway {
       throw new Error(`Configured model is unavailable: ${this.config.model.modelId}`);
     }
 
-    const sessionManager = SessionManager.inMemory(process.cwd(), {
-      id: input.logicalSessionId
-    });
-    for (const message of input.history) {
-      sessionManager.appendMessage(
-        storedToPiMessage(message, this.config.model.providerId, this.config.model.modelId)
-      );
-    }
+    const sessionManager = SqlitePiSessionManager.open(
+      this.sessionStore,
+      process.cwd(),
+      input.logicalSessionId
+    );
     const { session } = await createAgentSession({
       modelRuntime,
       model,
       tools: customTools.map((tool) => tool.name),
       customTools,
       resourceLoader,
-      sessionManager,
+      sessionManager: asPiSessionManager(sessionManager),
       settingsManager: SettingsManager.inMemory(),
       ...(this.config.model.reasoningEffort === undefined
         ? {}
@@ -347,4 +305,4 @@ export class PiSdkGateway implements PiGateway {
   }
 }
 
-export const piInternals = { storedToPiMessage, extractGeneration, buildSystemPrompt };
+export const piInternals = { extractGeneration, buildSystemPrompt };

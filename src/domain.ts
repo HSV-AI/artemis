@@ -79,8 +79,39 @@ export interface PiGenerationInput {
   conversationKind: ConversationKind;
   sourceMessageId: string;
   authorId: string;
-  history: StoredMessage[];
   prompt: string;
+}
+
+export type PiHistoryCompleteness = "complete" | "legacy_import_incomplete";
+
+export interface PiSessionEntryRecord {
+  entryId?: string;
+  entryType: string;
+  parentId?: string;
+  rawJson: string;
+}
+
+export interface PersistedPiSession {
+  historyCompleteness: PiHistoryCompleteness;
+  rawEntries: string[];
+}
+
+export interface LegacyPiSession {
+  sessionId: string;
+  createdAt: string;
+  messages: StoredMessage[];
+}
+
+export interface PiSessionStore {
+  loadPiSession(sessionId: string): PersistedPiSession | undefined;
+  createPiSession(
+    sessionId: string,
+    historyCompleteness: PiHistoryCompleteness,
+    entries: PiSessionEntryRecord[]
+  ): void;
+  appendPiSessionEntry(sessionId: string, entry: PiSessionEntryRecord): void;
+  replacePiSessionEntries(sessionId: string, entries: PiSessionEntryRecord[]): void;
+  listLegacyPiSessions(): LegacyPiSession[];
 }
 
 export interface PiGenerationResult {

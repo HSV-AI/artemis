@@ -184,7 +184,6 @@ generate(
   stable_conversation_key,
   triggering_discord_message_id,
   triggering_discord_author_id,
-  ordered_history,
   current_prompt
 ) -> {
   text,
@@ -238,7 +237,7 @@ The model-facing implementation must:
 
 - Use the configured model rather than hard-coding a conditional model choice.
 - Apply a provider definition's explicit reasoning effort to every model request when configured.
-- Supply the complete stored history for the logical session in order.
+- Restore the native harness state for the logical session directly from durable SQLite entries.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
 - Enable only `web_fetch`, the six GitHub custom tools when configured, and the six scoped memory tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply the complete identity instructions from the profile selected by `PERSONA_PROFILE`, which defaults to `artemis` and includes `wartermis` as a bundled alternative. Keep each profile in its own source file and compose the fixed Discord instruction after it. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, and tool registry.
@@ -250,11 +249,9 @@ The model-facing implementation must:
 
 Implement the harness port above and keep all harness objects outside the conversation coordinator.
 
-Choose one session strategy:
+Use a durable harness-session strategy. Store the harness's native ordered entries beside the logical session, restore them directly on every turn and restart, and verify the session ID belongs to the selected conversation. The normalized application transcript remains available for Discord deduplication and auditing but is not replayed as the model-context authority.
 
-1. **Reconstructed sessions:** On every turn, create an in-memory harness session with the stable logical session ID, append SQLite history, generate, and dispose it. This is the simplest compatibility strategy.
-2. **Harness-owned durable sessions:** Store the external session identifier or serialized state beside the logical session. On restart, restore it and verify it belongs to the same conversation key. SQLite remains the authoritative transcript.
-3. **Stateless completion API:** Convert stored history into the provider's message format on every turn and make a completion request. The stable logical session ID remains useful for tracing even if the provider does not consume it.
+For PI compatibility, preserve the session header plus message, tool-result, model-change, thinking-level, compaction, branch-summary, custom, label, and session-info entry types with their native IDs, parent IDs, timestamps, payloads, and usage. If another harness uses a different native format, persist enough lossless state to reproduce the same tool, compaction, tree, and accounting behavior.
 
 Do not let a harness silently add tools, workspace files, or global memory. Do not rely exclusively on a provider-side transcript, because local restart recovery and operator inspection require the SQLite history.
 
@@ -352,7 +349,27 @@ The minimal logical schema is:
 - At most one active session per conversation.
 - Optional harness session reference or serialized state when the selected harness requires it.
 
-The current implementation uses the logical session ID only and reconstructs a fresh in-memory PI session from the SQLite transcript on every turn. `/clear-session` changes the active row to `closed`; the next accepted message creates a new active row for the same conversation.
+The current implementation uses the logical session ID as the native PI session ID. `/clear-session` changes the active row to `closed`; the next accepted message creates a new active row for the same conversation.
+
+### `pi_sessions`
+
+- Logical session ID as both primary key and foreign key to `sessions`, with cascade deletion.
+- History completeness: `complete` or `legacy_import_incomplete`.
+- Next ordered-entry ordinal.
+- Created and updated timestamps.
+
+### `pi_session_entries`
+
+- Logical/native session foreign key.
+- Zero-based ordinal, unique within the session.
+- Optional native entry ID, unique within the session.
+- Native entry type and optional parent ID.
+- Raw validated native JSON payload.
+- Primary key by session and ordinal; index by session and parent.
+
+Opening a PI session reads its rows in ordinal order, validates the header ID and complete sequence, applies PI format migrations transactionally when required, and builds native context without appending normalized messages. Native entry appends commit before the in-memory leaf advances.
+
+Migration 4 adds these tables. At startup, after model validation and before Discord login, perform an idempotent one-time import for every logical session with normalized messages but no `pi_sessions` row. Preserve available speaker metadata, content, reasoning, diagnostics, models, and timestamps. Mark the row `legacy_import_incomplete`, add a native `artemis.legacy_import` custom marker, and identify historical usage, tool state, compactions, and tree structure as unavailable. Synthetic zero usage on imported assistants is compatibility data and must never be reported as complete accounting.
 
 ### `messages`
 
@@ -394,7 +411,7 @@ The current implementation uses the logical session ID only and reconstructs a f
 - Raw content, Discord creation timestamp, and local logging timestamp.
 - Indexes by channel/local ID and Discord creation time/local ID.
 
-Incoming-message and source-message insertion must ignore duplicate Discord message IDs. Conversation and session creation, batch source-message insertion, assistant insertion, and active-session closing should each be transactional. A failed generation retains newly accepted source messages and records `generation_failed`, but it must not create an assistant message. A successful generation inserts one assistant record and records `generation_succeeded`. Every clear attempt records `session_cleared`, including whether an active session existed.
+Incoming-message and source-message insertion must ignore duplicate Discord message IDs. Conversation and session creation, batch source-message insertion, assistant insertion, native PI session creation/import/append/format replacement, and active-session closing should each be transactional. A failed generation retains newly accepted source messages and records `generation_failed`, but it must not create a normalized assistant message. Native PI entries already committed by the harness remain its model-context authority. A successful generation inserts one assistant record and records `generation_succeeded`. Every clear attempt records `session_cleared`, including whether an active session existed.
 
 No table has time-based expiration. Operators retain all chat content, reasoning, diagnostics, events, and logs until they deliberately delete records or the data volume.
 
@@ -460,9 +477,9 @@ Each stage should finish with tests before the next begins.
 
 - Create the database parent directory before opening the file.
 - Apply versioned migrations and repository constraints.
-- Implement conversation/session lookup, active-session closing, ordered history, source and incoming-message deduplication, assistant insertion, events, and application logs.
+- Implement conversation/session lookup, active-session closing, ordered normalized history, native harness session storage, one-time incomplete legacy import, source and incoming-message deduplication, assistant insertion, events, and application logs.
 - Write every accepted log to console first, then SQLite.
-- Test restart recovery by closing one repository instance and opening another over the same test database.
+- Test restart recovery by closing one repository instance and opening another over the same test database, including exact native usage, tool results, compactions, and parent relationships.
 
 ### 4. Implement the Discord adapter
 
@@ -483,13 +500,14 @@ Each stage should finish with tests before the next begins.
 - Route `/clear-session` through the same identity derivation, close only its active session, and retain archived history.
 - Deduplicate before session or model work.
 - Serialize work per conversation key.
-- Load prior history, persist new source messages, and build the current prompt.
+- Resolve the durable native harness session, persist new source messages, and build only the current prompt.
 - Persist successful assistant output or a failed-generation event containing the normalized error name and message.
 
 ### 6. Implement the harness and model adapters
 
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
+- Connect the harness's native session manager to ordered SQLite storage and run the idempotent legacy import before Discord login.
 - Register and allowlist `web_fetch`, token-gated GitHub tools, and scoped memory tools; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
 - Add configured provider health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
@@ -534,7 +552,8 @@ At minimum, prove all of the following:
 - Duplicate thread/source messages are persisted once.
 - A redelivered trigger invokes generation once.
 - Same-conversation turns serialize; different conversations can progress independently.
-- Restarting the application preserves the logical session and ordered history.
+- Restarting the application preserves the logical session plus native tool, compaction, tree, model, and exact new-turn usage state without replaying normalized history.
+- Legacy transcripts are imported once, retain structured Discord speaker context, and are explicitly marked incomplete rather than presenting unknown historical usage as exact.
 - A successful turn persists one assistant record, reasoning, diagnostics, and actual model.
 - Failed, aborted, missing, or blank generation persists a failure and sends nothing to Discord.
 - Typing appears only for accepted, non-duplicate messages, refreshes until generation ends, and a typing API failure does not cancel generation.

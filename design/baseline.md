@@ -14,7 +14,7 @@ The implementation uses PI and the PI SDK as the conversational harness, SQLite 
 
 ## Design document map
 
-Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). [Discord link-embed suppression](discord-link-embeds.md) enforces removal of link-preview cards on every outbound Discord message at the application layer, independent of the model, with a global default and per-channel override. [Persona profiles](persona-profile.md) let deployments vary identity and tone while preserving the common behavioral boundary. [Graph memory](memory.md) defines the Dgraph-backed fact lifecycle and PI tools. The complete catalog is maintained in the [design document index](README.md).
+Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). [Discord link-embed suppression](discord-link-embeds.md) enforces removal of link-preview cards on every outbound Discord message at the application layer, independent of the model, with a global default and per-channel override. [Persona profiles](persona-profile.md) let deployments vary identity and tone while preserving the common behavioral boundary. [Graph memory](memory.md) defines the Dgraph-backed fact lifecycle and PI tools. [Native PI session persistence](pi-session-persistence.md) preserves PI tool, compaction, tree, and usage entries directly in SQLite across turns and restarts. The complete catalog is maintained in the [design document index](README.md).
 
 ## Goals
 
@@ -51,7 +51,7 @@ Detailed protocols and major features live in focused subdocuments so this basel
 | Explicit guild invocation | Require the triggering message in a guild channel or thread to mention the Artemis bot user, mention its Discord-managed bot role (`@Artemis`), or reply directly to an Artemis-authored message. `@everyone`, `@here`, unrelated roles, and replies to other users do not qualify. Direct messages do not require a mention. |
 | Direct-message and guild conversations | Derive a stable conversation key from the Discord context. Direct messages use the DM channel ID. Guild messages, including thread replies, use the guild ID plus the parent channel ID. |
 | Channel-aware response limits | Group/channel (guild) responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained Discord messages per turn; DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind. |
-| Isolated, persistent context | Associate each conversation key with one active logical session and store its messages in SQLite. Reconstruct PI input from that session's ordered history, and never query history without the conversation key. |
+| Isolated, persistent context | Associate each conversation key with one active logical session, store its native PI entries in SQLite, and restore those entries directly for later turns without replaying the normalized transcript. |
 | Long-term memory | Bind each memory tool call to the immutable Discord conversation key, author ID, and source message ID; persist facts and tombstones in Dgraph across PI sessions. |
 | Configurable model and runtime | Read provider metadata from an optional local JSON file and credentials plus other runtime settings from environment variables loaded through `.env`. |
 | Reconnection | Use the Discord client's reconnect and resume behavior, and log connection lifecycle events. |
@@ -95,7 +95,7 @@ flowchart LR
         Channel -- Yes --> Mention{Bot mentioned?}
         Mention -- No mention or direct reply --> Ignore
         Mention -- Mention or direct reply --> Sessions
-        Sessions --> Store[(SQLite<br/>sessions and chat logs)]
+        Sessions --> Store[(SQLite<br/>native PI sessions and chat logs)]
         Sessions --> PI[PI harness SDK]
         PI --> WebFetch[web_fetch tool<br/>sanitized external content]
         PI --> GitHub[GitHub tools<br/>token-gated and sanitized]
@@ -154,7 +154,7 @@ Within a guild, any user's message may trigger Artemis when it originates in one
 
 #### Conversation coordinator
 
-The coordinator maps a normalized Discord event to a stable conversation key, restores or creates the corresponding PI session, submits the message, persists the result, and returns the response to Discord.
+The coordinator maps a normalized Discord event to a stable conversation key, restores or creates the corresponding durable PI session, submits the message, persists the result, and returns the response to Discord. [Native PI session persistence](pi-session-persistence.md) owns the detailed entry and migration lifecycle.
 
 Conversation keys are namespaced by context:
 
@@ -184,7 +184,9 @@ Provider identity, model metadata, and reasoning effort are configuration, not c
 SQLite stores all durable conversational data. A minimal logical schema includes:
 
 - `conversations`: stable conversation key, Discord context metadata, timestamps, and active-session reference.
-- `sessions`: logical session ID, conversation ID, model, lifecycle status, and timestamps. PI sessions are reconstructed in memory from the stored transcript for each turn.
+- `sessions`: logical session ID, conversation ID, model, lifecycle status, and timestamps.
+- `pi_sessions`: native PI lifecycle metadata and whether historical state is complete or originated from the explicitly incomplete legacy import.
+- `pi_session_entries`: ordered raw native PI JSON entries, including messages, tool state, model changes, compactions, tree relationships, and exact usage when available.
 - `messages`: session ID, Discord message and thread IDs where applicable, role, content, model metadata, available reasoning or diagnostics, and timestamp.
 - `events`: structured operational events that need durable correlation with a session or message.
 - `application_logs`: every structured application log emitted at the configured level, including its timestamp, severity, event name, and metadata.
@@ -257,18 +259,18 @@ If configuration, migration, or required model setup fails, startup exits with a
 6. Silently stop if the Discord message ID has already been processed.
 7. Start Discord's typing indicator and refresh it every five seconds while generation remains active.
 8. For an accepted message in a thread, fetch the complete thread in Discord order, including the new message.
-9. Restore or create the durable PI session and persist any new inbound messages.
+9. Restore or create the durable native PI session and persist any new inbound messages.
 10. Submit the current message, or the complete thread snapshot for a thread reply, to PI through the configured model provider. Include the stable conversation key, triggering author ID, and Discord message ID so memory tools can bind scope and provenance.
 11. Atomically persist the assistant response and available model diagnostics, then stop refreshing the typing indicator.
 12. Send a DM response as an ordinary channel message. Send a guild-channel or guild-thread response as a reply to the triggering message.
 
 The system prompt presented to PI is conversation-kind-aware. Guild sessions additionally receive a Discord Channel Limits block telling the model to keep responses to at most `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained messages with no sentence split across messages. DM sessions never receive that block, so direct messages are not length-restricted. The prompt is built as a pure function of the conversation kind, making the limit deterministic rather than runtime-dependent.
 
-If generation fails, Artemis records the failed attempt with the error name and message for operators. It does not fabricate an assistant turn or send anything to Discord. A later message reuses the last valid stored transcript.
+If generation fails, Artemis records the failed attempt with the error name and message for operators. It does not fabricate a normalized assistant turn or send anything to Discord. A later message reopens the native PI state that was durably appended before the failure.
 
 ### Reconnection and restart
 
-Transient Discord disconnects rely on the Discord client's resume and reconnect behavior with bounded backoff. Lifecycle events are logged. After a process or container restart, Artemis reopens SQLite and resolves the next incoming message to the existing conversation and PI session before generating a response.
+Transient Discord disconnects rely on the Discord client's resume and reconnect behavior with bounded backoff. Lifecycle events are logged. After a process or container restart, Artemis reopens SQLite and resolves the next incoming message to the existing conversation and native PI entries before generating a response.
 
 ## Failure handling
 
@@ -325,6 +327,8 @@ Required tests include:
 - Concurrent messages in one conversation are serialized.
 - Configuration defaults and validation behave as documented, including the default model.
 - Persistence transactions, migrations, and error paths preserve the last valid session state.
+- Native PI tool results, compactions, tree relationships, model state, and exact new-turn usage survive gateway reconstruction and application restart without normalized-history replay.
+- The one-time legacy PI import is idempotent, preserves available structured speaker context, and marks unavailable historical usage and harness state as incomplete.
 - PI or model-provider failures are logged without creating an assistant turn or sending a Discord response.
 - Only `web_fetch`, token-gated GitHub tools, and scoped memory tools are enabled; `web_fetch` and GitHub tools sanitize external content, all populate the Available Tools prompt registry and include the Capability Gap Protocol, and none enable built-in coding tools.
 - Every Discord message is emitted through the log-level-independent audit path and deduplicated in `incoming_messages` before conversation filtering.

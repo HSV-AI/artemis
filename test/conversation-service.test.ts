@@ -156,7 +156,7 @@ describe("ConversationService clearing", () => {
     );
 
     const secondInput = vi.mocked(pi.generate).mock.calls[1]?.[0];
-    expect(secondInput?.history).toEqual([]);
+    expect(secondInput).not.toHaveProperty("history");
 
     const secondSession = repository?.getOrCreateSession(
       { key: "dm:dm-clear", kind: "dm", channelId: "dm-clear" },
@@ -319,7 +319,7 @@ describe("ConversationService", () => {
     ]);
   });
 
-  it("restores prior history for a later service instance without crossing conversations", async () => {
+  it("reuses the durable logical session ID without crossing conversations", async () => {
     repository = new ArtemisRepository(":memory:");
     const firstPi = createPiMock({ text: "first" });
     const first = new ConversationService(options, repository, firstPi, createLoggerMock());
@@ -333,10 +333,11 @@ describe("ConversationService", () => {
     );
 
     const input = vi.mocked(secondPi.generate).mock.calls[0]?.[0];
-    expect(input?.history.map((message) => message.content)).toEqual(["Hello Artemis", "first"]);
-    expect(input?.history).not.toEqual(
-      expect.arrayContaining([expect.objectContaining({ discordMessageId: "other" })])
-    );
+    const dmOneSessionId = vi.mocked(firstPi.generate).mock.calls[0]?.[0].logicalSessionId;
+    const dmTwoSessionId = vi.mocked(firstPi.generate).mock.calls[1]?.[0].logicalSessionId;
+    expect(input?.logicalSessionId).toBe(dmOneSessionId);
+    expect(input?.logicalSessionId).not.toBe(dmTwoSessionId);
+    expect(input).not.toHaveProperty("history");
   });
 
   it("loads and resubmits the complete thread for any user in an allowed guild channel", async () => {
