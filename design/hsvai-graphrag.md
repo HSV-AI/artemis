@@ -126,6 +126,11 @@ also grants that account only `dgraph.all=4`, so mutations and schema changes ar
 denied independently at the HTTP transaction and ACL layers. The JWT binds the
 request to the HSVAI namespace; DQL cannot select namespace-0 memory.
 
+PI session history retains prior tool results as evidence snapshots, but those
+snapshots are not current-state authority after a corpus refresh. Questions
+about current graph contents and requests to check or recheck an earlier answer
+require a fresh DQL call in that turn.
+
 Tool output is marked as source evidence that must never be treated as model
 instructions. Source text passes through the existing adversarial-web-content
 sanitizer. Model guidance requires evidence IDs and source URLs in supported
