@@ -8,7 +8,12 @@
       "modifiedAt": "2024-02-06T03:07:59.000Z",
       "sourceHash": "240d9d09b468072e88177c3e5aa2e43cb6d4055caecf5b61fc0d4de0cf49079c",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -18,7 +23,12 @@
       "modifiedAt": "2024-02-18T19:00:12.000Z",
       "sourceHash": "cc42b88679f0386f3cab2b36738a6a9b75631fbcf3930e593613a41c80b83d79",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -28,7 +38,12 @@
       "modifiedAt": "2024-01-29T03:38:44.000Z",
       "sourceHash": "7a58e24708a4d4883c170517d0dcc1764ff6037612de4d2f7354f52a4c094eb6",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "No Speaker",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -38,7 +53,12 @@
       "modifiedAt": "2024-04-22T04:53:53.000Z",
       "sourceHash": "e6b69ac2ea2e9df36a6f767f1c4ce05bc8b5a73ec317ac2cba658ec04ff80d63",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -48,7 +68,12 @@
       "modifiedAt": "2024-08-18T02:23:31.000Z",
       "sourceHash": "d5e247de4295132e5108dbea2aacb8dba6008bf8c650a5e0a0a874cd7c220734",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -58,7 +83,12 @@
       "modifiedAt": "2024-03-05T04:31:34.000Z",
       "sourceHash": "28f385034250050066386da5f01fea9ea25f079a5f733b72f0542683eaa62b1f",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -68,7 +98,12 @@
       "modifiedAt": "2024-03-19T02:14:30.000Z",
       "sourceHash": "885a7399286d29048316a96a2ac4a167a45c41c9b2b53b489191f16bff0ac260",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -78,7 +113,12 @@
       "modifiedAt": "2024-04-02T03:21:41.000Z",
       "sourceHash": "dfe34117a8c87b8610ae5e30371c2e27462b22d82f140976842944b254fb9e4a",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -103,7 +143,12 @@
       "modifiedAt": "2024-04-28T13:53:34.000Z",
       "sourceHash": "2b7e9d7095c95427601d34ba29d1e33c3b730b4d91dd948368d6635cbb564d80",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -113,7 +158,12 @@
       "modifiedAt": "2024-05-13T03:50:34.000Z",
       "sourceHash": "f2547db0a31ae1c18bde2691e598a1effb2aed9d8c7eb3d6a7e91bcf9b8f51b6",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -123,7 +173,12 @@
       "modifiedAt": "2024-05-28T02:24:56.000Z",
       "sourceHash": "09a06bdb35540f7181ebcbb220a7309dd7385fb6a3c80e9033ddefd8726ebae9",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "No Speaker",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -148,7 +203,12 @@
       "modifiedAt": "2024-06-24T03:44:06.000Z",
       "sourceHash": "5adbdf9cd8036d1b99dfff75995d22f1349e73b7b6334d0407757b9707588ef4",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -158,7 +218,12 @@
       "modifiedAt": "2024-07-08T11:28:27.000Z",
       "sourceHash": "9c959cef5466c99443b20cee76782e99662aaf4255757c53c88fda7d21376299",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -168,7 +233,12 @@
       "modifiedAt": "2024-07-22T03:53:43.000Z",
       "sourceHash": "4bb0a17c9b7615bb502363252232e4efdfd9be89a52500f102cbf2fb0bbee0e0",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -178,7 +248,12 @@
       "modifiedAt": "2024-05-05T03:48:06.000Z",
       "sourceHash": "9d6d447e96c27cee5124418b653fbfc7594e84bebb22115da50020c7c5740ce7",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -188,7 +263,12 @@
       "modifiedAt": "2024-09-09T04:09:28.000Z",
       "sourceHash": "b4b04db3816c992c11d7f8dd7272bee5efdf4864baa55a462ab9b55b82a3b917",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -198,7 +278,12 @@
       "modifiedAt": "2024-09-25T15:45:26.000Z",
       "sourceHash": "4e324683475e8dc399c1fe4e9ae9f0203fc763c36c8a6a3bb591ad3c34b56566",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -227,7 +312,12 @@
       "modifiedAt": "2024-10-18T14:05:01.000Z",
       "sourceHash": "b2e5858fdddaea786d4627c34b36273d5a0febcd6e6d41b9615fbcba719e0922",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "No Speaker",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -256,7 +346,12 @@
       "modifiedAt": "2024-11-20T05:04:46.000Z",
       "sourceHash": "29f2ecc443ad8a871a89f3890614c8b00f4714d369e4cc54ed3aad84c7871afb",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -266,7 +361,12 @@
       "modifiedAt": "2024-12-03T15:55:15.000Z",
       "sourceHash": "ba802277a3f70c1f3e63efc193b3bf862a4ea5ccf721501d4b4e98a98b5d15e7",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -277,6 +377,10 @@
       "sourceHash": "ee1b6eb6254e63851ea2dac25e03edf4742a57ae1f63ea10bb7b4024735ea596",
       "theme": "community",
       "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        },
         {
           "name": "Paul Bay",
           "evidence": "we also have Paul Bay coming to talk about what he has been doing with AI Agents"
