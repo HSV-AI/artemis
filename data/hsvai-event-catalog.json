@@ -472,8 +472,9 @@
           "evidence": "Dr. Vineetha Menon\nDirector of the Big Data Analytics lab in the University of Alabama in Huntsville"
         },
         {
-          "name": "Langley",
-          "evidence": "Speakers:\nLangley\nFounder of Huntsville AI and Chief Technical Officer of CohesionForce, Inc."
+          "name": "J. Langley",
+          "evidence": "Speakers:\nLangley\nFounder of Huntsville AI and Chief Technical Officer of CohesionForce, Inc.",
+          "provenance": "operator"
         }
       ],
       "facilitators": []
@@ -719,6 +720,11 @@
         {
           "name": "David Showalter",
           "evidence": "This week I’m teaming up with David Showalter to cover three papers in two different domains."
+        },
+        {
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
         }
       ],
       "facilitators": []
@@ -826,7 +832,13 @@
       "modifiedAt": "2026-01-12T02:26:01.000Z",
       "sourceHash": "c40bc8d9966facfff5a82e889555ea60e132c29244c2405800162c036a3230c7",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -836,7 +848,13 @@
       "modifiedAt": "2026-01-12T02:24:57.000Z",
       "sourceHash": "d350d94f449a727781ef0df52296ed8c65a40b805b8cc28af7ecd81306d24703",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -851,6 +869,11 @@
           "name": "Jacquelyn Neal",
           "evidence": "Jacquelyn Neal is facilitating a workshop at Vanderbilt on AI literacy the first weekend of February. She will do a run through of a hands-on activity and get some feedback from the group.",
           "provenance": "source"
+        },
+        {
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
         }
       ],
       "facilitators": []
@@ -862,7 +885,13 @@
       "modifiedAt": "2026-02-02T03:36:50.000Z",
       "sourceHash": "685171062fa896b357e11d087f954a83f1ce4eb8feb58d10fac67244eaa433d0",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -1044,8 +1073,9 @@
       "theme": "building",
       "speakers": [
         {
-          "name": "Matt Brooks",
-          "evidence": "This week we will have two smaller presentations between myself and Matt Brooks."
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
         }
       ],
       "facilitators": []
