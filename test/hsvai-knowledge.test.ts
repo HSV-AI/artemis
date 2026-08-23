@@ -167,8 +167,7 @@ describe("HsvaiWordPressSource", () => {
         speakers: [{
           name: "Catalog Speaker",
           evidence: "Catalog Speaker presents."
-        }],
-        facilitators: []
+        }]
       }]
     };
     const matching = new HsvaiWordPressSource(
@@ -186,7 +185,7 @@ describe("HsvaiWordPressSource", () => {
     expect(document).toMatchObject({
       peopleStatus: "complete",
       theme: "research",
-      people: [expect.objectContaining({ name: "Catalog Speaker", role: "speaker" })]
+      people: [expect.objectContaining({ name: "Catalog Speaker" })]
     });
     const stale = new HsvaiWordPressSource(
       vi.fn().mockImplementation(async (input: URL | RequestInfo) => {
@@ -258,7 +257,7 @@ describe("HSVAI corpus construction", () => {
     });
   });
 
-  it("writes event themes and role-specific person edges", async () => {
+  it("writes presenters and facilitators to one speaker edge", async () => {
     const eventDocument: HsvaiSourceDocument = {
       sourceId: "hsvai:event:1",
       kind: "event",
@@ -270,8 +269,8 @@ describe("HSVAI corpus construction", () => {
       peopleStatus: "complete",
       theme: "building",
       people: [
-        { name: "Test Speaker", evidence: "Test Speaker presents.", role: "speaker" },
-        { name: "Test Facilitator", evidence: "Test Facilitator facilitates.", role: "facilitator" }
+        { name: "Test Speaker", evidence: "Test Speaker presents." },
+        { name: "Test Facilitator", evidence: "Test Facilitator facilitates." }
       ]
     };
     const fetchMock = vi.fn()
@@ -295,9 +294,9 @@ describe("HSVAI corpus construction", () => {
     expect(documentMutation.set[0]).toMatchObject({
       "hsvai.people_status": "complete",
       "hsvai.theme": "building",
-      "hsvai.speakers": [{ uid: "0xe1" }],
-      "hsvai.facilitators": [{ uid: "0xe2" }]
+      "hsvai.speakers": [{ uid: "0xe1" }, { uid: "0xe2" }]
     });
+    expect(documentMutation.set[0]).not.toHaveProperty("hsvai.facilitators");
     const chunkMutation = JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body)) as {
       set: Array<Record<string, unknown>>;
     };

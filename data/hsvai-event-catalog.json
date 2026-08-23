@@ -723,7 +723,6 @@
         },
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -789,12 +788,10 @@
       "speakers": [
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         },
         {
           "name": "Josh Phillips",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -822,7 +819,12 @@
       "modifiedAt": "2025-12-21T18:32:32.000Z",
       "sourceHash": "195460d50bc4707138b5b50238759183c59cb397c285afac7bacabd27ff44b28",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "No Speaker",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -835,7 +837,6 @@
       "speakers": [
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -851,7 +852,6 @@
       "speakers": [
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -872,7 +872,6 @@
         },
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -888,7 +887,6 @@
       "speakers": [
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -904,7 +902,6 @@
       "speakers": [
         {
           "name": "Josh Phillips",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -917,7 +914,12 @@
       "modifiedAt": "2026-02-23T03:52:58.000Z",
       "sourceHash": "a7b4a3ca5332daae09d98369216b1662fbff840518f77c3839c2c5f07dd22e67",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "No Speaker",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -930,7 +932,6 @@
       "speakers": [
         {
           "name": "Jack Francis",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -946,7 +947,6 @@
       "speakers": [
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -969,7 +969,12 @@
       "modifiedAt": "2026-03-30T15:36:03.000Z",
       "sourceHash": "a09ce6c2eda5452293b65e61e0c797656507cb36c2e1dc14dd182e7676fface2",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "No Speaker",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -997,7 +1002,6 @@
       "speakers": [
         {
           "name": "Josh Phillips",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -1028,12 +1032,10 @@
       "speakers": [
         {
           "name": "David Showalter",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         },
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -1046,7 +1048,16 @@
       "modifiedAt": "2026-05-18T03:42:15.000Z",
       "sourceHash": "7fbae4bc310b303a8ca73c712cb46ed97d184221c4088f1d96f08afced0813cc",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "David Showalter",
+          "provenance": "operator"
+        },
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -1074,7 +1085,10 @@
       "speakers": [
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        },
+        {
+          "name": "Matt Brooks",
           "provenance": "operator"
         }
       ],
@@ -1087,13 +1101,13 @@
       "modifiedAt": "2026-06-08T01:11:54.000Z",
       "sourceHash": "68a277f76d3ca127f333e9e4709c765075190ef5594e1227d356fe0ff1a61acd",
       "theme": "community",
-      "speakers": [],
-      "facilitators": [
+      "speakers": [
         {
           "name": "David Showalter",
           "evidence": "David Showalter will be there from 5:30–7:30 PM to facilitate a few tables for the group, unless it’s absolutely storming."
         }
-      ]
+      ],
+      "facilitators": []
     },
     {
       "sourceId": "hsvai:event:2222",
@@ -1105,7 +1119,6 @@
       "speakers": [
         {
           "name": "Josh Phillips",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -1136,7 +1149,6 @@
       "speakers": [
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -1152,7 +1164,6 @@
       "speakers": [
         {
           "name": "J. Langley",
-          "evidence": "Operator-confirmed presenter attribution.",
           "provenance": "operator"
         }
       ],
@@ -1180,7 +1191,12 @@
       "modifiedAt": "2026-07-18T12:55:34.000Z",
       "sourceHash": "81242de26a91a5e35533368dbb4c3b4f0e14530cc90328e3a12d900bb6989bc7",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "No Speaker",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -1205,7 +1221,12 @@
       "modifiedAt": "2026-08-03T03:51:58.000Z",
       "sourceHash": "a63a544726f1ddf9dfa32f7e926899fb82dadb9d02c96b32fdfaa63810b7cd89",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {

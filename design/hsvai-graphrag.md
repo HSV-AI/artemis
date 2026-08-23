@@ -42,7 +42,7 @@ the post ID, title, canonical URL, publication and modification times, and
 normalized content. An event document additionally retains its start, end,
 timezone, venue, and address. The source APIs remain authoritative for those
 fields. A source-hash-matched [event catalog](hsvai-event-catalog.md) adds a
-reviewed theme and explicit speaker and facilitator relationships without
+reviewed theme and explicit speaker relationships without
 editing the source APIs.
 
 ### Corpus Graph
@@ -55,8 +55,9 @@ Every synchronized corpus uses stable external identifiers:
 
 The Dgraph corpus contains `HsvaiDocument`, `HsvaiChunk`, `HsvaiEntity`, and
 `HsvaiCorpus` nodes. Chunks link to their source document and to deterministic
-speaker or venue entities. Event documents also carry role-specific speaker and
-facilitator edges plus a primary theme and catalog status. Reverse edges let retrieval move from a matching
+speaker or venue entities. Event documents also carry speaker edges plus a
+primary theme and catalog status. Presenters and discussion facilitators share
+the speaker role. Reverse edges let retrieval move from a matching
 chunk to sibling chunks in the same source and to chunks connected through a
 shared speaker or venue.
 

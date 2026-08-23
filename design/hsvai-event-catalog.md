@@ -7,14 +7,15 @@ Implemented.
 ## Problem
 
 The public HSVAI event API provides event prose but does not expose a stable,
-structured theme, speaker list, or facilitator list. Inferring those properties
+structured theme or speaker list. Inferring those properties
 during each conversation is slow, inconsistent, and difficult to traverse with
 DQL.
 
 ## Scope
 
 The event catalog owns source-grounded extraction of one primary theme and
-explicitly named speakers and facilitators for HSVAI calendar events. It owns the
+explicitly named presenters or discussion facilitators for HSVAI calendar events. Both
+are represented as speakers. It owns the
 checked-in seed, durable runtime overlay, source-change detection, configured
 model extraction protocol, and operator refresh command. The WordPress APIs
 remain authoritative for event identity, title, URL, dates, venue, and source
@@ -22,7 +23,7 @@ text.
 
 ## Observable Behavior
 
-Artemis exposes catalog-matched event themes, speakers, and facilitators through
+Artemis exposes catalog-matched event themes and speakers through
 hybrid retrieval and direct DQL. Events whose source has changed remain
 queryable, but their catalog status is pending and stale enrichment is omitted.
 Normal startup performs no event-enrichment model calls. Operators explicitly
@@ -38,12 +39,14 @@ overlay on the existing Artemis data volume. `HSVAI_EVENT_CATALOG_PATH` may
 select a different overlay path.
 
 Both files contain version `1` and one record per event. Each record retains the
-source ID, title, URL, modification time, SHA-256 source hash, one theme, and
-speaker and facilitator arrays. Themes are exactly `research`, `building`, or
-`community`. Each person includes their canonical graph name, evidence, and
-optional provenance. Model and deterministic entries use source text. Reviewed
-operator corrections may use `provenance: operator` with an explicit
-operator-confirmation marker when the event page omits the presenter.
+source ID, title, URL, modification time, SHA-256 source hash, one theme, and a
+speaker array. Themes are exactly `research`, `building`, or `community`.
+Discussion facilitators use the same speaker representation. Legacy version-1
+`facilitators` arrays remain readable and are merged into speakers when loaded,
+but new catalog output does not write them. Each person includes their canonical
+graph name. Model and deterministic entries also retain source evidence.
+Reviewed corrections use `provenance: operator` and do not require placeholder
+evidence text when the event page omits the presenter.
 
 Runtime records add new events and replace stale baseline records when their
 source hash differs. A reviewed baseline record wins over generated runtime data
@@ -51,8 +54,8 @@ for the same source ID and hash, so operator corrections are not hidden by an
 older overlay. A record is applied only when its source hash matches the current
 normalized event. New or changed events without a matching record are synchronized with
 `hsvai.people_status = pending`, no people edges, and no theme. Matching records
-use `complete` and populate `hsvai.theme`, `hsvai.speakers`, and
-`hsvai.facilitators`.
+use `complete` and populate `hsvai.theme` and `hsvai.speakers`. Reviewed events
+with no designated speaker may use the explicit `No Speaker` sentinel entity.
 
 ## Extraction And Refresh
 
@@ -93,11 +96,12 @@ That generated baseline must be reviewed before commit.
 ## Dgraph Projection
 
 Event documents store indexed `hsvai.theme` and `hsvai.people_status`
-predicates. `hsvai.speakers` and `hsvai.facilitators` are first-class UID edges
+predicates. `hsvai.speakers` is a first-class UID edge
 to the same stable person entities used by graph retrieval. Event chunks mention
 those entities so hybrid neighborhood expansion can connect events and
 transcripts through a person. Direct DQL can traverse either role-specific event
-edge without parsing source prose.
+edge without parsing source prose. The former `hsvai.facilitators` edge is no
+longer written; a rebuild removes its old event relationships.
 
 ## Configuration
 

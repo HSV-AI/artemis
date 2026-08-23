@@ -21,7 +21,7 @@ function source(sourceId: string, text: string, title = "Synthetic Event"): Hsva
 }
 
 describe("HSVAI event catalog", () => {
-  it("extracts explicit synthetic speakers, facilitators, and strong themes", () => {
+  it("extracts synthetic presenters and facilitators as speakers", () => {
     const metadata = extractDeterministicEventMetadata(source(
       "event:1",
       "Test Speaker presenting the results.\nTest Facilitator will be there to facilitate tables.",
@@ -30,8 +30,10 @@ describe("HSVAI event catalog", () => {
 
     expect(metadata).toEqual({
       theme: "research",
-      speakers: [expect.objectContaining({ name: "Test Speaker" })],
-      facilitators: [expect.objectContaining({ name: "Test Facilitator" })]
+      speakers: expect.arrayContaining([
+        expect.objectContaining({ name: "Test Speaker" }),
+        expect.objectContaining({ name: "Test Facilitator" })
+      ])
     });
   });
 
@@ -45,15 +47,13 @@ describe("HSVAI event catalog", () => {
       modifiedAt: current.modifiedAt,
       sourceHash: eventCatalogSourceHash(current),
       theme: "research" as const,
-      speakers: [],
-      facilitators: []
+      speakers: []
     };
     const extract = vi.fn().mockResolvedValue(new Map([[
       added.sourceId,
       {
         theme: "building" as const,
-        speakers: [{ name: "Model Speaker", evidence: "Model Speaker demonstrates a tool." }],
-        facilitators: []
+        speakers: [{ name: "Model Speaker", evidence: "Model Speaker demonstrates a tool." }]
       }
     ]]));
     const catalog = await enrichHsvaiEventCatalog(
@@ -88,10 +88,8 @@ describe("HSVAI event catalog", () => {
       theme: "community" as const,
       speakers: [{
         name: "Reviewed Speaker",
-        evidence: "Operator-confirmed presenter attribution.",
         provenance: "operator" as const
-      }],
-      facilitators: []
+      }]
     };
     const generated = { ...reviewed, speakers: [] };
 
@@ -114,8 +112,7 @@ describe("HSVAI event catalog", () => {
         events: [{
           sourceId: event.sourceId,
           theme: "building",
-          speakers: [{ name: "Model Speaker" }],
-          facilitators: []
+          speakers: [{ name: "Model Speaker" }]
         }]
       }) } }]
     }), { status: 200 }));
@@ -141,8 +138,7 @@ describe("HSVAI event catalog", () => {
         events: [{
           sourceId: event.sourceId,
           theme: "community",
-          speakers: [{ name: "Unsupported Speaker" }],
-          facilitators: []
+          speakers: [{ name: "Unsupported Speaker" }]
         }]
       }) } }]
     }), { status: 200 }));
