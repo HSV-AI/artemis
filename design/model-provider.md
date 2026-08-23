@@ -85,9 +85,9 @@ PI custom tool -> web_fetch -> target HTTP(S) URL -> sanitize -> PI
 | `MODEL_API_KEY` | `local` | Bearer value supplied only to the configured model endpoint. Blank disables the header. |
 
 Base `compose.yaml` starts Ollama, the model pull job, Dgraph, and Artemis.
-Dgraph supports the independent Wartermis memory protocol and does not affect
-provider selection. Concrete alternate-provider configuration and Compose
-overrides belong to deployment repositories rather than upstream Artemis.
+Dgraph supports the independent memory protocol and does not affect provider
+selection. Concrete alternate-provider configuration and Compose overrides
+belong to deployment repositories rather than upstream Artemis.
 
 ## Persistence
 

@@ -96,6 +96,10 @@ function generationInput(overrides: Partial<PiGenerationInput> = {}): PiGenerati
   };
 }
 
+function healthyFetch() {
+  return vi.fn().mockImplementation(async () => new Response('{"data":{}}', { status: 200 }));
+}
+
 describe("buildSystemPrompt", () => {
   it("includes the Capability Gap Protocol and an Available Tools section", () => {
     const prompt = piInternals.buildSystemPrompt("dm", ARTEMIS_PROFILE);
@@ -233,7 +237,7 @@ describe("PiSdkGateway", () => {
   });
 
   it("checks health, registers the configured provider, and omits empty auth headers", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const fetchMock = healthyFetch();
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(
         modelConfig({ baseUrl: "http://inference/v1", modelId: "model", apiKey: "" })
@@ -241,7 +245,7 @@ describe("PiSdkGateway", () => {
       fetchMock
     );
     await gateway.checkHealth();
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenCalledWith(
       "http://inference/v1/models",
       expect.objectContaining({ headers: {} })
@@ -265,7 +269,7 @@ describe("PiSdkGateway", () => {
           reasoningEffort
         })
       ),
-      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
+      healthyFetch()
     );
     await gateway.checkHealth();
     await gateway.generate(generationInput());
@@ -288,7 +292,7 @@ describe("PiSdkGateway", () => {
     delete config.reasoningEffort;
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(config),
-      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
+      healthyFetch()
     );
     await gateway.checkHealth();
     await gateway.generate(generationInput());
@@ -304,7 +308,7 @@ describe("PiSdkGateway", () => {
   });
 
   it("preserves unauthenticated access for the legacy Ollama placeholder", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const fetchMock = healthyFetch();
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(
         modelConfig({
@@ -330,7 +334,7 @@ describe("PiSdkGateway", () => {
   });
 
   it("uses bearer auth for a configured remote key", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const fetchMock = healthyFetch();
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(
         modelConfig({ baseUrl: "https://model.example/v1", modelId: "model", apiKey: "secret" })
@@ -393,8 +397,19 @@ describe("PiSdkGateway", () => {
     });
     expect(mocks.createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({
-        tools: ["web_fetch"],
-        customTools: [expect.objectContaining({ name: "web_fetch" })],
+        tools: [
+          "web_fetch",
+          "memory_remember",
+          "memory_recall",
+          "memory_supersede",
+          "memory_forget",
+          "memory_believed_at",
+          "memory_audit"
+        ],
+        customTools: expect.arrayContaining([
+          expect.objectContaining({ name: "web_fetch" }),
+          expect.objectContaining({ name: "memory_remember" })
+        ]),
         thinkingLevel: "medium"
       })
     );
@@ -435,7 +450,9 @@ describe("PiSdkGateway", () => {
     expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       tools: [
         "web_fetch", "github_search", "github_list", "github_fetch",
-        "github_create", "github_update", "github_upload_image"
+        "github_create", "github_update", "github_upload_image",
+        "memory_remember", "memory_recall", "memory_supersede",
+        "memory_forget", "memory_believed_at", "memory_audit"
       ],
       customTools: expect.arrayContaining([
         expect.objectContaining({ name: "github_search" }),
@@ -444,12 +461,12 @@ describe("PiSdkGateway", () => {
     }));
   });
 
-  it("registers scoped Dgraph memory tools only for Wartermis", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response('{"data":{}}', { status: 200 }));
+  it("registers scoped Dgraph memory tools for Artemis", async () => {
+    const fetchMock = healthyFetch();
     const gateway = new PiSdkGateway(
       {
         model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
-        persona: WARTERMIS_PROFILE,
+        persona: ARTEMIS_PROFILE,
         dgraphUrl: "http://dgraph:8080"
       },
       fetchMock
@@ -512,7 +529,7 @@ describe("system prompt Discord channel limits", () => {
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
-      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
+      healthyFetch()
     );
     await gateway.generate(generationInput({
       conversationKind: kind,

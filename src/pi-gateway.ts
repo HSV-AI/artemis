@@ -180,18 +180,16 @@ export class PiSdkGateway implements PiGateway {
   private modelRuntime: ModelRuntime | undefined;
   private readonly resourceLoaders = new Map<ConversationKind, DefaultResourceLoader>();
   private customTools: ReturnType<typeof createCustomTools> = [];
-  private readonly memory: GraphMemory | undefined;
+  private readonly memory: GraphMemory;
 
   public constructor(
     private readonly config: Pick<ArtemisConfig, "model" | "persona"> &
       Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories" | "dgraphUrl">>,
     private readonly fetchImplementation: typeof fetch = fetch
   ) {
-    if (config.persona.id === "wartermis") {
-      this.memory = new GraphMemory(
-        new DgraphClient(config.dgraphUrl ?? DEFAULT_DGRAPH_URL, fetchImplementation)
-      );
-    }
+    this.memory = new GraphMemory(
+      new DgraphClient(config.dgraphUrl ?? DEFAULT_DGRAPH_URL, fetchImplementation)
+    );
   }
 
   public async checkHealth(): Promise<void> {
@@ -208,22 +206,20 @@ export class PiSdkGateway implements PiGateway {
     } finally {
       clearTimeout(timeout);
     }
-    await this.memory?.initialize();
+    await this.memory.initialize();
     await this.initialize();
   }
 
   public async generate(input: PiGenerationInput): Promise<PiGenerationResult> {
     await this.initialize();
-    const customTools = this.memory
-      ? [
-          ...this.customTools,
-          ...createMemoryTools(this.memory, {
-            scopeKey: input.conversationKey,
-            authorId: input.authorId,
-            sourceMessageId: input.sourceMessageId
-          })
-        ]
-      : this.customTools;
+    const customTools = [
+      ...this.customTools,
+      ...createMemoryTools(this.memory, {
+        scopeKey: input.conversationKey,
+        authorId: input.authorId,
+        sourceMessageId: input.sourceMessageId
+      })
+    ];
     const modelRuntime = this.modelRuntime;
     if (!modelRuntime) {
       throw new Error("PI gateway failed to initialize");

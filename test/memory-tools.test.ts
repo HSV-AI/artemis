@@ -19,7 +19,7 @@ function memoryMock(): MemoryStore {
   };
 }
 
-describe("Wartermis memory tools", () => {
+describe("Artemis memory tools", () => {
   it("registers the complete explicit memory tool set", () => {
     expect(createMemoryTools(memoryMock(), context).map((tool) => tool.name)).toEqual([
       "memory_remember",
