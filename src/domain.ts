@@ -82,8 +82,6 @@ export interface PiGenerationInput {
   prompt: string;
 }
 
-export type PiHistoryCompleteness = "complete" | "legacy_import_incomplete";
-
 export interface PiSessionEntryRecord {
   entryId?: string;
   entryType: string;
@@ -92,26 +90,27 @@ export interface PiSessionEntryRecord {
 }
 
 export interface PersistedPiSession {
-  historyCompleteness: PiHistoryCompleteness;
   rawEntries: string[];
 }
 
-export interface LegacyPiSession {
+export interface PiSessionMigrationSource {
   sessionId: string;
   createdAt: string;
   messages: StoredMessage[];
 }
 
+export interface PiSessionMigration {
+  sessionId: string;
+  entries: PiSessionEntryRecord[];
+}
+
 export interface PiSessionStore {
   loadPiSession(sessionId: string): PersistedPiSession | undefined;
-  createPiSession(
-    sessionId: string,
-    historyCompleteness: PiHistoryCompleteness,
-    entries: PiSessionEntryRecord[]
-  ): void;
+  createPiSession(sessionId: string, entries: PiSessionEntryRecord[]): void;
   appendPiSessionEntry(sessionId: string, entry: PiSessionEntryRecord): void;
   replacePiSessionEntries(sessionId: string, entries: PiSessionEntryRecord[]): void;
-  listLegacyPiSessions(): LegacyPiSession[];
+  listPiSessionMigrationSources(): PiSessionMigrationSource[];
+  completePiSessionMigration(migrations: PiSessionMigration[]): number;
 }
 
 export interface PiGenerationResult {

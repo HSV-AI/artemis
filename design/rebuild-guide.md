@@ -354,7 +354,6 @@ The current implementation uses the logical session ID as the native PI session 
 ### `pi_sessions`
 
 - Logical session ID as both primary key and foreign key to `sessions`, with cascade deletion.
-- History completeness: `complete` or `legacy_import_incomplete`.
 - Next ordered-entry ordinal.
 - Created and updated timestamps.
 
@@ -369,7 +368,7 @@ The current implementation uses the logical session ID as the native PI session 
 
 Opening a PI session reads its rows in ordinal order, validates the header ID and complete sequence, applies PI format migrations transactionally when required, and builds native context without appending normalized messages. Native entry appends commit before the in-memory leaf advances.
 
-Migration 4 adds these tables. At startup, after model validation and before Discord login, perform an idempotent one-time import for every logical session with normalized messages but no `pi_sessions` row. Preserve available speaker metadata, content, reasoning, diagnostics, models, and timestamps. Mark the row `legacy_import_incomplete`, add a native `artemis.legacy_import` custom marker, and identify historical usage, tool state, compactions, and tree structure as unavailable. Synthetic zero usage on imported assistants is compatibility data and must never be reported as complete accounting.
+Migration 4 adds these tables. At startup, after model validation and before Discord login, perform a one-time cutover for every logical session without a `pi_sessions` row, including empty sessions. Preserve every available message's speaker metadata, content, reasoning, diagnostics, model, and timestamp, using zero historical assistant usage because the old schema did not store it. Insert all converted sessions and schema migration 5 in one transaction; roll back and abort startup unless every logical session has native PI state. Once migration 5 exists, do not rescan or replay the normalized transcript and do not retain a compatibility mode, completeness column, or synthetic migration entry.
 
 ### `messages`
 
@@ -477,7 +476,7 @@ Each stage should finish with tests before the next begins.
 
 - Create the database parent directory before opening the file.
 - Apply versioned migrations and repository constraints.
-- Implement conversation/session lookup, active-session closing, ordered normalized history, native harness session storage, one-time incomplete legacy import, source and incoming-message deduplication, assistant insertion, events, and application logs.
+- Implement conversation/session lookup, active-session closing, ordered normalized history, native harness session storage, the atomic one-time PI cutover, source and incoming-message deduplication, assistant insertion, events, and application logs.
 - Write every accepted log to console first, then SQLite.
 - Test restart recovery by closing one repository instance and opening another over the same test database, including exact native usage, tool results, compactions, and parent relationships.
 
@@ -507,7 +506,7 @@ Each stage should finish with tests before the next begins.
 
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
-- Connect the harness's native session manager to ordered SQLite storage and run the idempotent legacy import before Discord login.
+- Connect the harness's native session manager to ordered SQLite storage and complete the atomic one-time PI cutover before Discord login.
 - Register and allowlist `web_fetch`, token-gated GitHub tools, and scoped memory tools; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
 - Add configured provider health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
@@ -553,7 +552,7 @@ At minimum, prove all of the following:
 - A redelivered trigger invokes generation once.
 - Same-conversation turns serialize; different conversations can progress independently.
 - Restarting the application preserves the logical session plus native tool, compaction, tree, model, and exact new-turn usage state without replaying normalized history.
-- Legacy transcripts are imported once, retain structured Discord speaker context, and are explicitly marked incomplete rather than presenting unknown historical usage as exact.
+- Every pre-cutover logical session, including an empty one, receives native PI state in an all-or-nothing migration; available Discord speaker context is retained and migration 5 prevents future conversion scans.
 - A successful turn persists one assistant record, reasoning, diagnostics, and actual model.
 - Failed, aborted, missing, or blank generation persists a failure and sends nothing to Discord.
 - Typing appears only for accepted, non-duplicate messages, refreshes until generation ends, and a typing API failure does not cancel generation.

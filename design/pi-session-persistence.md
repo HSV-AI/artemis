@@ -10,7 +10,7 @@ Artemis originally stored a normalized Discord transcript in SQLite but created 
 
 ## Scope
 
-This protocol owns the durable relationship between an Artemis logical session and its native PI session entries, including restart recovery, `/clear-session`, entry ordering, legacy import, persistence failures, and the additional sensitive data retained in native entries.
+This protocol owns the durable relationship between an Artemis logical session and its native PI session entries, including restart recovery, `/clear-session`, entry ordering, the one-time database cutover, persistence failures, and the additional sensitive data retained in native entries.
 
 It does not change Discord authorization, conversation-key derivation, current-message or thread-snapshot formatting, model-provider selection, tool authorization, outbound delivery, or the operator-facing normalized `messages` history.
 
@@ -24,7 +24,7 @@ Basic user and assistant history remains available in the normalized `messages` 
 
 ## Contracts and data flow
 
-Startup performs model-provider validation and then runs the idempotent legacy import before Discord connects. A normal turn follows this flow:
+Startup performs model-provider validation and then completes the one-time PI session cutover before Discord connects. A normal turn follows this flow:
 
 ```text
 Discord message -> conversation coordinator -> active logical session ID
@@ -50,17 +50,15 @@ Artemis pins the PI AI and coding-agent packages to the exact compatibility-test
 
 Every PI session begins with one native session header. Every later native entry retains PI's JSON representation, entry type, entry ID, parent ID, timestamp, and payload. Opening a session performs one ordered SQLite read and builds PI's in-memory indexes directly; it does not convert or append `StoredMessage[]`.
 
-### Legacy import
+### One-time database cutover
 
-Migration 4 creates the native PI tables without fabricating information that the old transcript never captured. After provider validation and before Discord login, Artemis finds every logical session that has normalized messages but no native PI state and imports it once.
+Migration 4 creates the native PI tables. After provider validation and before Discord login, Artemis finds every logical session without native PI state, including sessions with no normalized messages. It converts all of them in one transaction and records migration 5 only after every logical session has a `pi_sessions` row. Any conversion or persistence failure rolls back the entire cutover and aborts startup, so a later startup retries from the pre-cutover state. Once migration 5 exists, later startups skip the session scan and conversion.
 
-The import preserves the available user content, structured Discord speaker metadata, assistant text, reasoning, diagnostics, saved response model, and timestamps. It cannot recover historical tool entries, compactions, tree structure, or usage. Each imported session is therefore marked `legacy_import_incomplete` in `pi_sessions.history_completeness` and receives a native `artemis.legacy_import` custom entry listing the unavailable state. Imported assistant usage is zero only as an explicitly incomplete compatibility value; it must never be presented as complete historical accounting. A repeated startup skips sessions that already have a `pi_sessions` row.
+The cutover creates a native PI header for every existing session and converts every available normalized message in order. It preserves user content, structured Discord speaker metadata, assistant text, reasoning, diagnostics, saved response model, and timestamps. Historical tool entries, compactions, tree structure, provider identity, and usage were never stored and cannot be recovered; converted assistant entries use zero historical usage as the starting baseline. Artemis does not retain a compatibility mode, completeness column, synthetic migration entry, or fallback transcript replay after the cutover.
 
 ## Performance considerations
 
 Each generation currently restores the selected logical session with one indexed, ordered SQLite query and parses every native entry for that session. The work is isolated from other sessions but grows linearly with the selected session's retained entry count. Artemis does not retain live PI managers across turns because a process-local cache would add eviction, concurrency, and clear-session lifecycle requirements. Issue [#35](https://github.com/HSV-AI/artemis/issues/35) tracks measurements and requires evidence before introducing such a cache.
-
-The one-time legacy import currently discovers all unimported logical sessions and materializes their normalized histories before writing native entries. That keeps the migration simple and idempotent for the current deployment scale, but it can increase startup memory for an unusually large legacy database. Issue #35 also tracks a bounded-batch importer if measurements show that eager migration is unsafe.
 
 ## Configuration
 
@@ -68,13 +66,13 @@ This protocol introduces no configuration. Native entries use the existing `SQLI
 
 ## Persistence
 
-`pi_sessions` has one row per logical `sessions` row. It stores the history-completeness marker, next append ordinal, and timestamps. Its foreign key cascades when an operator deliberately deletes the owning logical session.
+`pi_sessions` has one row per logical `sessions` row after migration 5. It stores the next append ordinal and timestamps. Its foreign key cascades when an operator deliberately deletes the owning logical session.
 
 `pi_session_entries` stores one raw native PI JSON object per row with a zero-based ordinal, optional native entry ID and parent ID, entry type, and validated JSON text. The `(session_id, ordinal)` primary key preserves JSONL order, while `(session_id, entry_id)` is unique. Parent lookup is indexed.
 
-Creating a PI session, importing a legacy session, appending one native entry, replacing entries after a PI format migration, and updating the next ordinal are transactional. A load rejects a missing ordinal rather than silently presenting truncated context. The session header ID must match the Artemis logical session ID.
+Creating a PI session, appending one native entry, replacing entries after a PI format migration, and updating the next ordinal are transactional. The cutover inserts all missing sessions and migration 5 in one transaction. A load rejects a missing ordinal rather than silently presenting truncated context. The session header ID must match the Artemis logical session ID.
 
-The normalized `messages` table remains intentionally separate. It represents the Discord/application audit contract; `pi_session_entries` represents the exact harness context. Neither is silently reconstructed from the other after the one-time legacy import.
+The normalized `messages` table remains intentionally separate because it represents the Discord deduplication, attribution, audit, and operator-history contract; it is not retained as a model-context compatibility fallback. `pi_session_entries` is the sole harness context after the cutover, and neither representation is silently reconstructed from the other during normal operation.
 
 ## Security and privacy
 
@@ -84,7 +82,7 @@ Application code must not deliberately insert configured credentials into either
 
 ## Failure handling
 
-- A schema migration or legacy-import failure aborts startup before Discord connects.
+- A schema or cutover migration failure rolls back and aborts startup before Discord connects.
 - Invalid JSON, a mismatched session header, or an incomplete ordinal sequence fails generation; Artemis records the normalized generation failure and sends nothing to Discord.
 - A native-entry append is written to SQLite before the adapter advances its in-memory leaf. If the write fails, the live context is not advanced and the normal generation-failure path applies.
 - Accepted Discord source messages remain in the normalized transcript when generation fails, matching the existing failure contract.
@@ -92,9 +90,9 @@ Application code must not deliberately insert configured credentials into either
 
 ## Verification
 
-- Repository tests cover migration 4, ordered entry storage, transactional append/replace behavior, and completeness metadata.
+- Repository tests cover migration 4, ordered entry storage, transactional append/replace behavior, and the migration-5 completion marker.
 - Session-manager tests cover exact usage, tool results, compaction metadata, parent relationships, labels, branches, restart recovery, append failure, and archived clear-session state.
-- Legacy-import tests prove the import is idempotent, preserves structured speaker attribution, writes both incomplete markers, and does not claim historical usage is known.
+- Cutover tests prove every existing session is converted, including empty sessions; structured speaker attribution is preserved; partial conversion rolls back; and later startups skip conversion after migration 5.
 - Gateway and coordinator tests prove normal generation no longer accepts or replays `history` and continues to dispose the live PI session.
 - The SDK-compatibility test uses the real pinned PI SDK with its faux provider to create an agent session, complete a prompt, append native entries through SQLite, dispose the agent, and restore the resulting context. It does not mock `createAgentSession`.
 - `npm run check:design` and `npm run guardrail` remain the completion gates.

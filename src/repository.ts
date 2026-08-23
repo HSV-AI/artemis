@@ -5,12 +5,12 @@ import Database from "better-sqlite3";
 import type {
   ConversationIdentity,
   IncomingMessageRecord,
-  LegacyPiSession,
   LogEntry,
   PersistedPiSession,
   PiGenerationResult,
-  PiHistoryCompleteness,
   PiSessionEntryRecord,
+  PiSessionMigration,
+  PiSessionMigrationSource,
   SessionRecord,
   SourceMessage,
   StoredMessage
@@ -68,7 +68,6 @@ interface IncomingMessageRow {
 }
 
 interface PiSessionRow {
-  history_completeness: PiHistoryCompleteness;
   next_ordinal: number;
 }
 
@@ -77,7 +76,7 @@ interface PiSessionEntryRow {
   raw_json: string;
 }
 
-interface LegacySessionRow {
+interface PiSessionMigrationSourceRow {
   id: string;
   created_at: string;
 }
@@ -255,7 +254,7 @@ export class ArtemisRepository {
   public loadPiSession(sessionId: string): PersistedPiSession | undefined {
     const session = this.database
       .prepare(
-        `SELECT history_completeness, next_ordinal
+        `SELECT next_ordinal
          FROM pi_sessions
          WHERE session_id = ?`
       )
@@ -277,27 +276,12 @@ export class ArtemisRepository {
     ) {
       throw new Error(`PI session entry sequence is incomplete: ${sessionId}`);
     }
-    return {
-      historyCompleteness: session.history_completeness,
-      rawEntries: entries.map((entry) => entry.raw_json)
-    };
+    return { rawEntries: entries.map((entry) => entry.raw_json) };
   }
 
-  public createPiSession(
-    sessionId: string,
-    historyCompleteness: PiHistoryCompleteness,
-    entries: PiSessionEntryRecord[]
-  ): void {
+  public createPiSession(sessionId: string, entries: PiSessionEntryRecord[]): void {
     const transaction = this.database.transaction(() => {
-      const timestamp = now();
-      this.database
-        .prepare(
-          `INSERT INTO pi_sessions
-           (session_id, history_completeness, next_ordinal, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?)`
-        )
-        .run(sessionId, historyCompleteness, entries.length, timestamp, timestamp);
-      this.insertPiSessionEntries(sessionId, entries);
+      this.insertPiSession(sessionId, entries);
     });
     transaction();
   }
@@ -340,7 +324,13 @@ export class ArtemisRepository {
     transaction();
   }
 
-  public listLegacyPiSessions(): LegacyPiSession[] {
+  public listPiSessionMigrationSources(): PiSessionMigrationSource[] {
+    const completed = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 5")
+      .get();
+    if (completed) {
+      return [];
+    }
     const sessions = this.database
       .prepare(
         `SELECT s.id, s.created_at
@@ -348,17 +338,45 @@ export class ArtemisRepository {
          WHERE NOT EXISTS (
            SELECT 1 FROM pi_sessions p WHERE p.session_id = s.id
          )
-         AND EXISTS (
-           SELECT 1 FROM messages m WHERE m.session_id = s.id
-         )
          ORDER BY s.created_at ASC, s.id ASC`
       )
-      .all() as LegacySessionRow[];
+      .all() as PiSessionMigrationSourceRow[];
     return sessions.map((session) => ({
       sessionId: session.id,
       createdAt: session.created_at,
       messages: this.getHistory(session.id)
     }));
+  }
+
+  public completePiSessionMigration(migrations: PiSessionMigration[]): number {
+    const transaction = this.database.transaction(() => {
+      const completed = this.database
+        .prepare("SELECT 1 FROM schema_migrations WHERE version = 5")
+        .get();
+      if (completed) {
+        return 0;
+      }
+      for (const migration of migrations) {
+        this.insertPiSession(migration.sessionId, migration.entries);
+      }
+      const missing = this.database
+        .prepare(
+          `SELECT COUNT(*) AS count
+           FROM sessions s
+           WHERE NOT EXISTS (
+             SELECT 1 FROM pi_sessions p WHERE p.session_id = s.id
+           )`
+        )
+        .get() as { count: number };
+      if (missing.count !== 0) {
+        throw new Error(`PI session migration left ${missing.count} session(s) unconverted`);
+      }
+      this.database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (5, ?)")
+        .run(now());
+      return migrations.length;
+    });
+    return transaction();
   }
 
   public insertSourceMessages(sessionId: string, messages: SourceMessage[]): number {
@@ -446,6 +464,18 @@ export class ArtemisRepository {
 
   private insertPiSessionEntries(sessionId: string, entries: PiSessionEntryRecord[]): void {
     entries.forEach((entry, ordinal) => this.insertPiSessionEntry(sessionId, ordinal, entry));
+  }
+
+  private insertPiSession(sessionId: string, entries: PiSessionEntryRecord[]): void {
+    const timestamp = now();
+    this.database
+      .prepare(
+        `INSERT INTO pi_sessions
+         (session_id, next_ordinal, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`
+      )
+      .run(sessionId, entries.length, timestamp, timestamp);
+    this.insertPiSessionEntries(sessionId, entries);
   }
 
   private insertPiSessionEntry(
@@ -603,8 +633,6 @@ export class ArtemisRepository {
         this.database.exec(`
           CREATE TABLE pi_sessions (
             session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-            history_completeness TEXT NOT NULL
-              CHECK (history_completeness IN ('complete', 'legacy_import_incomplete')),
             next_ordinal INTEGER NOT NULL CHECK (next_ordinal >= 0),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL

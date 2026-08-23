@@ -185,7 +185,7 @@ SQLite stores all durable conversational data. A minimal logical schema includes
 
 - `conversations`: stable conversation key, Discord context metadata, timestamps, and active-session reference.
 - `sessions`: logical session ID, conversation ID, model, lifecycle status, and timestamps.
-- `pi_sessions`: native PI lifecycle metadata and whether historical state is complete or originated from the explicitly incomplete legacy import.
+- `pi_sessions`: native PI lifecycle metadata and the next ordered-entry position.
 - `pi_session_entries`: ordered raw native PI JSON entries, including messages, tool state, model changes, compactions, tree relationships, and exact usage when available.
 - `messages`: session ID, Discord message and thread IDs where applicable, role, content, model metadata, available reasoning or diagnostics, and timestamp.
 - `events`: structured operational events that need durable correlation with a session or message.
@@ -328,7 +328,7 @@ Required tests include:
 - Configuration defaults and validation behave as documented, including the default model.
 - Persistence transactions, migrations, and error paths preserve the last valid session state.
 - Native PI tool results, compactions, tree relationships, model state, and exact new-turn usage survive gateway reconstruction and application restart without normalized-history replay.
-- The one-time legacy PI import is idempotent, preserves available structured speaker context, and marks unavailable historical usage and harness state as incomplete.
+- The one-time PI cutover converts every existing logical session, including empty sessions, preserves all available normalized history, commits atomically, and records migration 5 only after no unconverted session remains.
 - PI or model-provider failures are logged without creating an assistant turn or sending a Discord response.
 - Only `web_fetch`, token-gated GitHub tools, and scoped memory tools are enabled; `web_fetch` and GitHub tools sanitize external content, all populate the Available Tools prompt registry and include the Capability Gap Protocol, and none enable built-in coding tools.
 - Every Discord message is emitted through the log-level-independent audit path and deduplicated in `incoming_messages` before conversation filtering.

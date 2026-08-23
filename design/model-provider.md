@@ -97,10 +97,10 @@ including the provider/model identity and exact usage reported for new turns,
 are stored in the SQLite session schema described by
 [Native PI session persistence](pi-session-persistence.md).
 
-The one-time legacy import cannot recover the provider identity that PI used
-historically. Imported assistant entries therefore use the current configured
-provider plus their saved response model when present, and the entire imported
-session is explicitly marked incomplete.
+The one-time PI cutover cannot recover the provider identity that PI used
+before native entries were stored. Converted assistant entries therefore use
+the current configured provider plus their saved response model when present.
+No compatibility mode or migration marker is retained in the PI session.
 
 ## Security and privacy
 
@@ -129,7 +129,7 @@ and sanitized before entering model context.
 
 - `test/config.test.ts` covers defaults, JSON loading, reasoning effort, overrides, and validation.
 - `test/pi-gateway.test.ts` covers dynamic provider registration, authentication,
-  configured reasoning effort, model lookup, native session creation, legacy import,
+  configured reasoning effort, model lookup, native session creation, PI session cutover,
   and health failure.
 - `test/web-fetch-tool.test.ts` covers direct HTTP, HTML extraction, link limits,
   sanitization, plain text, invalid schemes, and upstream errors.

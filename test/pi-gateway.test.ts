@@ -100,15 +100,12 @@ function healthyFetch() {
 }
 
 function createSessionStore(): PiSessionStore {
-  const sessions = new Map<
-    string,
-    { historyCompleteness: "complete" | "legacy_import_incomplete"; rawEntries: string[] }
-  >();
+  const sessions = new Map<string, { rawEntries: string[] }>();
+  let migrationComplete = false;
   return {
     loadPiSession: vi.fn((sessionId) => sessions.get(sessionId)),
-    createPiSession: vi.fn((sessionId, historyCompleteness, entries) => {
+    createPiSession: vi.fn((sessionId, entries) => {
       sessions.set(sessionId, {
-        historyCompleteness,
         rawEntries: entries.map((entry: PiSessionEntryRecord) => entry.rawJson)
       });
     }),
@@ -122,7 +119,17 @@ function createSessionStore(): PiSessionStore {
       if (!session) throw new Error(`missing session ${sessionId}`);
       session.rawEntries = entries.map((entry: PiSessionEntryRecord) => entry.rawJson);
     }),
-    listLegacyPiSessions: vi.fn(() => [])
+    listPiSessionMigrationSources: vi.fn(() => []),
+    completePiSessionMigration: vi.fn((migrations) => {
+      if (migrationComplete) return 0;
+      for (const migration of migrations) {
+        sessions.set(migration.sessionId, {
+          rawEntries: migration.entries.map((entry: PiSessionEntryRecord) => entry.rawJson)
+        });
+      }
+      migrationComplete = true;
+      return migrations.length;
+    })
   };
 }
 
@@ -297,9 +304,9 @@ describe("PiSdkGateway", () => {
     expect(mocks.createAgentSession.mock.calls[0]?.[0]).not.toHaveProperty("thinkingLevel");
   });
 
-  it("runs the one-time legacy import before startup health completes", async () => {
+  it("completes the one-time PI session cutover before startup health completes", async () => {
     const sessionStore = createSessionStore();
-    vi.mocked(sessionStore.listLegacyPiSessions).mockReturnValue([
+    vi.mocked(sessionStore.listPiSessionMigrationSources).mockReturnValue([
       {
         sessionId: "legacy",
         createdAt: "2026-08-20T00:00:00.000Z",
@@ -325,14 +332,17 @@ describe("PiSdkGateway", () => {
 
     await gateway.checkHealth();
 
-    expect(sessionStore.createPiSession).toHaveBeenCalledWith(
-      "legacy",
-      "legacy_import_incomplete",
-      expect.arrayContaining([
-        expect.objectContaining({ entryType: "custom", rawJson: expect.stringContaining("artemis.legacy_import") }),
-        expect.objectContaining({ entryType: "message", rawJson: expect.stringContaining("old context") })
-      ])
-    );
+    expect(sessionStore.completePiSessionMigration).toHaveBeenCalledWith([
+      expect.objectContaining({
+        sessionId: "legacy",
+        entries: expect.arrayContaining([
+          expect.objectContaining({
+            entryType: "message",
+            rawJson: expect.stringContaining("old context")
+          })
+        ])
+      })
+    ]);
   });
   it("preserves unauthenticated access for the legacy Ollama placeholder", async () => {
     const fetchMock = healthyFetch();
@@ -403,7 +413,6 @@ describe("PiSdkGateway", () => {
     const result = await gateway.generate(generationInput({ prompt: "new prompt" }));
     expect(sessionStore.createPiSession).toHaveBeenCalledWith(
       "logical",
-      "complete",
       [expect.objectContaining({ entryType: "session" })]
     );
     expect(mocks.session.prompt).toHaveBeenCalledWith("new prompt", {

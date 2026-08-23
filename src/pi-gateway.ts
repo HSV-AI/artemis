@@ -20,7 +20,7 @@ import { createMemoryTools } from "./memory-tools.js";
 import type { PersonaProfile } from "./persona-profiles.js";
 import {
   asPiSessionManager,
-  importLegacyPiSessions,
+  migrateExistingPiSessions,
   SqlitePiSessionManager
 } from "./pi-session-manager.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
@@ -163,7 +163,7 @@ export class PiSdkGateway implements PiGateway {
     }
     await this.memory.initialize();
     await this.initialize();
-    importLegacyPiSessions(
+    migrateExistingPiSessions(
       this.sessionStore,
       process.cwd(),
       this.config.model.providerId,

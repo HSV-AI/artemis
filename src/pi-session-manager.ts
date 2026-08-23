@@ -21,15 +21,12 @@ import type {
   Usage
 } from "@earendil-works/pi-ai";
 import type {
-  LegacyPiSession,
-  PiHistoryCompleteness,
   PiSessionEntryRecord,
+  PiSessionMigrationSource,
   PiSessionStore,
   StoredMessage
 } from "./domain.js";
 import { formatDiscordMessage } from "./model-context.js";
-
-const LEGACY_IMPORT_CUSTOM_TYPE = "artemis.legacy_import";
 
 /**
  * Public PI methods exercised by Artemis's create-session, prompt, extension,
@@ -91,7 +88,7 @@ function emptyUsage(): Usage {
   };
 }
 
-function legacyStoredToPiMessage(
+function storedToPiMessageForMigration(
   message: StoredMessage,
   providerId: string,
   fallbackModel: string
@@ -146,8 +143,8 @@ function parseEntries(sessionId: string, rawEntries: string[]): FileEntry[] {
   return entries;
 }
 
-function buildLegacyEntries(
-  legacy: LegacyPiSession,
+function buildMigrationEntries(
+  source: PiSessionMigrationSource,
   cwd: string,
   providerId: string,
   fallbackModel: string
@@ -156,33 +153,14 @@ function buildLegacyEntries(
     {
       type: "session",
       version: CURRENT_SESSION_VERSION,
-      id: legacy.sessionId,
-      timestamp: legacy.createdAt,
+      id: source.sessionId,
+      timestamp: source.createdAt,
       cwd
     }
   ];
   const ids = new Set<string>();
-  const markerId = createEntryId(ids);
-  ids.add(markerId);
-  let parentId: string | null = markerId;
-  entries.push({
-    type: "custom",
-    id: markerId,
-    parentId: null,
-    timestamp: legacy.createdAt,
-    customType: LEGACY_IMPORT_CUSTOM_TYPE,
-    data: {
-      historyCompleteness: "legacy_import_incomplete",
-      unavailable: [
-        "historical_usage",
-        "tool_calls",
-        "tool_results",
-        "compactions",
-        "session_tree"
-      ]
-    }
-  });
-  for (const message of legacy.messages) {
+  let parentId: string | null = null;
+  for (const message of source.messages) {
     const id = createEntryId(ids);
     ids.add(id);
     entries.push({
@@ -190,29 +168,26 @@ function buildLegacyEntries(
       id,
       parentId,
       timestamp: message.createdAt,
-      message: legacyStoredToPiMessage(message, providerId, fallbackModel)
+      message: storedToPiMessageForMigration(message, providerId, fallbackModel)
     });
     parentId = id;
   }
   return entries;
 }
 
-export function importLegacyPiSessions(
+export function migrateExistingPiSessions(
   store: PiSessionStore,
   cwd: string,
   providerId: string,
   fallbackModel: string
 ): number {
-  const legacySessions = store.listLegacyPiSessions();
-  for (const legacy of legacySessions) {
-    const entries = buildLegacyEntries(legacy, cwd, providerId, fallbackModel);
-    store.createPiSession(
-      legacy.sessionId,
-      "legacy_import_incomplete",
-      entries.map(toEntryRecord)
-    );
-  }
-  return legacySessions.length;
+  const sources = store.listPiSessionMigrationSources();
+  return store.completePiSessionMigration(
+    sources.map((source) => ({
+      sessionId: source.sessionId,
+      entries: buildMigrationEntries(source, cwd, providerId, fallbackModel).map(toEntryRecord)
+    }))
+  );
 }
 
 /**
@@ -228,8 +203,6 @@ export class SqlitePiSessionManager implements PiSessionManagerRuntimeContract {
   private readonly labelsById = new Map<string, string>();
   private readonly labelTimestampsById = new Map<string, string>();
   private leafId: string | null = null;
-  private readonly historyCompleteness: PiHistoryCompleteness;
-
   private constructor(
     private readonly store: PiSessionStore,
     private readonly cwd: string,
@@ -245,10 +218,8 @@ export class SqlitePiSessionManager implements PiSessionManagerRuntimeContract {
         cwd
       };
       this.fileEntries = [header];
-      this.historyCompleteness = "complete";
-      store.createPiSession(sessionId, this.historyCompleteness, [toEntryRecord(header)]);
+      store.createPiSession(sessionId, [toEntryRecord(header)]);
     } else {
-      this.historyCompleteness = persisted.historyCompleteness;
       this.fileEntries = parseEntries(sessionId, persisted.rawEntries);
       const beforeMigration = JSON.stringify(this.fileEntries);
       migrateSessionEntries(this.fileEntries);
@@ -285,10 +256,6 @@ export class SqlitePiSessionManager implements PiSessionManagerRuntimeContract {
 
   public getSessionFile(): undefined {
     return undefined;
-  }
-
-  public getHistoryCompleteness(): PiHistoryCompleteness {
-    return this.historyCompleteness;
   }
 
   public appendMessage(message: SessionMessageEntry["message"]): string {
@@ -574,7 +541,7 @@ export function asPiSessionManager(manager: SqlitePiSessionManager): SessionMana
 }
 
 export const piSessionInternals = {
-  buildLegacyEntries,
-  legacyStoredToPiMessage,
+  buildMigrationEntries,
+  storedToPiMessageForMigration,
   toEntryRecord
 };

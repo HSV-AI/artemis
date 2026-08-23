@@ -6,7 +6,7 @@ import type { AssistantMessage, ToolResultMessage, Usage, UserMessage } from "@e
 import Database from "better-sqlite3";
 import type { PiSessionStore, SourceMessage, StoredMessage } from "../src/domain.js";
 import {
-  importLegacyPiSessions,
+  migrateExistingPiSessions,
   piSessionInternals,
   SqlitePiSessionManager
 } from "../src/pi-session-manager.js";
@@ -96,7 +96,6 @@ describe("SqlitePiSessionManager", () => {
       (entry) => entry.type === "message" && entry.message.role === "assistant" && entry.id === finalId
     );
 
-    expect(restored.getHistoryCompleteness()).toBe("complete");
     expect(restoredAssistant).toMatchObject({
       message: { usage: exactUsage, content: [{ type: "text", text: "done" }] }
     });
@@ -141,7 +140,8 @@ describe("SqlitePiSessionManager", () => {
         throw new Error("database unavailable");
       }),
       replacePiSessionEntries: vi.fn(),
-      listLegacyPiSessions: vi.fn(() => [])
+      listPiSessionMigrationSources: vi.fn(() => []),
+      completePiSessionMigration: vi.fn(() => 0)
     };
     const manager = SqlitePiSessionManager.open(store, "/app", "session");
 
@@ -200,7 +200,7 @@ describe("SqlitePiSessionManager", () => {
     const repository = new ArtemisRepository(":memory:");
     repositories.push(repository);
     const session = createSession(repository, "migration");
-    repository.createPiSession(session.id, "complete", [
+    repository.createPiSession(session.id, [
       {
         entryType: "session",
         rawJson: JSON.stringify({
@@ -264,13 +264,14 @@ describe("SqlitePiSessionManager", () => {
   });
 });
 
-describe("legacy PI session import", () => {
+describe("PI session cutover migration", () => {
   let repository: ArtemisRepository | undefined;
   afterEach(() => repository?.close());
 
-  it("imports once, marks the history incomplete, and preserves speaker attribution", () => {
+  it("converts every existing session once, including empty sessions", () => {
     repository = new ArtemisRepository(":memory:");
-    const session = createSession(repository, "legacy");
+    const session = createSession(repository, "existing");
+    const emptySession = createSession(repository, "empty");
     const source: SourceMessage = {
       discordMessageId: "legacy-user",
       authorId: "user-1",
@@ -287,18 +288,12 @@ describe("legacy PI session import", () => {
       model: "saved-model"
     });
 
-    expect(importLegacyPiSessions(repository, "/app", "test-provider", "fallback-model")).toBe(1);
-    expect(importLegacyPiSessions(repository, "/app", "test-provider", "fallback-model")).toBe(0);
+    expect(migrateExistingPiSessions(repository, "/app", "test-provider", "fallback-model")).toBe(2);
+    expect(migrateExistingPiSessions(repository, "/app", "test-provider", "fallback-model")).toBe(0);
 
     const persisted = repository.loadPiSession(session.id);
-    expect(persisted?.historyCompleteness).toBe("legacy_import_incomplete");
     expect(persisted?.rawEntries.map((raw) => JSON.parse(raw))).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          type: "custom",
-          customType: "artemis.legacy_import",
-          data: expect.objectContaining({ historyCompleteness: "legacy_import_incomplete" })
-        }),
         expect.objectContaining({
           type: "message",
           message: expect.objectContaining({
@@ -316,11 +311,15 @@ describe("legacy PI session import", () => {
         })
       ])
     );
-    expect(repository.listLegacyPiSessions()).toEqual([]);
+    expect(persisted?.rawEntries.map((raw) => JSON.parse(raw))).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "custom" })])
+    );
+    expect(repository.loadPiSession(emptySession.id)?.rawEntries).toHaveLength(1);
+    expect(repository.listPiSessionMigrationSources()).toEqual([]);
   });
 
-  it("keeps the legacy converter isolated from normal native-session writes", () => {
-    const legacyMessage: StoredMessage = {
+  it("keeps the cutover converter isolated from normal native-session writes", () => {
+    const storedMessage: StoredMessage = {
       id: 1,
       sessionId: "legacy",
       discordMessageId: "message",
@@ -331,7 +330,86 @@ describe("legacy PI session import", () => {
       createdAt: "2026-08-20T10:00:00.000Z"
     };
     expect(
-      piSessionInternals.legacyStoredToPiMessage(legacyMessage, "provider", "fallback")
+      piSessionInternals.storedToPiMessageForMigration(storedMessage, "provider", "fallback")
     ).toMatchObject({ role: "assistant", usage: { totalTokens: 0 } });
+  });
+
+  it("rolls back instead of marking a partial conversion complete", () => {
+    repository = new ArtemisRepository(":memory:");
+    const first = createSession(repository, "first");
+    createSession(repository, "second");
+    const header = {
+      entryType: "session",
+      rawJson: JSON.stringify({
+        type: "session",
+        version: 3,
+        id: first.id,
+        timestamp: first.createdAt,
+        cwd: "/app"
+      })
+    };
+
+    expect(() =>
+      repository?.completePiSessionMigration([{ sessionId: first.id, entries: [header] }])
+    ).toThrow("PI session migration left 1 session(s) unconverted");
+    expect(repository.loadPiSession(first.id)).toBeUndefined();
+    expect(repository.listPiSessionMigrationSources()).toHaveLength(2);
+  });
+
+  it("upgrades a version-three database with no compatibility schema left behind", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "artemis-pi-cutover-")), "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const populated = createSession(repository, "populated-upgrade");
+    const empty = createSession(repository, "empty-upgrade");
+    repository.insertSourceMessages(populated.id, [
+      {
+        discordMessageId: "upgrade-message",
+        authorId: "upgrade-user",
+        authorName: "Upgrade User",
+        role: "user",
+        content: "preserve during cutover",
+        createdAt: "2026-08-20T10:00:00.000Z"
+      }
+    ]);
+    repository.close();
+    repository = undefined;
+
+    const versionThree = new Database(path);
+    versionThree.exec(`
+      DROP TABLE pi_session_entries;
+      DROP TABLE pi_sessions;
+      DELETE FROM schema_migrations WHERE version >= 4;
+    `);
+    versionThree.close();
+
+    repository = new ArtemisRepository(path);
+    expect(migrateExistingPiSessions(repository, "/app", "provider", "model")).toBe(2);
+    expect(repository.loadPiSession(populated.id)?.rawEntries).toHaveLength(2);
+    expect(repository.loadPiSession(empty.id)?.rawEntries).toHaveLength(1);
+    repository.close();
+    repository = undefined;
+
+    const migrated = new Database(path, { readonly: true });
+    const versions = migrated
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all() as { version: number }[];
+    const columns = migrated.prepare("PRAGMA table_info(pi_sessions)").all() as { name: string }[];
+    const counts = migrated
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM sessions) AS logical_sessions,
+           (SELECT COUNT(*) FROM pi_sessions) AS pi_sessions`
+      )
+      .get() as { logical_sessions: number; pi_sessions: number };
+    migrated.close();
+
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(columns.map((column) => column.name)).toEqual([
+      "session_id",
+      "next_ordinal",
+      "created_at",
+      "updated_at"
+    ]);
+    expect(counts.pi_sessions).toBe(counts.logical_sessions);
   });
 });
