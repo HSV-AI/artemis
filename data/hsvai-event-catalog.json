@@ -291,7 +291,12 @@
       "modifiedAt": "2024-12-16T01:13:37.000Z",
       "sourceHash": "67d90c0d0fac89ff2546d1406d1ef77e471d1a2bb4944514141e626a7476edd8",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -301,7 +306,12 @@
       "modifiedAt": "2025-01-20T04:24:51.000Z",
       "sourceHash": "8c48b136ce467ddda6d291ee3f88cac358511c76aeeb90b2dfe3ff92d931049d",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -311,7 +321,12 @@
       "modifiedAt": "2024-12-16T01:18:31.000Z",
       "sourceHash": "9e564a667ccb9e705bf44ff0f77f5c7c98114c90a6eac71d42f764663b0dff73",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -321,7 +336,12 @@
       "modifiedAt": "2024-12-16T01:18:14.000Z",
       "sourceHash": "6ac84b600efab744f63626bc0a565c41084d5907ada4a424a4643c58a13df146",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -331,7 +351,12 @@
       "modifiedAt": "2024-12-16T01:19:49.000Z",
       "sourceHash": "aeb345d7bea1917df5cc1fad4a49797458c0c8899c510c20416f4e15f592036b",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -406,7 +431,12 @@
       "modifiedAt": "2025-03-03T05:21:24.000Z",
       "sourceHash": "cf71fd2b424d96513d6f08fe2359473a22fffe4e7df8dcb3d939302d976d37b7",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -426,7 +456,12 @@
       "modifiedAt": "2025-03-09T14:57:36.000Z",
       "sourceHash": "727c3e0797eecdf1a034d88ba735b402ba29e90c4a7bc73399689a35638ed453",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -436,7 +471,12 @@
       "modifiedAt": "2025-04-09T01:17:58.000Z",
       "sourceHash": "c77d8ffabccdbe48c4f23a925f341a6faf24f99ba8da5514eecc7faca652c1c0",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -446,7 +486,12 @@
       "modifiedAt": "2025-04-15T01:31:55.000Z",
       "sourceHash": "952af58e01d408c5f1fb3c0ddafbc11b9d7cb2df019d16d60a7ce2863aa24a0e",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -456,7 +501,12 @@
       "modifiedAt": "2025-03-31T02:25:39.000Z",
       "sourceHash": "392dc3b8cc916bd05b06e7df0088658aafce85d6ec936ee33611d4ba1db9e884",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -496,7 +546,12 @@
       "modifiedAt": "2025-05-05T02:21:00.000Z",
       "sourceHash": "89b59d70f09ceb09e9e0507100347e129a765c52ef85328e57cbe426542a9bf2",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -506,7 +561,12 @@
       "modifiedAt": "2025-05-12T03:20:43.000Z",
       "sourceHash": "29fe2d26f6c206ad2d5575ecd0ab07837d6deef3d1164855f526c7b3e26b02e1",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -516,7 +576,12 @@
       "modifiedAt": "2025-06-09T16:50:09.000Z",
       "sourceHash": "b599c9881d3bfdcd20fdc3b99150a73b095bbd1c11c8f7721c1b9267c9bba142",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "No Speaker",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -541,7 +606,12 @@
       "modifiedAt": "2025-06-12T17:55:36.000Z",
       "sourceHash": "cfeaace67ea7bf954fed74c847a53e3eb862580186fb6733b26b7868b6c40004",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -551,7 +621,12 @@
       "modifiedAt": "2025-07-14T16:46:04.000Z",
       "sourceHash": "8551785ef69df33a0531baf0e19b80eeb9487ef21f4c6d69023c9f486c93c86f",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -561,7 +636,12 @@
       "modifiedAt": "2025-08-09T03:15:23.000Z",
       "sourceHash": "778d484699a880a265ad0f0b6a6be0c57bfe53d5efa0fa98ed87107340e0b698",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -606,7 +686,12 @@
       "modifiedAt": "2025-05-27T04:08:14.000Z",
       "sourceHash": "4f5a95666c1784a766d714cb04085da484f55f319a48b70ff540dd53c03f1d26",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -616,7 +701,12 @@
       "modifiedAt": "2025-08-18T19:45:42.000Z",
       "sourceHash": "b1226bccbc6f05b633b66bec7e1faa258047c260e6304eb0366068dacff45d19",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -641,7 +731,12 @@
       "modifiedAt": "2025-09-06T12:31:02.000Z",
       "sourceHash": "6b894ef2a7bcd88dc0c4b814ace3b33400d924db39b7942421ec4bab491892f0",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -651,7 +746,20 @@
       "modifiedAt": "2025-09-06T12:42:00.000Z",
       "sourceHash": "e9fe6eeed394e7681de1a0151709daf6564a5e223b1142c73697e70011b3bfa0",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        },
+        {
+          "name": "Luis",
+          "provenance": "operator"
+        },
+        {
+          "name": "Tom Plunkett",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -661,7 +769,12 @@
       "modifiedAt": "2025-09-29T12:09:33.000Z",
       "sourceHash": "4c02decd7deaf3986c161cf7dafa843ac77f32dce65fd2a2fc9c60d7564793be",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -671,7 +784,12 @@
       "modifiedAt": "2025-10-05T14:44:54.000Z",
       "sourceHash": "80f349b8893a6a98febca041c13a943d8556a718769141b2684e4951505d517b",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -765,7 +883,12 @@
       "modifiedAt": "2025-12-08T03:38:05.000Z",
       "sourceHash": "b58c036e7aaafe2a510620738260ec13a84e1474785795338df97e53cd5c14db",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -959,7 +1082,12 @@
       "modifiedAt": "2026-03-20T15:28:49.000Z",
       "sourceHash": "5541c460da36f0e21663c4263fda71025a5f45d40e8c0db6cfcd2b69d241880b",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Alexa",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
