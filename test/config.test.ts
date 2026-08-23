@@ -50,7 +50,6 @@ describe("parseConfig", () => {
       githubToken: "",
       githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
       dgraphUrl: DEFAULT_DGRAPH_URL,
-      memoryEmbedUrl: "",
       memoryInject: false,
       sqlitePath: DEFAULT_SQLITE_PATH,
       logLevel: "info"
@@ -82,11 +81,17 @@ describe("parseConfig", () => {
       GITHUB_TOKEN: " github-secret ",
       GITHUB_ALLOWED_REPOSITORY: " mbrooks/artemis, HSV-AI/artemis, MBROOKS/ARTEMIS ",
       DGRAPH_URL: "http://memory.example:8080/",
-      MEMORY_EMBED_URL: "https://embeddings.example/v1/",
       MEMORY_INJECT: "true",
       SQLITE_PATH: ":memory:",
       LOG_LEVEL: "debug"
-    }, { ...providerDefinition, baseUrl: "https://model.example/v1/" });
+    }, {
+      ...providerDefinition,
+      baseUrl: "https://model.example/v1/",
+      embedding: {
+        baseUrl: "https://embeddings.example/v1/",
+        modelId: "embedding-model"
+      }
+    });
     expect(result).toMatchObject({
       discordToken: "token",
       discordAllowedChannelIds: ["channel-one", "channel-two"],
@@ -96,12 +101,15 @@ describe("parseConfig", () => {
         providerName: "Configured Provider",
         baseUrl: "https://model.example/v1",
         modelId: "configured-model",
-        apiKey: "secret"
+        apiKey: "secret",
+        embedding: {
+          baseUrl: "https://embeddings.example/v1",
+          modelId: "embedding-model"
+        }
       }),
       githubToken: "github-secret",
       githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
       dgraphUrl: "http://memory.example:8080",
-      memoryEmbedUrl: "https://embeddings.example/v1",
       memoryInject: true,
       sqlitePath: ":memory:",
       logLevel: "debug"
@@ -152,10 +160,13 @@ describe("parseConfig", () => {
       DISCORD_TOKEN: "token",
       DGRAPH_URL: "file:///data/dgraph"
     })).toThrow("Invalid URL configuration: DGRAPH_URL");
-    expect(() => parseConfig({
-      DISCORD_TOKEN: "token",
-      MEMORY_EMBED_URL: "file:///models/embeddings"
-    })).toThrow("Invalid URL configuration: MEMORY_EMBED_URL");
+    expect(() => parseConfig(
+      { DISCORD_TOKEN: "token" },
+      {
+        ...providerDefinition,
+        embedding: { baseUrl: "file:///models/embeddings", modelId: "embedding-model" }
+      }
+    )).toThrow("Invalid URL configuration: model.embedding.baseUrl");
     expect(() => parseConfig({
       DISCORD_TOKEN: "token",
       MEMORY_INJECT: "sometimes"
@@ -176,6 +187,28 @@ describe("parseConfig", () => {
       modelId: "configured-model",
       contextWindow: 64_000
     });
+  });
+
+  it("defaults an embedding provider to the model base URL", () => {
+    const result = parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, embedding: { modelId: "embedding-model" } }
+    );
+    expect(result.model.embedding).toEqual({
+      baseUrl: "https://inference.example/v1",
+      modelId: "embedding-model"
+    });
+  });
+
+  it("rejects invalid embedding provider definitions", () => {
+    expect(() => parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, embedding: "embedding-model" }
+    )).toThrow("embedding must be an object");
+    expect(() => parseConfig(
+      { DISCORD_TOKEN: "token" },
+      { ...providerDefinition, embedding: {} }
+    )).toThrow("embedding.modelId must be a nonblank string");
   });
 
   it("reports unreadable and invalid model config files", () => {

@@ -88,10 +88,13 @@ and the fused score.
 `/health`, and persists `/dgraph` in the `dgraph-data` volume. Artemis applies the
 additive DQL schema after model health validation and before Discord login.
 
-`MEMORY_EMBED_URL` is an optional OpenAI-compatible API base URL. A blank value,
-the default, disables embeddings while retaining full-text, graph, and recency
-retrieval plus token-overlap novelty checks. When configured, the client discovers
-the first model from `/models`, calls `/embeddings`, and stores vectors in Dgraph.
+The optional model-provider `embedding` object supplies an explicit embedding
+model and OpenAI-compatible API base URL. Its base URL defaults to the model
+provider base, supporting Ollama's same-origin endpoint; deployments with a
+separate embedding worker set its base URL in the provider definition. Omitting
+the object disables embeddings while retaining full-text, graph, and recency
+retrieval plus token-overlap novelty checks. When configured, the client calls
+`/embeddings` with the provider API key and stores vectors in Dgraph.
 Embedding calls run inside the serial operation queue. `MEMORY_INJECT` is a strict
 boolean and defaults to `false`.
 
@@ -116,11 +119,11 @@ provide a cross-conversation read path.
 ## Failure handling
 
 - Invalid `DGRAPH_URL` fails configuration loading.
-- Invalid nonblank `MEMORY_EMBED_URL` or invalid `MEMORY_INJECT` fails configuration loading.
+- Invalid embedding provider metadata or invalid `MEMORY_INJECT` fails configuration loading.
 - Schema initialization failure prevents Discord login.
 - Invalid, inactive, or cross-scope fact UIDs fail without changing data.
 - Duplicate and unforced similar writes return a refusal without changing data.
-- Embedding discovery or generation failures fail the invoking memory operation; there is no silent semantic fallback when an embedding endpoint is configured.
+- Embedding generation failures fail the invoking memory operation; there is no silent semantic fallback when an embedding endpoint is configured.
 - Query and mutation failures follow the normal generation-failure path and
   produce no Discord reply.
 
@@ -128,7 +131,7 @@ provide a cross-conversation read path.
 
 - `test/dgraph-memory.test.ts` covers schema, reads, writes, tombstones, scope,
   episodes, entities, operation ordering, novelty, ranking, and failure handling.
-- `test/embedding-client.test.ts` covers model discovery, embedding requests, cosine similarity, and failures.
+- `test/embedding-client.test.ts` covers configured embedding requests, authorization, cosine similarity, and failures.
 - `test/memory-tools.test.ts` covers ranked and lifecycle tools, refusal output, and bound provenance.
 - `test/conversation-service.test.ts` covers immutable Discord identity.
 - `test/pi-gateway.test.ts` covers registration, startup initialization, bounded snapshots, and session prompt stability.

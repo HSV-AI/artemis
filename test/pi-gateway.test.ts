@@ -28,6 +28,8 @@ const mocks = vi.hoisted(() => {
     runtimeCreate: vi.fn().mockResolvedValue(runtime),
     resourceLoaderConstructor: vi.fn(),
     loaderReload: vi.fn().mockResolvedValue(undefined),
+    hsvaiSourceConstructor: vi.fn(),
+    hsvaiInitializeAndSync: vi.fn().mockResolvedValue(undefined),
     settings: {}
   };
 });
@@ -52,6 +54,24 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 
     public reload = mocks.loaderReload;
   }
+}));
+
+vi.mock("../src/hsvai-knowledge.js", () => ({
+  HsvaiWordPressSource: class HsvaiWordPressSource {
+    public constructor(fetchImplementation: typeof fetch) {
+      mocks.hsvaiSourceConstructor(fetchImplementation);
+    }
+  },
+  HsvaiKnowledge: class HsvaiKnowledge {
+    public initializeAndSync = mocks.hsvaiInitializeAndSync;
+    public search = vi.fn().mockResolvedValue([]);
+  },
+  createHsvaiKnowledgeTool: vi.fn(() => ({
+    name: "hsvai_graph_search",
+    label: "Search HSVAI Knowledge",
+    description: "Search source-grounded Huntsville AI transcripts and calendar events.",
+    promptSnippet: "Search Huntsville AI transcripts and events through their connected source graph"
+  }))
 }));
 
 import { PiSdkGateway, GROUP_CHANNEL_MULTI_MESSAGE_MAX, buildSystemPrompt, piInternals } from "../src/pi-gateway.js";
@@ -241,6 +261,7 @@ describe("PiSdkGateway", () => {
     );
     await gateway.checkHealth();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(mocks.hsvaiInitializeAndSync).toHaveBeenCalledOnce();
     expect(fetchMock).toHaveBeenCalledWith(
       "http://inference/v1/models",
       expect.objectContaining({ headers: {} })
@@ -423,6 +444,7 @@ describe("PiSdkGateway", () => {
       expect.objectContaining({
         tools: [
           "web_fetch",
+          "hsvai_graph_search",
           "memory_remember",
           "memory_search",
           "memory_recall",
@@ -479,6 +501,7 @@ describe("PiSdkGateway", () => {
       tools: [
         "web_fetch", "github_search", "github_list", "github_fetch",
         "github_create", "github_update", "github_upload_image",
+        "hsvai_graph_search",
         "memory_remember", "memory_search", "memory_recall", "memory_supersede",
         "memory_forget", "memory_believed_at", "memory_audit",
         "memory_entity", "memory_episode"
@@ -531,6 +554,27 @@ describe("PiSdkGateway", () => {
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
       systemPrompt: expect.stringContaining("memory_remember")
     }));
+  });
+
+  it("always registers read-only HSVAI graph search against the fixed source", async () => {
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      vi.fn()
+    );
+
+    await gateway.generate(generationInput());
+
+    expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      tools: expect.arrayContaining(["hsvai_graph_search"]),
+      customTools: expect.arrayContaining([
+        expect.objectContaining({ name: "hsvai_graph_search" })
+      ])
+    }));
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringContaining("Search Huntsville AI transcripts and events")
+    }));
+    expect(mocks.hsvaiSourceConstructor).toHaveBeenCalledOnce();
   });
 
   it("rejects a missing configured model and a missing assistant response", async () => {

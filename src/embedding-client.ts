@@ -1,54 +1,63 @@
 export type EmbedFunction = (text: string) => Promise<number[]>;
+export type EmbedBatchFunction = (texts: string[]) => Promise<number[][]>;
 
 export class EmbeddingClient {
-  private modelId: Promise<string> | undefined;
-
   public constructor(
     private readonly baseUrl: string,
+    private readonly modelId: string,
+    private readonly requestHeaders: Readonly<Record<string, string>> = {},
     private readonly fetchImplementation: typeof fetch = fetch
   ) {
     if (!baseUrl) {
       throw new Error("EmbeddingClient requires a base URL");
     }
+    if (!modelId) {
+      throw new Error("EmbeddingClient requires a model ID");
+    }
   }
 
   public readonly embed: EmbedFunction = async (text) => {
-    const model = await this.resolveModel();
+    const [vector] = await this.embedMany([text]);
+    if (!vector) {
+      throw new Error("Embedding response contained no vector");
+    }
+    return vector;
+  };
+
+  public readonly embedMany: EmbedBatchFunction = async (texts) => {
+    if (texts.length === 0) {
+      return [];
+    }
     const response = await this.fetchImplementation(`${this.baseUrl}/embeddings`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, input: text })
+      headers: { ...this.requestHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: this.modelId, input: texts })
     });
     if (!response.ok) {
       throw new Error(
         `Embedding request failed (${response.status}): ${await response.text()}`
       );
     }
-    const parsed = (await response.json()) as { data?: { embedding?: number[] }[] };
-    const vector = parsed.data?.[0]?.embedding;
-    if (!vector?.length) {
-      throw new Error("Embedding response contained no vector");
+    const parsed = (await response.json()) as {
+      data?: { embedding?: number[]; index?: number }[];
+    };
+    const rows = [...(parsed.data ?? [])].sort(
+      (left, right) => (left.index ?? 0) - (right.index ?? 0)
+    );
+    const vectors = rows.map((row) => row.embedding).filter(
+      (vector): vector is number[] => Boolean(vector?.length)
+    );
+    if (vectors.length !== texts.length) {
+      if (texts.length === 1 && vectors.length === 0) {
+        throw new Error("Embedding response contained no vector");
+      }
+      throw new Error(`Embedding response contained ${vectors.length} vectors for ${texts.length} inputs`);
     }
-    return vector;
+    return vectors;
   };
 
-  private resolveModel(): Promise<string> {
-    if (!this.modelId) {
-      this.modelId = this.fetchImplementation(`${this.baseUrl}/models`).then(async (response) => {
-        if (!response.ok) {
-          throw new Error(
-            `Embedding model discovery failed (${response.status}): ${await response.text()}`
-          );
-        }
-        const parsed = (await response.json()) as { data?: { id?: string }[] };
-        const modelId = parsed.data?.[0]?.id;
-        if (!modelId) {
-          throw new Error(`No embedding model served at ${this.baseUrl}`);
-        }
-        return modelId;
-      });
-    }
-    return this.modelId;
+  public embeddingModel(): Promise<string> {
+    return Promise.resolve(this.modelId);
   }
 }
 

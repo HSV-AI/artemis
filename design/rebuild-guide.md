@@ -23,7 +23,7 @@ The following behavior is fixed:
 - Every Discord message event is logged to the console and SQLite before filtering, including DMs, bot messages, unauthorized messages, unmentioned messages, and messages from disallowed channels.
 - Accepted conversations retain their history in SQLite across restarts. There is no automatic retention or deletion.
 - Model or harness failures are logged and persisted, but produce no Discord response.
-- The model may use explicitly registered custom tools: `web_fetch`, six GitHub tools when a token is configured, and six conversation-scoped Dgraph memory tools. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
+- The model may use explicitly registered custom tools: `web_fetch`, six GitHub tools when a token is configured, nine conversation-scoped Dgraph memory tools, and the read-only `hsvai_graph_search` tool backed by the fixed Huntsville AI source. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Group/channel (guild) assistant responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) self-contained Discord messages per turn. DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind (`guild` vs `dm`).
 - Base Compose retains Ollama as a separate service, the model-preparation job, persistent Dgraph, and Artemis. An optional provider-specific Compose path may omit Ollama while retaining Dgraph.
@@ -239,7 +239,7 @@ The model-facing implementation must:
 - Apply a provider definition's explicit reasoning effort to every model request when configured.
 - Restore the native harness state for the logical session directly from durable SQLite entries.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
-- Enable only `web_fetch`, the six GitHub custom tools when configured, and the six scoped memory tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
+- Enable only `web_fetch`, the six GitHub custom tools when configured, the nine scoped memory tools, and the fixed-source `hsvai_graph_search` tool. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply the complete identity instructions from the profile selected by `PERSONA_PROFILE`, which defaults to `artemis` and includes `wartermis` as a bundled alternative. Keep each profile in its own source file and compose the fixed Discord instruction after it. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, and tool registry.
 - Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
@@ -448,12 +448,17 @@ Load local environment configuration from `.env` or the process environment, opt
 | `GITHUB_TOKEN` | No | Empty | GitHub API token; blank disables all GitHub tools. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` in application code | Comma-separated GitHub repository allowlist; blank disables GitHub tools. The supplied `.env.example` explicitly sets only `HSV-AI/artemis`. |
 | `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint required by memory. |
-| `MEMORY_EMBED_URL` | No | Empty | OpenAI-compatible embeddings base URL; blank disables semantic retrieval and semantic novelty checks. |
 | `MEMORY_INJECT` | No | `false` | Strict boolean enabling one bounded, byte-stable memory snapshot per durable PI session. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
 | `LOG_LEVEL` | No | `info` | Minimum routine level: `debug`, `info`, `warn`, or `error`. |
 
 The received-message audit ignores `LOG_LEVEL`; all other logs obey it.
+
+The optional provider JSON `embedding` object requires `modelId`; its optional
+`baseUrl` defaults to the provider base URL. It reuses `MODEL_API_KEY`. Omission
+disables semantic vectors while preserving lexical and graph retrieval. HSVAI
+GraphRAG always synchronizes from the fixed `https://hsv.ai` source and always
+registers `hsvai_graph_search`.
 
 ## Clean-room implementation sequence
 
@@ -509,7 +514,7 @@ Each stage should finish with tests before the next begins.
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
 - Connect the harness's native session manager to ordered SQLite storage and complete the atomic one-time PI cutover before Discord login.
-- Register and allowlist `web_fetch`, token-gated GitHub tools, and scoped memory tools; disable every built-in tool and build the system instruction from conversation kind, registered-tool metadata, and an optional per-session memory snapshot, including the Capability Gap Protocol.
+- Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, and fixed-source HSVAI graph search; disable every built-in tool and build the system instruction from conversation kind, registered-tool metadata, and an optional per-session memory snapshot, including the Capability Gap Protocol.
 - Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, optional semantic, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
 - Add configured provider health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
@@ -563,6 +568,7 @@ At minimum, prove all of the following:
 - `web_fetch` rejects non-HTTP(S) targets, fetches directly without model credentials, bounds content, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and publish the explicit-mutation guideline in the model's tool registry.
 - Memory tools are present for every profile; every operation uses the immutable conversation scope, writes retain Discord provenance, corrections and forgetting create tombstones, and scope isolation survives PI session clearing.
+- HSVAI startup synchronization follows source pagination, replaces only marked corpus nodes, skips an unchanged source/model revision, and returns cited lexical, semantic, and connected-neighborhood evidence through a read-only tool.
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Guild sessions receive the channel-limits system-prompt block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3`, self-contained-thought rule) while DM sessions receive no limit messaging; prompt selection is deterministic from the conversation kind.

@@ -35,10 +35,17 @@ export class DgraphClient {
     return (result as { data: T }).data;
   }
 
-  public async mutate(set: Record<string, unknown>[]): Promise<Record<string, string>> {
+  public async mutate(
+    set: Record<string, unknown>[],
+    deleted: Record<string, unknown>[] = []
+  ): Promise<Record<string, string>> {
+    const body = {
+      ...(set.length === 0 ? {} : { set }),
+      ...(deleted.length === 0 ? {} : { delete: deleted })
+    };
     const result = await this.request(
       "/mutate?commitNow=true",
-      JSON.stringify({ set })
+      JSON.stringify(body)
     ) as { data: { uids?: Record<string, string> } };
     return result.data.uids ?? {};
   }

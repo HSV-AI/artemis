@@ -17,6 +17,11 @@ import type {
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
 import { EmbeddingClient } from "./embedding-client.js";
+import {
+  createHsvaiKnowledgeTool,
+  HsvaiKnowledge,
+  HsvaiWordPressSource
+} from "./hsvai-knowledge.js";
 import { createMemoryTools } from "./memory-tools.js";
 import type { PersonaProfile } from "./persona-profiles.js";
 import {
@@ -163,6 +168,7 @@ export class PiSdkGateway implements PiGateway {
   private readonly resourceLoaders = new Map<string, DefaultResourceLoader>();
   private customTools: ReturnType<typeof createCustomTools> = [];
   private readonly memory: GraphMemory;
+  private readonly knowledge: HsvaiKnowledge;
 
   public constructor(
     private readonly config: Pick<ArtemisConfig, "model" | "persona"> &
@@ -171,18 +177,34 @@ export class PiSdkGateway implements PiGateway {
         | "githubToken"
         | "githubAllowedRepositories"
         | "dgraphUrl"
-        | "memoryEmbedUrl"
         | "memoryInject"
       >>,
     private readonly sessionStore: PiSessionStore,
     private readonly fetchImplementation: typeof fetch = fetch
   ) {
-    const embeddingClient = config.memoryEmbedUrl
-      ? new EmbeddingClient(config.memoryEmbedUrl, fetchImplementation)
+    const embeddingClient = config.model.embedding
+      ? new EmbeddingClient(
+          config.model.embedding.baseUrl,
+          config.model.embedding.modelId,
+          this.authorizationHeaders(),
+          fetchImplementation
+        )
       : undefined;
+    const dgraph = new DgraphClient(config.dgraphUrl ?? DEFAULT_DGRAPH_URL, fetchImplementation);
     this.memory = new GraphMemory(
-      new DgraphClient(config.dgraphUrl ?? DEFAULT_DGRAPH_URL, fetchImplementation),
+      dgraph,
       embeddingClient ? { embed: embeddingClient.embed } : {}
+    );
+    this.knowledge = new HsvaiKnowledge(
+      dgraph,
+      new HsvaiWordPressSource(fetchImplementation),
+      embeddingClient
+        ? {
+            embed: embeddingClient.embed,
+            embedMany: embeddingClient.embedMany,
+            embeddingVersion: () => embeddingClient.embeddingModel()
+          }
+        : {}
     );
   }
 
@@ -201,6 +223,7 @@ export class PiSdkGateway implements PiGateway {
       clearTimeout(timeout);
     }
     await this.memory.initialize();
+    await this.knowledge.initializeAndSync();
     await this.initialize();
     migrateExistingPiSessions(
       this.sessionStore,
@@ -214,6 +237,7 @@ export class PiSdkGateway implements PiGateway {
     await this.initialize();
     const customTools = [
       ...this.customTools,
+      createHsvaiKnowledgeTool(this.knowledge),
       ...createMemoryTools(this.memory, {
         scopeKey: input.conversationKey,
         authorId: input.authorId,
@@ -265,7 +289,7 @@ export class PiSdkGateway implements PiGateway {
     }
   }
 
-  private authorizationHeaders(): HeadersInit {
+  private authorizationHeaders(): Record<string, string> {
     if (!this.usesAuthorizationHeader()) {
       return {};
     }

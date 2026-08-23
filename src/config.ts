@@ -31,6 +31,10 @@ export interface ModelProviderConfig {
   contextWindow: number;
   maxTokens: number;
   supportsDeveloperRole: boolean;
+  embedding?: {
+    baseUrl: string;
+    modelId: string;
+  };
 }
 
 type ModelProviderDefinition = Omit<ModelProviderConfig, "apiKey">;
@@ -46,7 +50,6 @@ export interface ArtemisConfig {
   githubToken: string;
   githubAllowedRepositories: readonly string[];
   dgraphUrl: string;
-  memoryEmbedUrl: string;
   memoryInject: boolean;
   sqlitePath: string;
   logLevel: LogLevel;
@@ -100,22 +103,18 @@ function parseUrl(value: string, name: string): string {
   return value.replace(/\/$/, "");
 }
 
-function parseOptionalUrl(value: string | undefined, name: string): string {
-  const normalized = value?.trim() ?? "";
-  return normalized ? parseUrl(normalized, name) : "";
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function configuredString(
   config: Record<string, unknown>,
-  name: keyof ModelProviderDefinition
+  name: keyof ModelProviderDefinition,
+  label: string = name
 ): string {
   const value = config[name];
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`Invalid model configuration: ${name} must be a nonblank string`);
+    throw new Error(`Invalid model configuration: ${label} must be a nonblank string`);
   }
   return value.trim();
 }
@@ -164,17 +163,34 @@ export function parseModelConfig(
   }
   const config = input;
   const reasoningEffort = configuredReasoningEffort(config);
+  const baseUrl = parseUrl(configuredString(config, "baseUrl"), "model.baseUrl");
+  let embedding: ModelProviderConfig["embedding"];
+  if (config.embedding !== undefined) {
+    if (!isRecord(config.embedding)) {
+      throw new Error("Invalid model configuration: embedding must be an object");
+    }
+    embedding = {
+      baseUrl: config.embedding.baseUrl === undefined
+        ? baseUrl
+        : parseUrl(
+            configuredString(config.embedding, "baseUrl", "embedding.baseUrl"),
+            "model.embedding.baseUrl"
+          ),
+      modelId: configuredString(config.embedding, "modelId", "embedding.modelId")
+    };
+  }
   return {
     providerId: configuredString(config, "providerId"),
     providerName: configuredString(config, "providerName"),
-    baseUrl: parseUrl(configuredString(config, "baseUrl"), "model.baseUrl"),
+    baseUrl,
     modelId: configuredString(config, "modelId"),
     apiKey: apiKey.trim(),
     reasoning: configuredBoolean(config, "reasoning"),
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     contextWindow: configuredPositiveInteger(config, "contextWindow"),
     maxTokens: configuredPositiveInteger(config, "maxTokens"),
-    supportsDeveloperRole: configuredBoolean(config, "supportsDeveloperRole")
+    supportsDeveloperRole: configuredBoolean(config, "supportsDeveloperRole"),
+    ...(embedding ? { embedding } : {})
   };
 }
 
@@ -230,7 +246,6 @@ export function parseConfig(
     githubToken: env.GITHUB_TOKEN?.trim() ?? "",
     githubAllowedRepositories: parseAllowedRepositories(env.GITHUB_ALLOWED_REPOSITORY),
     dgraphUrl: parseUrl(valueOrDefault(env, "DGRAPH_URL", DEFAULT_DGRAPH_URL), "DGRAPH_URL"),
-    memoryEmbedUrl: parseOptionalUrl(env.MEMORY_EMBED_URL, "MEMORY_EMBED_URL"),
     memoryInject: parseBoolean(
       valueOrDefault(env, "MEMORY_INJECT", "false"),
       "MEMORY_INJECT",

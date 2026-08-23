@@ -18,6 +18,7 @@ The product and implementation baseline is documented in [design/baseline.md](de
 - After accepting a normal message, Artemis shows and refreshes Discord's typing indicator every five seconds until generation finishes. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary direct messages.
 - PI may use the explicitly registered `web_fetch` tool to read a user-provided HTTP or HTTPS page directly. When `GITHUB_TOKEN` is configured, PI may also search, list, fetch, create, and update GitHub resources and upload issue images, but only within `GITHUB_ALLOWED_REPOSITORY`. External content is labeled as untrusted and sanitized before it reaches the model; built-in coding tools remain disabled.
 - PI receives explicit Dgraph-backed tools to remember, recall, correct, forget, query past beliefs, and audit facts within the current DM or parent guild-channel scope. Memory persists across sessions.
+- PI receives a read-only GraphRAG tool over source-grounded Huntsville AI transcript and calendar evidence, including stable evidence IDs and source URLs.
 - PI and model-provider failures are written to operator logs and SQLite; nothing is sent to Discord.
 - Sessions, chat content, reasoning, and diagnostics are retained in SQLite until an operator removes them.
 - Every newly received Discord message is logged with its raw content and metadata before filtering, regardless of `LOG_LEVEL`. This includes DMs, guild messages, bot messages, unauthorized messages, and unmentioned messages.
@@ -62,8 +63,7 @@ cp .env.example .env
 | `PERSONA_PROFILE` | No | `artemis` | Named profile: `artemis` or `wartermis`. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token. A blank value disables every GitHub tool. Grant only the repository permissions needed for the desired read or write operations. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `HSV-AI/artemis` | Comma-separated `owner/repository` allowlist. A blank list disables every GitHub tool. Matching is case-insensitive. |
-| `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint used by the memory tools. |
-| `MEMORY_EMBED_URL` | No | Empty | OpenAI-compatible embeddings base URL. Blank disables semantic retrieval and uses token overlap for novelty checks. |
+| `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint used by memory and HSVAI GraphRAG. |
 | `MEMORY_INJECT` | No | `false` | When `true`, inject a bounded snapshot of current memories once per PI session. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error`. |
@@ -91,6 +91,13 @@ OpenAI-compatible provider. The file must define `providerId`, `providerName`,
 `baseUrl`, `modelId`, `reasoning`, `contextWindow`, `maxTokens`, and
 `supportsDeveloperRole`. Keep bearer credentials in `MODEL_API_KEY`, not the
 JSON file.
+
+An alternate provider may also define an `embedding` object with a required
+`modelId` and optional `baseUrl`. Omitting `baseUrl` reuses the provider base,
+as Ollama does; a deployment whose embedding worker has a separate origin must
+set that origin explicitly. Embedding requests reuse `MODEL_API_KEY`. Omitting
+`embedding` disables semantic vectors while retaining lexical, graph, and
+recency retrieval.
 
 Providers that support configurable reasoning effort may also define
 `reasoningEffort` as `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
@@ -128,9 +135,11 @@ docker compose up --build
 The base Compose file starts `ollama`, the `ollama-model` pull job, Dgraph, and
 `artemis`. Deployments using another provider should layer their own Compose
 override over this file. Artemis checks the selected provider's `/models`
-endpoint and initializes the Dgraph schema before connecting to Discord. The
+endpoint, initializes Dgraph, and synchronizes the fixed-source HSVAI corpus before connecting to Discord. The
 [graph memory protocol](design/memory.md) defines ranked retrieval, stable
 session snapshots, novelty control, and retention.
+The [HSVAI GraphRAG protocol](design/hsvai-graphrag.md) defines public-source
+synchronization, graph construction, hybrid retrieval, and citation behavior.
 
 View operator logs with:
 
@@ -196,7 +205,7 @@ Global statement, branch, function, and line coverage thresholds are all enforce
 - At container startup, Artemis repairs ownership of its `/data` volume and then runs the application as the unprivileged `node` user.
 - Application logs are written as structured JSON to standard output and duplicated in SQLite's `application_logs` table. Credentials are excluded. The `discord_message_received` event intentionally includes raw message bodies from every Discord message event.
 - Chat content, model reasoning, and diagnostics are stored in SQLite and do not expire automatically.
-- Memory facts are stored in the `dgraph-data` volume and do not expire automatically. Forgetting creates an audit tombstone rather than physically deleting a fact.
+- Memory facts and the independent HSVAI source graph are stored in the `dgraph-data` volume. Memory forgetting creates an audit tombstone; HSVAI synchronization replaces only its marked public-corpus nodes when the source revision changes.
 - If base-Compose model preparation fails, repeat the Ollama sign-in and inspect `docker compose logs ollama ollama-model`.
 - If an optional provider fails validation, inspect its `baseUrl`, `modelId`, `MODEL_API_KEY`, and `/models` response.
 - If messages are ignored, verify the allowed channel and user IDs, Message Content Intent, channel/thread permissions, and that guild messages directly mention the bot.

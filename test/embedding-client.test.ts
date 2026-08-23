@@ -9,48 +9,68 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 describe("EmbeddingClient", () => {
-  it("discovers the model once and embeds each input", async () => {
+  it("uses the configured model and request headers", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: [{ id: "embedding-model" }] }))
       .mockResolvedValueOnce(jsonResponse({ data: [{ embedding: [1, 0] }] }))
       .mockResolvedValueOnce(jsonResponse({ data: [{ embedding: [0, 1] }] }));
-    const client = new EmbeddingClient("http://embeddings/v1", fetchMock);
+    const client = new EmbeddingClient(
+      "http://embeddings/v1",
+      "embedding-model",
+      { Authorization: "Bearer secret" },
+      fetchMock
+    );
 
     await expect(client.embed("first")).resolves.toEqual([1, 0]);
     await expect(client.embed("second")).resolves.toEqual([0, 1]);
 
-    expect(fetchMock).toHaveBeenNthCalledWith(1, "http://embeddings/v1/models");
     expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
+      1,
       "http://embeddings/v1/embeddings",
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ model: "embedding-model", input: "first" })
+        headers: {
+          Authorization: "Bearer secret",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ model: "embedding-model", input: ["first"] })
       })
     );
   });
 
-  it("reports discovery, request, and empty-vector failures", async () => {
-    await expect(new EmbeddingClient(
-      "http://embeddings/v1",
-      vi.fn().mockResolvedValue(new Response("offline", { status: 503 }))
-    ).embed("text")).rejects.toThrow("model discovery failed (503)");
+  it("embeds batches in response index order and exposes the selected model", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ data: [
+        { index: 1, embedding: [0, 1] },
+        { index: 0, embedding: [1, 0] }
+      ] }));
+    const client = new EmbeddingClient("http://embeddings/v1", "embedding-model", {}, fetchMock);
 
-    const requestFailure = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: [{ id: "model" }] }))
-      .mockResolvedValueOnce(new Response("busy", { status: 429 }));
+    await expect(client.embeddingModel()).resolves.toBe("embedding-model");
+    await expect(client.embedMany(["first", "second"])).resolves.toEqual([[1, 0], [0, 1]]);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("reports request and empty-vector failures", async () => {
+    const requestFailure = vi.fn().mockResolvedValueOnce(new Response("busy", { status: 429 }));
     await expect(new EmbeddingClient(
       "http://embeddings/v1",
+      "model",
+      {},
       requestFailure
     ).embed("text")).rejects.toThrow("request failed (429)");
 
-    const emptyVector = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: [{ id: "model" }] }))
-      .mockResolvedValueOnce(jsonResponse({ data: [{}] }));
+    const emptyVector = vi.fn().mockResolvedValueOnce(jsonResponse({ data: [{}] }));
     await expect(new EmbeddingClient(
       "http://embeddings/v1",
+      "model",
+      {},
       emptyVector
     ).embed("text")).rejects.toThrow("contained no vector");
+  });
+
+  it("requires an endpoint and model", () => {
+    expect(() => new EmbeddingClient("", "model")).toThrow("requires a base URL");
+    expect(() => new EmbeddingClient("http://embeddings/v1", "")).toThrow("requires a model ID");
   });
 });
 

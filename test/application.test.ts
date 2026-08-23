@@ -17,7 +17,6 @@ const config: ArtemisConfig = {
   githubToken: "",
   githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
   dgraphUrl: "http://dgraph:8080",
-  memoryEmbedUrl: "",
   memoryInject: false,
   sqlitePath: ":memory:",
   logLevel: "info"
