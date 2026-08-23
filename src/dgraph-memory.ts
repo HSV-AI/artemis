@@ -52,6 +52,10 @@ export class DgraphClient {
     await this.request("/alter", schema, "application/dql");
   }
 
+  public async dropAttribute(attribute: string): Promise<void> {
+    await this.request("/alter", JSON.stringify({ drop_attr: attribute }));
+  }
+
   public async query<T>(dql: string, variables: Record<string, string> = {}): Promise<T> {
     const result = await this.request("/query?ro=true", JSON.stringify({ query: dql, variables }));
     return (result as { data: T }).data;

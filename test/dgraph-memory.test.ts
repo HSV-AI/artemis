@@ -29,6 +29,7 @@ describe("DgraphClient", () => {
   it("sends schema, query, mutation, and upsert requests through the HTTP API", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
+      .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
       .mockResolvedValueOnce(jsonResponse({ data: { uids: { fact: "0x1" } } }))
       .mockResolvedValueOnce(jsonResponse({
@@ -37,6 +38,7 @@ describe("DgraphClient", () => {
     const client = new DgraphClient("http://dgraph:8080", fetchMock);
 
     await client.alter("name: string .");
+    await client.dropAttribute("old.name");
     await expect(client.query("query {}", { $scope: "scope" })).resolves.toEqual({ facts: [] });
     await expect(client.mutate([{ uid: "_:fact" }])).resolves.toEqual({ fact: "0x1" });
     await expect(client.upsert("query {}", [{ set: [{ uid: "_:fact" }] }])).resolves.toEqual({
@@ -49,7 +51,12 @@ describe("DgraphClient", () => {
       headers: { "Content-Type": "application/dql" },
       body: "name: string ."
     });
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "http://dgraph:8080/query?ro=true", {
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "http://dgraph:8080/alter", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drop_attr: "old.name" })
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "http://dgraph:8080/query?ro=true", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: "query {}", variables: { $scope: "scope" } })

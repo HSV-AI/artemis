@@ -219,6 +219,7 @@ describe("HSVAI corpus construction", () => {
   it("replaces only marked corpus nodes and writes its revision last", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
+      .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { corpus: [] } }))
       .mockResolvedValueOnce(jsonResponse({ data: { nodes: [{ uid: "0x99" }] } }))
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
@@ -235,11 +236,11 @@ describe("HSVAI corpus construction", () => {
     const result = await knowledge.initializeAndSync();
 
     expect(result).toMatchObject({ changed: true, documents: 1, chunks: 1, entities: 1 });
-    const deletion = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)) as {
+    const deletion = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)) as {
       delete: Array<{ uid: string }>;
     };
     expect(deletion.delete).toEqual([{ uid: "0x99" }]);
-    const chunkMutation = JSON.parse(String(fetchMock.mock.calls[6]?.[1]?.body)) as {
+    const chunkMutation = JSON.parse(String(fetchMock.mock.calls[7]?.[1]?.body)) as {
       set: Array<Record<string, unknown>>;
     };
     expect(chunkMutation.set[0]).toMatchObject({
@@ -247,7 +248,7 @@ describe("HSVAI corpus construction", () => {
       "hsvai.document": { uid: "0xd1" },
       "hsvai.mentions": [{ uid: "0xe1" }]
     });
-    const finalMutation = JSON.parse(String(fetchMock.mock.calls[7]?.[1]?.body)) as {
+    const finalMutation = JSON.parse(String(fetchMock.mock.calls[8]?.[1]?.body)) as {
       set: Array<Record<string, unknown>>;
     };
     expect(finalMutation.set[0]).toMatchObject({
@@ -275,6 +276,7 @@ describe("HSVAI corpus construction", () => {
     };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
+      .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { corpus: [] } }))
       .mockResolvedValueOnce(jsonResponse({ data: { nodes: [] } }))
       .mockResolvedValueOnce(jsonResponse({ data: { uids: { entity0: "0xe1", entity1: "0xe2" } } }))
@@ -288,7 +290,7 @@ describe("HSVAI corpus construction", () => {
 
     await knowledge.initializeAndSync();
 
-    const documentMutation = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)) as {
+    const documentMutation = JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body)) as {
       set: Array<Record<string, unknown>>;
     };
     expect(documentMutation.set[0]).toMatchObject({
@@ -297,7 +299,7 @@ describe("HSVAI corpus construction", () => {
       "hsvai.speakers": [{ uid: "0xe1" }, { uid: "0xe2" }]
     });
     expect(documentMutation.set[0]).not.toHaveProperty("hsvai.facilitators");
-    const chunkMutation = JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body)) as {
+    const chunkMutation = JSON.parse(String(fetchMock.mock.calls[6]?.[1]?.body)) as {
       set: Array<Record<string, unknown>>;
     };
     expect(chunkMutation.set[0]).toMatchObject({
@@ -309,6 +311,7 @@ describe("HSVAI corpus construction", () => {
     const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument], "embed-v1");
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
+      .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { corpus: [{ revision }] } }));
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", fetchMock),
@@ -317,7 +320,7 @@ describe("HSVAI corpus construction", () => {
     );
 
     await expect(knowledge.initializeAndSync()).resolves.toMatchObject({ changed: false, revision });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 

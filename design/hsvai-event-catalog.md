@@ -99,9 +99,10 @@ Event documents store indexed `hsvai.theme` and `hsvai.people_status`
 predicates. `hsvai.speakers` is a first-class UID edge
 to the same stable person entities used by graph retrieval. Event chunks mention
 those entities so hybrid neighborhood expansion can connect events and
-transcripts through a person. Direct DQL can traverse either role-specific event
-edge without parsing source prose. The former `hsvai.facilitators` edge is no
-longer written; a rebuild removes its old event relationships.
+transcripts through a person. Direct DQL can traverse the event edge without
+parsing source prose. The former `hsvai.facilitators` edge is no
+longer written. Startup drops that retired predicate before synchronizing so
+schema metadata and orphaned UID edges from earlier versions do not survive.
 
 ## Configuration
 

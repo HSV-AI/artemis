@@ -550,6 +550,7 @@ export class HsvaiKnowledge {
 
   public async initializeAndSync(): Promise<HsvaiKnowledgeSyncResult> {
     await this.client.alter(HSVAI_SCHEMA);
+    await this.client.dropAttribute("hsvai.facilitators");
     const documents = await this.source.fetchDocuments();
     const chunks = documents.flatMap(documentChunks);
     const entities = new Map<string, CorpusEntity>();
