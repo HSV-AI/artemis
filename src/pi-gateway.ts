@@ -17,6 +17,7 @@ import type {
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
 import { EmbeddingClient } from "./embedding-client.js";
+import { loadHsvaiEventCatalog } from "./hsvai-event-catalog.js";
 import {
   createHsvaiGraphQueryTool,
   createHsvaiKnowledgeTool,
@@ -215,7 +216,7 @@ export class PiSdkGateway implements PiGateway {
     );
     this.knowledge = new HsvaiKnowledge(
       hsvaiSync,
-      new HsvaiWordPressSource(fetchImplementation),
+      new HsvaiWordPressSource(fetchImplementation, loadHsvaiEventCatalog()),
       embeddingClient
         ? {
             embed: embeddingClient.embed,

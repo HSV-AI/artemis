@@ -40,8 +40,10 @@ The fixed `https://hsv.ai` source must expose these unauthenticated JSON APIs:
 Artemis follows WordPress and Tribe pagination. A transcript document retains
 the post ID, title, canonical URL, publication and modification times, and
 normalized content. An event document additionally retains its start, end,
-timezone, venue, and address. The source APIs remain authoritative; Artemis does
-not edit or enrich them with model-generated facts.
+timezone, venue, and address. The source APIs remain authoritative for those
+fields. A source-hash-matched [event catalog](hsvai-event-catalog.md) adds a
+reviewed theme and explicit speaker and facilitator relationships without
+editing the source APIs.
 
 ### Corpus Graph
 
@@ -53,7 +55,8 @@ Every synchronized corpus uses stable external identifiers:
 
 The Dgraph corpus contains `HsvaiDocument`, `HsvaiChunk`, `HsvaiEntity`, and
 `HsvaiCorpus` nodes. Chunks link to their source document and to deterministic
-speaker or venue entities. Reverse edges let retrieval move from a matching
+speaker or venue entities. Event documents also carry role-specific speaker and
+facilitator edges plus a primary theme and catalog status. Reverse edges let retrieval move from a matching
 chunk to sibling chunks in the same source and to chunks connected through a
 shared speaker or venue.
 
@@ -61,31 +64,40 @@ HTML is reduced to readable block text before chunking. Chunks target 1,200
 characters and never exceed 1,600 characters. Speaker links are created only
 from transcript lines with an explicit `Name:` prefix; venue links come directly
 from event metadata. No general entity or relationship inference occurs during
-ingestion.
+ingestion outside the event-catalog contract.
 
 ## Persistence
 
 The normalized source graph and its revision marker persist in the dedicated
 HSVAI namespace inside the existing Dgraph volume. Dgraph ACL prevents that
 namespace from reading namespace-0 memory facts. It is independent of SQLite sessions.
-There is no separate corpus cache or generated artifact in the repository.
+The reviewed event-catalog baseline is a checked-in artifact, and its optional
+runtime overlay persists in the Artemis data volume. Neither stores embeddings
+or Dgraph UIDs.
 
 ### Synchronization
 
 Startup performs these steps before Discord connects:
 
 1. Apply the additive HSVAI Dgraph schema.
-2. Fetch every transcript post and event page from the JSON APIs.
-3. Normalize and chunk the corpus, then compute a SHA-256 revision over the
+2. Load and validate the event-catalog baseline and optional runtime overlay.
+3. Fetch every transcript post and event page from the JSON APIs, applying only
+   catalog records whose source hash matches.
+4. Normalize and chunk the corpus, then compute a SHA-256 revision over the
    normalized documents and selected embedding model.
-4. Stop when the stored revision already matches.
-5. Otherwise delete only nodes carrying the `hsvai.node_kind` marker, rebuild
+5. Stop when the stored revision already matches.
+6. Otherwise delete only nodes carrying the `hsvai.node_kind` marker, rebuild
    entities and documents, write chunks in bounded batches, and write the corpus
    revision last.
 
 Writing the revision last makes an interrupted rebuild visibly incomplete. A
 later startup rebuilds it again. Source, Dgraph, or embedding failures abort
 startup rather than exposing a partial corpus to Discord.
+
+Catalog enrichment is not part of startup. The operator-only
+`npm run catalog:hsvai-events` task updates the durable overlay and invokes this
+same synchronization lifecycle. Its extraction, validation, and failure
+contract is authoritative in [HSVAI event catalog](hsvai-event-catalog.md).
 
 ## Retrieval And Tool Contract
 
@@ -130,6 +142,7 @@ inference.
 | `HSVAI_DGRAPH_NAMESPACE` | `1` | Namespace containing only the public corpus. |
 | `HSVAI_DGRAPH_SYNC_USER` / `HSVAI_DGRAPH_SYNC_PASSWORD` | Required | Write and schema credentials used only for synchronization. |
 | `HSVAI_DGRAPH_QUERY_USER` / `HSVAI_DGRAPH_QUERY_PASSWORD` | Required | Read-only credentials used by both HSVAI tools. |
+| `HSVAI_EVENT_CATALOG_PATH` | `/data/hsvai-event-catalog.json` | Durable runtime catalog overlay read by startup and written by the operator task. |
 
 Embedding requests are batched by 64 inputs. The embedding model ID participates
 in the corpus revision, so changing models causes a complete re-embedding on the
@@ -147,6 +160,8 @@ Corpus replacement uses the sync account and deletes only nodes marked with
 ## Failure Handling
 
 - Invalid embedding provider metadata fails configuration loading.
+- Invalid baseline or runtime event-catalog data fails loading; a stale event
+  record is ignored and the event is marked pending rather than applied.
 - Non-success source responses, malformed pagination payloads, empty source
   results, invalid dates, embedding failures, and Dgraph failures abort startup.
 - An interrupted rebuild has no new revision marker and is rebuilt on the next
@@ -164,6 +179,8 @@ Corpus replacement uses the sync account and deletes only nodes marked with
 - `test/embedding-client.test.ts` covers ordered embedding batches.
 - `test/pi-gateway.test.ts` covers unconditional tool registration and startup
   synchronization.
+- `test/hsvai-event-catalog.test.ts` covers source hashes, deterministic and
+  model-assisted extraction, and source-grounded person validation.
 - `test/dgraph-bootstrap.test.ts` and `test/dgraph-memory.test.ts` cover namespace
   authentication and read-only enforcement.
 - `npm run guardrail` remains the completion gate.
@@ -173,5 +190,6 @@ Corpus replacement uses the sync account and deletes only nodes marked with
 - [Baseline design](baseline.md)
 - [Graph memory](memory.md)
 - [Dgraph access control and namespaces](dgraph-access-control.md)
+- [HSVAI event catalog](hsvai-event-catalog.md)
 - [Clean-room rebuild guide](rebuild-guide.md)
 - [Design document index](README.md)
