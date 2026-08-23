@@ -80,7 +80,8 @@ model and Dgraph capacity and may replace the public corpus, so it must be run i
 an approved maintenance window rather than while interactive service capacity is
 needed.
 
-By default the task updates the durable overlay. A maintainer may run
+By default the task updates the durable overlay. A maintainer working from source
+may run `npm run build` first, then
 `npm run catalog:hsvai-events -- data/hsvai-event-catalog.json` to regenerate the
 checked-in baseline through the same configured model without changing code.
 That generated baseline must be reviewed before commit.
