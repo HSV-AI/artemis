@@ -131,7 +131,10 @@ export class ConversationService {
           : formatDiscordMessage(message);
         const result = await this.pi.generate({
           logicalSessionId: session.id,
+          conversationKey: identity.key,
           conversationKind: identity.kind,
+          sourceMessageId: message.discordMessageId,
+          authorId: message.authorId,
           history: priorHistory,
           prompt
         });

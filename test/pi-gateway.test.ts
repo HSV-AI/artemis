@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
-import type { StoredMessage } from "../src/domain.js";
+import type { PiGenerationInput, StoredMessage } from "../src/domain.js";
 import { type PersonaProfile } from "../src/persona-profiles.js";
 import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
 import { WARTERMIS_PROFILE } from "../src/personas/wartermis.js";
@@ -81,6 +81,23 @@ function assistant(overrides: Partial<AssistantMessage> = {}): AssistantMessage 
 
 function artemisGatewayConfig(model: ReturnType<typeof modelConfig>) {
   return { model, persona: ARTEMIS_PROFILE };
+}
+
+function generationInput(overrides: Partial<PiGenerationInput> = {}): PiGenerationInput {
+  return {
+    logicalSessionId: "logical",
+    conversationKey: "guild:guild:channel:channel",
+    conversationKind: "guild",
+    sourceMessageId: "message",
+    authorId: "user",
+    history: [],
+    prompt: "prompt",
+    ...overrides
+  };
+}
+
+function healthyFetch() {
+  return vi.fn().mockImplementation(async () => new Response('{"data":{}}', { status: 200 }));
 }
 
 describe("buildSystemPrompt", () => {
@@ -220,7 +237,7 @@ describe("PiSdkGateway", () => {
   });
 
   it("checks health, registers the configured provider, and omits empty auth headers", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const fetchMock = healthyFetch();
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(
         modelConfig({ baseUrl: "http://inference/v1", modelId: "model", apiKey: "" })
@@ -228,6 +245,7 @@ describe("PiSdkGateway", () => {
       fetchMock
     );
     await gateway.checkHealth();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenCalledWith(
       "http://inference/v1/models",
       expect.objectContaining({ headers: {} })
@@ -251,15 +269,10 @@ describe("PiSdkGateway", () => {
           reasoningEffort
         })
       ),
-      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
+      healthyFetch()
     );
     await gateway.checkHealth();
-    await gateway.generate({
-      logicalSessionId: "logical",
-      history: [],
-      prompt: "prompt",
-      conversationKind: "guild"
-    });
+    await gateway.generate(generationInput());
     expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
       "test-provider",
       expect.objectContaining({
@@ -279,15 +292,10 @@ describe("PiSdkGateway", () => {
     delete config.reasoningEffort;
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(config),
-      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
+      healthyFetch()
     );
     await gateway.checkHealth();
-    await gateway.generate({
-      logicalSessionId: "logical",
-      history: [],
-      prompt: "prompt",
-      conversationKind: "guild"
-    });
+    await gateway.generate(generationInput());
     expect(mocks.runtime.registerProvider).toHaveBeenCalledWith(
       "test-provider",
       expect.objectContaining({
@@ -300,7 +308,7 @@ describe("PiSdkGateway", () => {
   });
 
   it("preserves unauthenticated access for the legacy Ollama placeholder", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const fetchMock = healthyFetch();
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(
         modelConfig({
@@ -326,7 +334,7 @@ describe("PiSdkGateway", () => {
   });
 
   it("uses bearer auth for a configured remote key", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
+    const fetchMock = healthyFetch();
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(
         modelConfig({ baseUrl: "https://model.example/v1", modelId: "model", apiKey: "secret" })
@@ -360,8 +368,7 @@ describe("PiSdkGateway", () => {
       },
       vi.fn()
     );
-    const result = await gateway.generate({
-      logicalSessionId: "logical",
+    const result = await gateway.generate(generationInput({
       history: [
         {
           id: 1,
@@ -374,9 +381,8 @@ describe("PiSdkGateway", () => {
           createdAt: "2026-08-19T00:00:00.000Z"
         }
       ],
-      prompt: "new prompt",
-      conversationKind: "guild"
-    });
+      prompt: "new prompt"
+    }));
     expect(mocks.appendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining(
@@ -391,8 +397,19 @@ describe("PiSdkGateway", () => {
     });
     expect(mocks.createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({
-        tools: ["web_fetch"],
-        customTools: [expect.objectContaining({ name: "web_fetch" })],
+        tools: [
+          "web_fetch",
+          "memory_remember",
+          "memory_recall",
+          "memory_supersede",
+          "memory_forget",
+          "memory_believed_at",
+          "memory_audit"
+        ],
+        customTools: expect.arrayContaining([
+          expect.objectContaining({ name: "web_fetch" }),
+          expect.objectContaining({ name: "memory_remember" })
+        ]),
         thinkingLevel: "medium"
       })
     );
@@ -429,16 +446,60 @@ describe("PiSdkGateway", () => {
       },
       vi.fn()
     );
-    await gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt", conversationKind: "guild" });
+    await gateway.generate(generationInput());
     expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       tools: [
         "web_fetch", "github_search", "github_list", "github_fetch",
-        "github_create", "github_update", "github_upload_image"
+        "github_create", "github_update", "github_upload_image",
+        "memory_remember", "memory_recall", "memory_supersede",
+        "memory_forget", "memory_believed_at", "memory_audit"
       ],
       customTools: expect.arrayContaining([
         expect.objectContaining({ name: "github_search" }),
         expect.objectContaining({ name: "github_upload_image" })
       ])
+    }));
+  });
+
+  it("registers scoped Dgraph memory tools for Artemis", async () => {
+    const fetchMock = healthyFetch();
+    const gateway = new PiSdkGateway(
+      {
+        model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
+        persona: ARTEMIS_PROFILE,
+        dgraphUrl: "http://dgraph:8080"
+      },
+      fetchMock
+    );
+
+    await gateway.checkHealth();
+    await gateway.generate(generationInput({
+      conversationKey: "dm:memory-channel",
+      conversationKind: "dm",
+      sourceMessageId: "memory-message",
+      authorId: "memory-author"
+    }));
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://dgraph:8080/alter",
+      expect.objectContaining({ method: "POST" })
+    );
+    expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      tools: expect.arrayContaining([
+        "memory_remember",
+        "memory_recall",
+        "memory_supersede",
+        "memory_forget",
+        "memory_believed_at",
+        "memory_audit"
+      ]),
+      customTools: expect.arrayContaining([
+        expect.objectContaining({ name: "memory_remember" }),
+        expect.objectContaining({ name: "memory_recall" })
+      ])
+    }));
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringContaining("memory_remember")
     }));
   });
 
@@ -449,12 +510,12 @@ describe("PiSdkGateway", () => {
     );
     mocks.runtime.getModel.mockReturnValueOnce(undefined);
     await expect(
-      gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt", conversationKind: "guild" })
+      gateway.generate(generationInput())
     ).rejects.toThrow("Configured model is unavailable");
 
     mocks.session.messages = [];
     await expect(
-      gateway.generate({ logicalSessionId: "logical", history: [], prompt: "prompt", conversationKind: "guild" })
+      gateway.generate(generationInput())
     ).rejects.toThrow("PI completed without an assistant message");
     expect(mocks.session.dispose).toHaveBeenCalled();
   });
@@ -468,14 +529,12 @@ describe("system prompt Discord channel limits", () => {
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
-      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
+      healthyFetch()
     );
-    await gateway.generate({
-      logicalSessionId: "logical",
+    await gateway.generate(generationInput({
       conversationKind: kind,
-      history: [],
-      prompt: "prompt"
-    });
+      conversationKey: kind === "dm" ? "dm:channel" : "guild:guild:channel:channel"
+    }));
     const options = mocks.resourceLoaderConstructor.mock.calls.at(-1)?.[0] as
       | { systemPrompt?: string }
       | undefined;
@@ -510,24 +569,12 @@ describe("system prompt Discord channel limits", () => {
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
       vi.fn()
     );
-    await gateway.generate({
-      logicalSessionId: "logical",
-      conversationKind: "guild",
-      history: [],
-      prompt: "prompt"
-    });
-    await gateway.generate({
-      logicalSessionId: "logical",
-      conversationKind: "guild",
-      history: [],
-      prompt: "prompt"
-    });
-    await gateway.generate({
-      logicalSessionId: "logical",
+    await gateway.generate(generationInput());
+    await gateway.generate(generationInput());
+    await gateway.generate(generationInput({
       conversationKind: "dm",
-      history: [],
-      prompt: "prompt"
-    });
+      conversationKey: "dm:channel"
+    }));
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
   });
 });

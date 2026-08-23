@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
+  DEFAULT_DGRAPH_URL,
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
   DEFAULT_SQLITE_PATH,
@@ -48,6 +49,7 @@ describe("parseConfig", () => {
       persona: ARTEMIS_PROFILE,
       githubToken: "",
       githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
+      dgraphUrl: DEFAULT_DGRAPH_URL,
       sqlitePath: DEFAULT_SQLITE_PATH,
       logLevel: "info"
     });
@@ -77,6 +79,7 @@ describe("parseConfig", () => {
       MODEL_API_KEY: "secret",
       GITHUB_TOKEN: " github-secret ",
       GITHUB_ALLOWED_REPOSITORY: " mbrooks/artemis, HSV-AI/artemis, MBROOKS/ARTEMIS ",
+      DGRAPH_URL: "http://memory.example:8080/",
       SQLITE_PATH: ":memory:",
       LOG_LEVEL: "debug"
     }, { ...providerDefinition, baseUrl: "https://model.example/v1/" });
@@ -93,6 +96,7 @@ describe("parseConfig", () => {
       }),
       githubToken: "github-secret",
       githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
+      dgraphUrl: "http://memory.example:8080",
       sqlitePath: ":memory:",
       logLevel: "debug"
     });
@@ -138,6 +142,10 @@ describe("parseConfig", () => {
         LOG_LEVEL: "verbose"
       })
     ).toThrow("Invalid configuration: LOG_LEVEL");
+    expect(() => parseConfig({
+      DISCORD_TOKEN: "token",
+      DGRAPH_URL: "file:///data/dgraph"
+    })).toThrow("Invalid URL configuration: DGRAPH_URL");
   });
 
   it("loads model settings from MODEL_CONFIG_PATH", () => {

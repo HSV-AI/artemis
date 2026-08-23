@@ -13,7 +13,8 @@ import type {
   ThinkingContent,
   Usage
 } from "@earendil-works/pi-ai";
-import type { ArtemisConfig } from "./config.js";
+import { DEFAULT_DGRAPH_URL, type ArtemisConfig } from "./config.js";
+import { DgraphClient, GraphMemory } from "./dgraph-memory.js";
 import type {
   ConversationKind,
   PiGateway,
@@ -22,6 +23,7 @@ import type {
   StoredMessage
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
+import { createMemoryTools } from "./memory-tools.js";
 import { formatDiscordMessage } from "./model-context.js";
 import type { PersonaProfile } from "./persona-profiles.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
@@ -178,12 +180,17 @@ export class PiSdkGateway implements PiGateway {
   private modelRuntime: ModelRuntime | undefined;
   private readonly resourceLoaders = new Map<ConversationKind, DefaultResourceLoader>();
   private customTools: ReturnType<typeof createCustomTools> = [];
+  private readonly memory: GraphMemory;
 
   public constructor(
     private readonly config: Pick<ArtemisConfig, "model" | "persona"> &
-      Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories">>,
+      Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories" | "dgraphUrl">>,
     private readonly fetchImplementation: typeof fetch = fetch
-  ) {}
+  ) {
+    this.memory = new GraphMemory(
+      new DgraphClient(config.dgraphUrl ?? DEFAULT_DGRAPH_URL, fetchImplementation)
+    );
+  }
 
   public async checkHealth(): Promise<void> {
     const controller = new AbortController();
@@ -199,17 +206,25 @@ export class PiSdkGateway implements PiGateway {
     } finally {
       clearTimeout(timeout);
     }
+    await this.memory.initialize();
     await this.initialize();
   }
 
   public async generate(input: PiGenerationInput): Promise<PiGenerationResult> {
     await this.initialize();
-    const customTools = this.customTools;
+    const customTools = [
+      ...this.customTools,
+      ...createMemoryTools(this.memory, {
+        scopeKey: input.conversationKey,
+        authorId: input.authorId,
+        sourceMessageId: input.sourceMessageId
+      })
+    ];
     const modelRuntime = this.modelRuntime;
     if (!modelRuntime) {
       throw new Error("PI gateway failed to initialize");
     }
-    const resourceLoader = await this.getResourceLoader(input.conversationKind);
+    const resourceLoader = await this.getResourceLoader(input.conversationKind, customTools);
     const model = modelRuntime.getModel(
       this.config.model.providerId,
       this.config.model.modelId
@@ -308,7 +323,10 @@ export class PiSdkGateway implements PiGateway {
     this.modelRuntime = modelRuntime;
   }
 
-  private async getResourceLoader(kind: ConversationKind): Promise<DefaultResourceLoader> {
+  private async getResourceLoader(
+    kind: ConversationKind,
+    tools: readonly ToolRegistryEntry[]
+  ): Promise<DefaultResourceLoader> {
     const existing = this.resourceLoaders.get(kind);
     if (existing) {
       return existing;
@@ -321,7 +339,7 @@ export class PiSdkGateway implements PiGateway {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPrompt: buildSystemPrompt(kind, this.config.persona, this.customTools)
+      systemPrompt: buildSystemPrompt(kind, this.config.persona, tools)
     });
     await resourceLoader.reload();
     this.resourceLoaders.set(kind, resourceLoader);

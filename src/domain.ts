@@ -75,7 +75,10 @@ export interface IncomingMessageRecord {
 
 export interface PiGenerationInput {
   logicalSessionId: string;
+  conversationKey: string;
   conversationKind: ConversationKind;
+  sourceMessageId: string;
+  authorId: string;
   history: StoredMessage[];
   prompt: string;
 }
