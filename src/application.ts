@@ -27,7 +27,7 @@ export class ArtemisApplication {
     this.logger =
       dependencies.logger ??
       new JsonLogger(config.logLevel, console.log, (entry) => this.repository.recordLog(entry));
-    this.pi = dependencies.pi ?? new PiSdkGateway(config);
+    this.pi = dependencies.pi ?? new PiSdkGateway(config, this.repository);
     const conversations = new ConversationService(
       {
         channelIds: config.discordAllowedChannelIds,

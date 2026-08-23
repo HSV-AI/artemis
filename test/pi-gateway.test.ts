@@ -1,16 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
-import type { PiGenerationInput, StoredMessage } from "../src/domain.js";
+import type {
+  PiGenerationInput,
+  PiSessionEntryRecord,
+  PiSessionStore
+} from "../src/domain.js";
 import { type PersonaProfile } from "../src/persona-profiles.js";
 import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
 import { WARTERMIS_PROFILE } from "../src/personas/wartermis.js";
 import { modelConfig } from "./helpers.js";
 
 const mocks = vi.hoisted(() => {
-  const appendMessage = vi.fn();
-  const sessionManagerInMemory = vi.fn();
-  const sessionManager = { appendMessage };
-  sessionManagerInMemory.mockReturnValue(sessionManager);
   const runtime = {
     registerProvider: vi.fn(),
     setRuntimeApiKey: vi.fn().mockResolvedValue(undefined),
@@ -22,9 +22,6 @@ const mocks = vi.hoisted(() => {
     messages: [] as unknown[]
   };
   return {
-    appendMessage,
-    sessionManagerInMemory,
-    sessionManager,
     runtime,
     session,
     createAgentSession: vi.fn().mockResolvedValue({ session, extensionsResult: {} }),
@@ -40,10 +37,13 @@ vi.mock("@earendil-works/pi-ai", () => ({
 }));
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
+  buildContextEntries: vi.fn((entries: unknown[]) => entries),
+  buildSessionContext: vi.fn(() => ({ messages: [], thinkingLevel: "off", model: null })),
   createAgentSession: mocks.createAgentSession,
+  CURRENT_SESSION_VERSION: 3,
   defineTool: vi.fn((tool: unknown) => tool),
+  migrateSessionEntries: vi.fn(),
   ModelRuntime: { create: mocks.runtimeCreate },
-  SessionManager: { inMemory: mocks.sessionManagerInMemory },
   SettingsManager: { inMemory: vi.fn(() => mocks.settings) },
   DefaultResourceLoader: class DefaultResourceLoader {
     public constructor(options: unknown) {
@@ -90,7 +90,6 @@ function generationInput(overrides: Partial<PiGenerationInput> = {}): PiGenerati
     conversationKind: "guild",
     sourceMessageId: "message",
     authorId: "user",
-    history: [],
     prompt: "prompt",
     ...overrides
   };
@@ -98,6 +97,40 @@ function generationInput(overrides: Partial<PiGenerationInput> = {}): PiGenerati
 
 function healthyFetch() {
   return vi.fn().mockImplementation(async () => new Response('{"data":{}}', { status: 200 }));
+}
+
+function createSessionStore(): PiSessionStore {
+  const sessions = new Map<string, { rawEntries: string[] }>();
+  let migrationComplete = false;
+  return {
+    loadPiSession: vi.fn((sessionId) => sessions.get(sessionId)),
+    createPiSession: vi.fn((sessionId, entries) => {
+      sessions.set(sessionId, {
+        rawEntries: entries.map((entry: PiSessionEntryRecord) => entry.rawJson)
+      });
+    }),
+    appendPiSessionEntry: vi.fn((sessionId, entry) => {
+      const session = sessions.get(sessionId);
+      if (!session) throw new Error(`missing session ${sessionId}`);
+      session.rawEntries.push(entry.rawJson);
+    }),
+    replacePiSessionEntries: vi.fn((sessionId, entries) => {
+      const session = sessions.get(sessionId);
+      if (!session) throw new Error(`missing session ${sessionId}`);
+      session.rawEntries = entries.map((entry: PiSessionEntryRecord) => entry.rawJson);
+    }),
+    listPiSessionMigrationSources: vi.fn(() => []),
+    completePiSessionMigration: vi.fn((migrations) => {
+      if (migrationComplete) return 0;
+      for (const migration of migrations) {
+        sessions.set(migration.sessionId, {
+          rawEntries: migration.entries.map((entry: PiSessionEntryRecord) => entry.rawJson)
+        });
+      }
+      migrationComplete = true;
+      return migrations.length;
+    })
+  };
 }
 
 describe("buildSystemPrompt", () => {
@@ -153,46 +186,7 @@ describe("buildSystemPrompt", () => {
   });
 });
 
-describe("pi message conversion", () => {
-  it("converts persisted user and assistant messages", () => {
-    const base: StoredMessage = {
-      id: 1,
-      sessionId: "session",
-      discordMessageId: "message",
-      authorId: "user",
-      authorName: "User",
-      role: "user",
-      content: "question",
-      createdAt: "2026-08-19T00:00:00.000Z"
-    };
-    expect(piInternals.storedToPiMessage(base, "test-provider", "fallback")).toMatchObject({
-      role: "user",
-      content:
-        '{"discordMessage":{"id":"message","author":{"id":"user","name":"User"},"role":"user","content":"question","timestamp":"2026-08-19T00:00:00.000Z"}}'
-    });
-    expect(
-      piInternals.storedToPiMessage(
-        {
-          ...base,
-          role: "assistant",
-          content: "answer",
-          reasoning: "thought",
-          diagnostics: [{ type: "trace", timestamp: 1 }],
-          model: "saved"
-        },
-        "test-provider",
-        "fallback"
-      )
-    ).toMatchObject({
-      role: "assistant",
-      model: "saved",
-      content: [
-        { type: "thinking", thinking: "thought" },
-        { type: "text", text: "answer" }
-      ]
-    });
-  });
-
+describe("PI result conversion", () => {
   it("extracts text, reasoning, diagnostics, and response model", () => {
     expect(
       piInternals.extractGeneration(
@@ -242,6 +236,7 @@ describe("PiSdkGateway", () => {
       artemisGatewayConfig(
         modelConfig({ baseUrl: "http://inference/v1", modelId: "model", apiKey: "" })
       ),
+      createSessionStore(),
       fetchMock
     );
     await gateway.checkHealth();
@@ -269,6 +264,7 @@ describe("PiSdkGateway", () => {
           reasoningEffort
         })
       ),
+      createSessionStore(),
       healthyFetch()
     );
     await gateway.checkHealth();
@@ -292,6 +288,7 @@ describe("PiSdkGateway", () => {
     delete config.reasoningEffort;
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(config),
+      createSessionStore(),
       healthyFetch()
     );
     await gateway.checkHealth();
@@ -307,6 +304,46 @@ describe("PiSdkGateway", () => {
     expect(mocks.createAgentSession.mock.calls[0]?.[0]).not.toHaveProperty("thinkingLevel");
   });
 
+  it("completes the one-time PI session cutover before startup health completes", async () => {
+    const sessionStore = createSessionStore();
+    vi.mocked(sessionStore.listPiSessionMigrationSources).mockReturnValue([
+      {
+        sessionId: "legacy",
+        createdAt: "2026-08-20T00:00:00.000Z",
+        messages: [
+          {
+            id: 1,
+            sessionId: "legacy",
+            discordMessageId: "message",
+            authorId: "user",
+            authorName: "User",
+            role: "user",
+            content: "old context",
+            createdAt: "2026-08-20T00:00:01.000Z"
+          }
+        ]
+      }
+    ]);
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      sessionStore,
+      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
+    );
+
+    await gateway.checkHealth();
+
+    expect(sessionStore.completePiSessionMigration).toHaveBeenCalledWith([
+      expect.objectContaining({
+        sessionId: "legacy",
+        entries: expect.arrayContaining([
+          expect.objectContaining({
+            entryType: "message",
+            rawJson: expect.stringContaining("old context")
+          })
+        ])
+      })
+    ]);
+  });
   it("preserves unauthenticated access for the legacy Ollama placeholder", async () => {
     const fetchMock = healthyFetch();
     const gateway = new PiSdkGateway(
@@ -319,6 +356,7 @@ describe("PiSdkGateway", () => {
           apiKey: "ollama"
         })
       ),
+      createSessionStore(),
       fetchMock
     );
     await gateway.checkHealth();
@@ -339,6 +377,7 @@ describe("PiSdkGateway", () => {
       artemisGatewayConfig(
         modelConfig({ baseUrl: "https://model.example/v1", modelId: "model", apiKey: "secret" })
       ),
+      createSessionStore(),
       fetchMock
     );
     await gateway.checkHealth();
@@ -351,12 +390,14 @@ describe("PiSdkGateway", () => {
   it("rejects an unhealthy provider", async () => {
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
       vi.fn().mockResolvedValue(new Response("no", { status: 503 }))
     );
     await expect(gateway.checkHealth()).rejects.toThrow("status 503");
   });
 
-  it("reconstructs history, prompts PI, and disposes the session", async () => {
+  it("opens durable PI state, prompts PI, and disposes the live session", async () => {
+    const sessionStore = createSessionStore();
     const gateway = new PiSdkGateway(
       {
         model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
@@ -366,31 +407,14 @@ describe("PiSdkGateway", () => {
           instructions: "Be a theatrical rival."
         } satisfies PersonaProfile
       },
+      sessionStore,
       vi.fn()
     );
-    const result = await gateway.generate(generationInput({
-      history: [
-        {
-          id: 1,
-          sessionId: "logical",
-          discordMessageId: "message",
-          authorId: "user",
-          authorName: "User",
-          role: "user",
-          content: "history",
-          createdAt: "2026-08-19T00:00:00.000Z"
-        }
-      ],
-      prompt: "new prompt"
-    }));
-    expect(mocks.appendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: expect.stringContaining(
-          '"author":{"id":"user","name":"User"}'
-        )
-      })
+    const result = await gateway.generate(generationInput({ prompt: "new prompt" }));
+    expect(sessionStore.createPiSession).toHaveBeenCalledWith(
+      "logical",
+      [expect.objectContaining({ entryType: "session" })]
     );
-    expect(mocks.sessionManagerInMemory).toHaveBeenCalledWith(process.cwd(), { id: "logical" });
     expect(mocks.session.prompt).toHaveBeenCalledWith("new prompt", {
       expandPromptTemplates: false,
       source: "rpc"
@@ -444,6 +468,7 @@ describe("PiSdkGateway", () => {
         githubToken: "github-token",
         githubAllowedRepositories: ["owner/repo", "other/repo"]
       },
+      createSessionStore(),
       vi.fn()
     );
     await gateway.generate(generationInput());
@@ -469,6 +494,7 @@ describe("PiSdkGateway", () => {
         persona: ARTEMIS_PROFILE,
         dgraphUrl: "http://dgraph:8080"
       },
+      createSessionStore(),
       fetchMock
     );
 
@@ -506,6 +532,7 @@ describe("PiSdkGateway", () => {
   it("rejects a missing configured model and a missing assistant response", async () => {
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
       vi.fn()
     );
     mocks.runtime.getModel.mockReturnValueOnce(undefined);
@@ -529,6 +556,7 @@ describe("system prompt Discord channel limits", () => {
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
       healthyFetch()
     );
     await gateway.generate(generationInput({
@@ -567,6 +595,7 @@ describe("system prompt Discord channel limits", () => {
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
       vi.fn()
     );
     await gateway.generate(generationInput());

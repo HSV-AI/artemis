@@ -6,7 +6,11 @@ import type {
   ConversationIdentity,
   IncomingMessageRecord,
   LogEntry,
+  PersistedPiSession,
   PiGenerationResult,
+  PiSessionEntryRecord,
+  PiSessionMigration,
+  PiSessionMigrationSource,
   SessionRecord,
   SourceMessage,
   StoredMessage
@@ -61,6 +65,20 @@ interface IncomingMessageRow {
   content: string;
   created_at: string;
   logged_at: string;
+}
+
+interface PiSessionRow {
+  next_ordinal: number;
+}
+
+interface PiSessionEntryRow {
+  ordinal: number;
+  raw_json: string;
+}
+
+interface PiSessionMigrationSourceRow {
+  id: string;
+  created_at: string;
 }
 
 function now(): string {
@@ -233,6 +251,134 @@ export class ArtemisRepository {
     return rows.map((row) => this.mapMessage(row));
   }
 
+  public loadPiSession(sessionId: string): PersistedPiSession | undefined {
+    const session = this.database
+      .prepare(
+        `SELECT next_ordinal
+         FROM pi_sessions
+         WHERE session_id = ?`
+      )
+      .get(sessionId) as PiSessionRow | undefined;
+    if (!session) {
+      return undefined;
+    }
+    const entries = this.database
+      .prepare(
+        `SELECT ordinal, raw_json
+         FROM pi_session_entries
+         WHERE session_id = ?
+         ORDER BY ordinal ASC`
+      )
+      .all(sessionId) as PiSessionEntryRow[];
+    if (
+      entries.length !== session.next_ordinal ||
+      entries.some((entry, expectedOrdinal) => entry.ordinal !== expectedOrdinal)
+    ) {
+      throw new Error(`PI session entry sequence is incomplete: ${sessionId}`);
+    }
+    return { rawEntries: entries.map((entry) => entry.raw_json) };
+  }
+
+  public createPiSession(sessionId: string, entries: PiSessionEntryRecord[]): void {
+    const transaction = this.database.transaction(() => {
+      this.insertPiSession(sessionId, entries);
+    });
+    transaction();
+  }
+
+  public appendPiSessionEntry(sessionId: string, entry: PiSessionEntryRecord): void {
+    const transaction = this.database.transaction(() => {
+      const session = this.database
+        .prepare("SELECT next_ordinal FROM pi_sessions WHERE session_id = ?")
+        .get(sessionId) as Pick<PiSessionRow, "next_ordinal"> | undefined;
+      if (!session) {
+        throw new Error(`PI session does not exist: ${sessionId}`);
+      }
+      this.insertPiSessionEntry(sessionId, session.next_ordinal, entry);
+      this.database
+        .prepare(
+          `UPDATE pi_sessions
+           SET next_ordinal = ?, updated_at = ?
+           WHERE session_id = ?`
+        )
+        .run(session.next_ordinal + 1, now(), sessionId);
+    });
+    transaction();
+  }
+
+  public replacePiSessionEntries(sessionId: string, entries: PiSessionEntryRecord[]): void {
+    const transaction = this.database.transaction(() => {
+      const result = this.database
+        .prepare(
+          `UPDATE pi_sessions
+           SET next_ordinal = ?, updated_at = ?
+           WHERE session_id = ?`
+        )
+        .run(entries.length, now(), sessionId);
+      if (result.changes !== 1) {
+        throw new Error(`PI session does not exist: ${sessionId}`);
+      }
+      this.database.prepare("DELETE FROM pi_session_entries WHERE session_id = ?").run(sessionId);
+      this.insertPiSessionEntries(sessionId, entries);
+    });
+    transaction();
+  }
+
+  public listPiSessionMigrationSources(): PiSessionMigrationSource[] {
+    const completed = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 5")
+      .get();
+    if (completed) {
+      return [];
+    }
+    const sessions = this.database
+      .prepare(
+        `SELECT s.id, s.created_at
+         FROM sessions s
+         WHERE NOT EXISTS (
+           SELECT 1 FROM pi_sessions p WHERE p.session_id = s.id
+         )
+         ORDER BY s.created_at ASC, s.id ASC`
+      )
+      .all() as PiSessionMigrationSourceRow[];
+    return sessions.map((session) => ({
+      sessionId: session.id,
+      createdAt: session.created_at,
+      messages: this.getHistory(session.id)
+    }));
+  }
+
+  public completePiSessionMigration(migrations: PiSessionMigration[]): number {
+    const transaction = this.database.transaction(() => {
+      const completed = this.database
+        .prepare("SELECT 1 FROM schema_migrations WHERE version = 5")
+        .get();
+      if (completed) {
+        return 0;
+      }
+      for (const migration of migrations) {
+        this.insertPiSession(migration.sessionId, migration.entries);
+      }
+      const missing = this.database
+        .prepare(
+          `SELECT COUNT(*) AS count
+           FROM sessions s
+           WHERE NOT EXISTS (
+             SELECT 1 FROM pi_sessions p WHERE p.session_id = s.id
+           )`
+        )
+        .get() as { count: number };
+      if (missing.count !== 0) {
+        throw new Error(`PI session migration left ${missing.count} session(s) unconverted`);
+      }
+      this.database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (5, ?)")
+        .run(now());
+      return migrations.length;
+    });
+    return transaction();
+  }
+
   public insertSourceMessages(sessionId: string, messages: SourceMessage[]): number {
     const insert = this.database.prepare(
       `INSERT OR IGNORE INTO messages
@@ -314,6 +460,43 @@ export class ArtemisRepository {
 
   private touchSession(sessionId: string): void {
     this.database.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(now(), sessionId);
+  }
+
+  private insertPiSessionEntries(sessionId: string, entries: PiSessionEntryRecord[]): void {
+    entries.forEach((entry, ordinal) => this.insertPiSessionEntry(sessionId, ordinal, entry));
+  }
+
+  private insertPiSession(sessionId: string, entries: PiSessionEntryRecord[]): void {
+    const timestamp = now();
+    this.database
+      .prepare(
+        `INSERT INTO pi_sessions
+         (session_id, next_ordinal, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`
+      )
+      .run(sessionId, entries.length, timestamp, timestamp);
+    this.insertPiSessionEntries(sessionId, entries);
+  }
+
+  private insertPiSessionEntry(
+    sessionId: string,
+    ordinal: number,
+    entry: PiSessionEntryRecord
+  ): void {
+    this.database
+      .prepare(
+        `INSERT INTO pi_session_entries
+         (session_id, ordinal, entry_id, entry_type, parent_id, raw_json)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        sessionId,
+        ordinal,
+        entry.entryId ?? null,
+        entry.entryType,
+        entry.parentId ?? null,
+        entry.rawJson
+      );
   }
 
   private migrate(): void {
@@ -437,6 +620,39 @@ export class ArtemisRepository {
             ON incoming_messages(created_at, id);
 
           INSERT INTO schema_migrations(version, applied_at) VALUES (3, '${now()}');
+        `);
+      });
+      transaction();
+    }
+
+    const piSessionsApplied = this.database
+      .prepare("SELECT 1 FROM schema_migrations WHERE version = 4")
+      .get();
+    if (!piSessionsApplied) {
+      const transaction = this.database.transaction(() => {
+        this.database.exec(`
+          CREATE TABLE pi_sessions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            next_ordinal INTEGER NOT NULL CHECK (next_ordinal >= 0),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE pi_session_entries (
+            session_id TEXT NOT NULL REFERENCES pi_sessions(session_id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            entry_id TEXT,
+            entry_type TEXT NOT NULL,
+            parent_id TEXT,
+            raw_json TEXT NOT NULL CHECK (json_valid(raw_json)),
+            PRIMARY KEY (session_id, ordinal),
+            UNIQUE (session_id, entry_id)
+          );
+
+          CREATE INDEX pi_session_entries_by_parent
+            ON pi_session_entries(session_id, parent_id);
+
+          INSERT INTO schema_migrations(version, applied_at) VALUES (4, '${now()}');
         `);
       });
       transaction();
