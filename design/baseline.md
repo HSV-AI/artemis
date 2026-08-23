@@ -26,7 +26,7 @@ Detailed protocols and major features live in focused subdocuments so this basel
 - Make the model and runtime settings configurable without code changes.
 - Let deployments select a distinct bot identity and conversational style without forking application code or replacing fixed safety and capability rules.
 - Let the model fetch web pages and, when configured, operate on GitHub through explicitly allowlisted custom tools while keeping built-in coding tools disabled.
-- Let Wartermis explicitly retain, correct, forget, recall, and audit facts without sharing them across Discord conversation keys.
+- Let Wartermis explicitly retain, correct, forget, recall, query past beliefs, and audit facts without sharing them across Discord conversation keys.
 - Show a typing indicator while generating and attach every guild response to its triggering question with a Discord reply.
 - Let a guild user continue a conversation by replying directly to an Artemis message without repeating a mention.
 - Record enough activity, errors, chat history, and available model diagnostics for operators to debug conversations.
@@ -173,7 +173,7 @@ An authorized `/clear-session` closes the active session for the same conversati
 
 PI is the base conversational harness and owns interaction with the configured OpenAI-compatible model endpoint. Application code supplies the isolated conversation session and user message, then consumes the assistant response plus any available reasoning or diagnostic metadata. [Configurable model provider](model-provider.md) defines the provider file and startup contract.
 
-Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, fetches it directly as a PI custom tool, bounds and extracts its content, and sanitizes the returned page independently of the model provider. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers the six documented GitHub tools behind their repository allowlist. The Wartermis profile additionally registers six Dgraph-backed memory tools bound to the current conversation key, Discord author, and source message. Memory writes require an explicit user request and use tombstones for correction or forgetting; [Wartermis graph memory](wartermis-memory.md) owns the detailed contract. PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Tool failures follow the normal generation-failure path and produce no Discord response.
+Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, fetches it directly as a PI custom tool, bounds and extracts its content, and sanitizes the returned page independently of the model provider. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers the six documented GitHub tools behind their repository allowlist, sanitizes read results as untrusted content, and publishes the explicit-mutation guideline in the tool descriptions. The Wartermis profile additionally registers six Dgraph-backed memory tools bound to the current conversation key, Discord author, and source message. Memory writes require an explicit user request and use tombstones for correction or forgetting; [Wartermis graph memory](wartermis-memory.md) owns the detailed contract. PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Tool failures follow the normal generation-failure path and produce no Discord response.
 
 The system prompt is built from the conversation kind, the selected persona profile, and the tools that were actually registered. Each profile supplies its complete identity from a dedicated file under `src/personas/`; prompt construction does not special-case the default profile. Discord speaker handling, conversation-kind limits, and capability rules remain application-owned. The Capability Gap Protocol tells Artemis to acknowledge an unavailable capability, avoid source exploration or improvised code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when that tool is available. Its Available Tools section is generated from the live custom-tool registry so the prompt does not advertise unregistered tools.
 
@@ -326,7 +326,7 @@ Required tests include:
 - Configuration defaults and validation behave as documented, including the default model.
 - Persistence transactions, migrations, and error paths preserve the last valid session state.
 - PI or model-provider failures are logged without creating an assistant turn or sending a Discord response.
-- Only `web_fetch`, token-gated GitHub tools, and Wartermis-only scoped memory tools are enabled; they populate the Available Tools prompt registry and never enable built-in coding tools.
+- Only `web_fetch`, token-gated GitHub tools, and Wartermis-only scoped memory tools are enabled; `web_fetch` and GitHub tools sanitize external content, all populate the Available Tools prompt registry and include the Capability Gap Protocol, and none enable built-in coding tools.
 - Every Discord message is emitted through the log-level-independent audit path and deduplicated in `incoming_messages` before conversation filtering.
 - Discord reconnect lifecycle events are handled without losing durable context.
 
