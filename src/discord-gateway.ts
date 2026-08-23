@@ -70,6 +70,18 @@ function displayName(message: Message): string {
   return message.member?.displayName ?? message.author.globalName ?? message.author.username;
 }
 
+/**
+ * Resolve the bot's own Discord display name from the connected client. Discord
+ * shows a user's global display name when one is set, falling back to the
+ * unique username. Returns `undefined` when the user object is unavailable.
+ */
+export function resolveBotDisplayName(user: { globalName: string | null; username: string } | null): string | undefined {
+  if (!user) {
+    return undefined;
+  }
+  return user.globalName ?? user.username;
+}
+
 function toSourceMessage(message: Message, selfUserId: string | undefined): SourceMessage {
   return {
     discordMessageId: message.id,
@@ -205,6 +217,12 @@ export interface DiscordGatewayOptions {
   embedsAllowedChannelIds?: readonly string[];
   startedAt?: number;
   now?: () => number;
+  /**
+   * Invoked once, when the Discord client becomes ready, with the bot's
+   * resolved Discord display name (global display name when set, otherwise the
+   * bot's username). Not invoked when the Discord user is unavailable.
+   */
+  onBotIdentity?: (displayName: string) => void;
 }
 
 export class DiscordGateway {
@@ -364,6 +382,10 @@ export class DiscordGateway {
     }
     this.bound = true;
     this.client.once(Events.ClientReady, (readyClient) => {
+      const botDisplayName = resolveBotDisplayName(readyClient.user);
+      if (botDisplayName) {
+        this.options.onBotIdentity?.(botDisplayName);
+      }
       void readyClient.application.commands
         .set([
           new SlashCommandBuilder()
@@ -382,7 +404,8 @@ export class DiscordGateway {
         .then(() => {
           this.logger.info("discord_ready", {
             botUserId: readyClient.user.id,
-            channelIds: this.options.channelIds
+            channelIds: this.options.channelIds,
+            ...(botDisplayName ? { botDisplayName } : {})
           });
         })
         .catch((error: unknown) => {

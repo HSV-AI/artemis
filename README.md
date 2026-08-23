@@ -111,9 +111,14 @@ visible in review.
 PERSONA_PROFILE=wartermis
 ```
 
-The selected profile supplies the complete identity instructions. Fixed Discord,
+The selected profile supplies the conversational style instructions. Fixed Discord,
 tool, and capability rules are composed after it and remain application-owned.
-Changing a profile requires rebuilding and restarting Artemis.
+The bot's display name is read from the connected Discord client at startup
+(global display name when set, otherwise username) and injected into the system
+prompt, so asking the bot its name returns the Discord-configured name rather
+than a name hardcoded in the profile. The profile's bundled `name` is the
+fallback default when Discord has not reported a name. Changing a profile
+requires rebuilding and restarting Artemis.
 
 ## Run locally with Compose
 

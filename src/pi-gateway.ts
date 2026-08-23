@@ -69,16 +69,25 @@ export interface ToolRegistryEntry {
 }
 
 /**
- * Build the system prompt deterministically from the conversation kind and the
- * registered tools. Guild/channel sessions get the channel-limits block; DM
- * sessions never see limit messaging. The Capability Gap Protocol and Available
- * Tools sections are always included so the model knows its real boundaries.
+ * Build the system prompt deterministically from the conversation kind, the bot's
+ * Discord-resolved display name, the selected persona profile, and the registered
+ * tools. Guild/channel sessions get the channel-limits block; DM sessions never
+ * see limit messaging. The Capability Gap Protocol and Available Tools sections
+ * are always included so the model knows its real boundaries.
+ *
+ * The bot's display name is resolved from Discord at startup (see
+ * `PiSdkGateway.setBotDisplayName`) and is authoritative for self-introduction.
+ * When no Discord name has been provided, the persona profile's bundled `name`
+ * acts as the sensible fallback default.
  */
 export function buildSystemPrompt(
   kind: ConversationKind,
   persona: PersonaProfile,
+  botDisplayName: string | undefined = undefined,
   tools: readonly ToolRegistryEntry[] = []
 ): string {
+  const resolvedName = botDisplayName?.trim() ? botDisplayName.trim() : persona.name;
+  const identityBlock = `Your name is ${resolvedName}. When someone asks your name, introduce yourself as ${resolvedName}.`;
   const channelLimits = kind === "guild" ? CHANNEL_LIMITS_PROMPT_BLOCK : "";
   const registry = tools.length === 0
     ? "No tools are currently registered. Apply the Capability Gap Protocol for any task that needs a tool."
@@ -93,7 +102,7 @@ export function buildSystemPrompt(
           return lines.join("\n");
         })
         .join("\n");
-  return `${persona.instructions.trim()} ${DISCORD_BEHAVIOR_PROMPT}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}`;
+  return `${identityBlock} ${persona.instructions.trim()} ${DISCORD_BEHAVIOR_PROMPT}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}`;
 }
 
 function createCustomTools(
@@ -134,6 +143,7 @@ export class PiSdkGateway implements PiGateway {
   private modelRuntime: ModelRuntime | undefined;
   private readonly resourceLoaders = new Map<ConversationKind, DefaultResourceLoader>();
   private customTools: ReturnType<typeof createCustomTools> = [];
+  private botDisplayName: string | undefined;
   private readonly memory: GraphMemory;
 
   public constructor(
@@ -145,6 +155,19 @@ export class PiSdkGateway implements PiGateway {
     this.memory = new GraphMemory(
       new DgraphClient(config.dgraphUrl ?? DEFAULT_DGRAPH_URL, fetchImplementation)
     );
+  }
+
+  /**
+   * Set the bot's Discord display name, resolved from the connected Discord
+   * client at startup. The name is injected into every system prompt so the
+   * model introduces itself with the name Discord users actually see, rather
+   * than a name hardcoded in a persona profile. Clears the cached resource
+   * loaders so the next generation rebuilds the prompt with the new name.
+   */
+  public setBotDisplayName(name: string): void {
+    const trimmed = name.trim();
+    this.botDisplayName = trimmed || undefined;
+    this.resourceLoaders.clear();
   }
 
   public async checkHealth(): Promise<void> {
@@ -297,7 +320,7 @@ export class PiSdkGateway implements PiGateway {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPrompt: buildSystemPrompt(kind, this.config.persona, tools)
+      systemPrompt: buildSystemPrompt(kind, this.config.persona, this.botDisplayName, tools)
     });
     await resourceLoader.reload();
     this.resourceLoaders.set(kind, resourceLoader);
