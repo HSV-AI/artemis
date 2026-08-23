@@ -780,7 +780,18 @@
       "modifiedAt": "2026-01-05T16:31:33.000Z",
       "sourceHash": "85e1b536453bef7fbbef2e3836f43c43af8e356fccb47cc2f6734e202b08c19b",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        },
+        {
+          "name": "Josh Phillips",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -835,7 +846,13 @@
       "modifiedAt": "2026-01-19T04:27:26.000Z",
       "sourceHash": "4385dfa789fbf7a6006b364eb8f31918d51c1a6a17c9a2f253cc7478e36af767",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Jacquelyn Neal",
+          "evidence": "Jacquelyn Neal is facilitating a workshop at Vanderbilt on AI literacy the first weekend of February. She will do a run through of a hands-on activity and get some feedback from the group.",
+          "provenance": "source"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -855,7 +872,13 @@
       "modifiedAt": "2026-02-06T18:16:34.000Z",
       "sourceHash": "fe3c3219679ae3516abc2d8817d742f73a9d1290075e6dd9b0fe66e5da2ac87c",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -875,7 +898,13 @@
       "modifiedAt": "2026-03-03T02:17:25.000Z",
       "sourceHash": "2d630b1417827e861df9616a06b2a72a2cb4b4172b7312caed245100ab12f2e8",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Jack Francis",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -885,7 +914,13 @@
       "modifiedAt": "2026-03-16T03:18:40.000Z",
       "sourceHash": "ee9a7d550e6a6e549279cc07736488535ac84c0bebb64209239db1cb4c980e5a",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -930,7 +965,13 @@
       "modifiedAt": "2026-04-11T13:08:26.000Z",
       "sourceHash": "cee996beba20adfd87cfece97697368f1a65a0e3c604183374830ba9b5ec95c4",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -955,7 +996,18 @@
       "modifiedAt": "2026-05-09T14:54:31.000Z",
       "sourceHash": "9a69a1cc64b67571e931ed359d0c2655ae02c131313f395b36524e3302061b20",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "David Showalter",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        },
+        {
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -1020,7 +1072,13 @@
       "modifiedAt": "2026-06-13T12:38:44.000Z",
       "sourceHash": "9aa8704547753a67079f6a119fa97aa0716a1a43bedd67e8356017ab14e945a0",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "Josh Phillips",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -1045,7 +1103,13 @@
       "modifiedAt": "2026-06-29T13:25:30.000Z",
       "sourceHash": "c58cb2bcbd646a27c3eb89a05e3d9f39e4ab84466e83e302b6db18501a9cf42e",
       "theme": "building",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -1055,7 +1119,13 @@
       "modifiedAt": "2026-07-06T16:11:25.000Z",
       "sourceHash": "fcbaf6c9700142276752cb47fe5b460aeb2932026c53bf3bf413b2bc6e8b8c89",
       "theme": "research",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "evidence": "Operator-confirmed presenter attribution.",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {

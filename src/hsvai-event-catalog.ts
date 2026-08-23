@@ -10,6 +10,7 @@ export type HsvaiEventTheme = typeof HSVAI_EVENT_THEMES[number];
 export interface HsvaiCatalogPerson {
   name: string;
   evidence: string;
+  provenance?: "source" | "operator";
 }
 
 export interface HsvaiEventCatalogSource {
@@ -64,6 +65,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isTheme(value: unknown): value is HsvaiEventTheme {
   return typeof value === "string" && HSVAI_EVENT_THEMES.includes(value as HsvaiEventTheme);
+}
+
+function isCatalogPerson(value: unknown): value is HsvaiCatalogPerson {
+  return isRecord(value) && typeof value.name === "string" && Boolean(value.name.trim()) &&
+    typeof value.evidence === "string" && Boolean(value.evidence.trim()) &&
+    (value.provenance === undefined || value.provenance === "source" || value.provenance === "operator");
 }
 
 function sourceEvidence(text: string, matchIndex: number): string {
@@ -139,6 +146,7 @@ function parseCatalog(value: unknown, path: string): HsvaiEventCatalog {
     if (!isRecord(event) || typeof event.sourceId !== "string" ||
       typeof event.sourceHash !== "string" || !isTheme(event.theme) ||
       !Array.isArray(event.speakers) || !Array.isArray(event.facilitators) ||
+      !event.speakers.every(isCatalogPerson) || !event.facilitators.every(isCatalogPerson) ||
       sourceIds.has(event.sourceId)) {
       throw new Error(`Invalid HSVAI event catalog entry: ${path}`);
     }
@@ -154,8 +162,20 @@ export function loadHsvaiEventCatalog(
   const baseline = parseCatalog(JSON.parse(readFileSync(baselinePath, "utf8")), baselinePath);
   if (!existsSync(runtimePath)) return baseline;
   const runtime = parseCatalog(JSON.parse(readFileSync(runtimePath, "utf8")), runtimePath);
+  return mergeHsvaiEventCatalog(baseline, runtime);
+}
+
+export function mergeHsvaiEventCatalog(
+  baseline: HsvaiEventCatalog,
+  runtime: HsvaiEventCatalog
+): HsvaiEventCatalog {
   const merged = new Map(baseline.events.map((event) => [event.sourceId, event]));
-  for (const event of runtime.events) merged.set(event.sourceId, event);
+  for (const event of runtime.events) {
+    const reviewed = merged.get(event.sourceId);
+    if (!reviewed || reviewed.sourceHash !== event.sourceHash) {
+      merged.set(event.sourceId, event);
+    }
+  }
   return { version: 1, events: [...merged.values()] };
 }
 

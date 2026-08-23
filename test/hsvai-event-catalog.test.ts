@@ -4,6 +4,7 @@ import {
   enrichHsvaiEventCatalog,
   eventCatalogSourceHash,
   extractDeterministicEventMetadata,
+  mergeHsvaiEventCatalog,
   OpenAiEventExtractionModel,
   type HsvaiEventCatalogSource
 } from "../src/hsvai-event-catalog.js";
@@ -74,6 +75,36 @@ describe("HSVAI event catalog", () => {
       })
     ]);
     expect(catalogEntryForEvent(current, catalog)).toEqual(existingEntry);
+  });
+
+  it("keeps reviewed metadata over a same-source runtime entry", () => {
+    const event = source("event:reviewed", "Synthetic source text.");
+    const reviewed = {
+      sourceId: event.sourceId,
+      title: event.title,
+      sourceUrl: event.url,
+      modifiedAt: event.modifiedAt,
+      sourceHash: eventCatalogSourceHash(event),
+      theme: "community" as const,
+      speakers: [{
+        name: "Reviewed Speaker",
+        evidence: "Operator-confirmed presenter attribution.",
+        provenance: "operator" as const
+      }],
+      facilitators: []
+    };
+    const generated = { ...reviewed, speakers: [] };
+
+    expect(mergeHsvaiEventCatalog(
+      { version: 1, events: [reviewed] },
+      { version: 1, events: [generated] }
+    ).events).toEqual([reviewed]);
+
+    const changed = { ...generated, sourceHash: "changed-source-hash" };
+    expect(mergeHsvaiEventCatalog(
+      { version: 1, events: [reviewed] },
+      { version: 1, events: [changed] }
+    ).events).toEqual([changed]);
   });
 
   it("uses the configured provider and canonicalizes model people from source", async () => {

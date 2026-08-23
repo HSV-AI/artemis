@@ -40,12 +40,16 @@ select a different overlay path.
 Both files contain version `1` and one record per event. Each record retains the
 source ID, title, URL, modification time, SHA-256 source hash, one theme, and
 speaker and facilitator arrays. Themes are exactly `research`, `building`, or
-`community`. Each person includes the source spelling of their name and a
-source-text evidence line.
+`community`. Each person includes their canonical graph name, evidence, and
+optional provenance. Model and deterministic entries use source text. Reviewed
+operator corrections may use `provenance: operator` with an explicit
+operator-confirmation marker when the event page omits the presenter.
 
-Runtime records replace baseline records with the same source ID. A record is
-applied only when its source hash matches the current normalized event. New or
-changed events without a matching record are synchronized with
+Runtime records add new events and replace stale baseline records when their
+source hash differs. A reviewed baseline record wins over generated runtime data
+for the same source ID and hash, so operator corrections are not hidden by an
+older overlay. A record is applied only when its source hash matches the current
+normalized event. New or changed events without a matching record are synchronized with
 `hsvai.people_status = pending`, no people edges, and no theme. Matching records
 use `complete` and populate `hsvai.theme`, `hsvai.speakers`, and
 `hsvai.facilitators`.
