@@ -23,10 +23,10 @@ The following behavior is fixed:
 - Every Discord message event is logged to the console and SQLite before filtering, including DMs, bot messages, unauthorized messages, unmentioned messages, and messages from disallowed channels.
 - Accepted conversations retain their history in SQLite across restarts. There is no automatic retention or deletion.
 - Model or harness failures are logged and persisted, but produce no Discord response.
-- The model may use explicitly registered custom tools: `web_fetch`, plus six GitHub tools when a token is configured. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
+- The model may use explicitly registered custom tools: `web_fetch`, six GitHub tools when a token is configured, and six conversation-scoped Dgraph memory tools. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Group/channel (guild) assistant responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) self-contained Discord messages per turn. DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind (`guild` vs `dm`).
-- Base Compose retains Ollama as a separate service and model-preparation job. An optional provider-specific Compose path may run only Artemis and mount a local provider definition read-only.
+- Base Compose retains Ollama as a separate service, the model-preparation job, persistent Dgraph, and Artemis. An optional provider-specific Compose path may omit Ollama while retaining Dgraph.
 
 The following may be replaced:
 
@@ -52,8 +52,10 @@ flowchart LR
     Harness --> Model[Model adapter]
     Harness --> WebFetch[web_fetch tool]
     Harness --> GitHubTools[Token-gated GitHub tools]
+    Harness --> MemoryTools[Memory tools]
     WebFetch --> Web[HTTP or HTTPS page]
     GitHubTools --> GitHubAPI[GitHub API]
+    MemoryTools --> Dgraph[(Dgraph facts)]
     Model --> Provider[Configured OpenAI-compatible endpoint]
     Commands -- clear-session only --> Store
     Commands --> Discord
@@ -179,6 +181,9 @@ health_check() -> success or error
 
 generate(
   logical_session_id,
+  stable_conversation_key,
+  triggering_discord_message_id,
+  triggering_discord_author_id,
   ordered_history,
   current_prompt
 ) -> {
@@ -235,7 +240,7 @@ The model-facing implementation must:
 - Apply a provider definition's explicit reasoning effort to every model request when configured.
 - Supply the complete stored history for the logical session in order.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
-- Enable only `web_fetch` and, when configured, the six GitHub custom tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
+- Enable only `web_fetch`, the six GitHub custom tools when configured, and the six scoped memory tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply the complete identity instructions from the profile selected by `PERSONA_PROFILE`, which defaults to `artemis` and includes `wartermis` as a bundled alternative. Keep each profile in its own source file and compose the fixed Discord instruction after it. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, and tool registry.
 - Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
@@ -271,6 +276,19 @@ This is a defense-in-depth transformation, not a claim that arbitrary web conten
 
 When `GITHUB_TOKEN` or `GITHUB_ALLOWED_REPOSITORY` is blank, register no GitHub tools. Otherwise register `github_search`, `github_list`, `github_fetch`, `github_create`, `github_update`, and `github_upload_image`. These cover repository, issue, pull-request, branch, code, commit, contents, comment, and image operations through the GitHub REST API. Before any request, case-insensitively match the target `owner/repository` against the configured comma-separated allowlist. Require explicit `owner` and `repo` arguments for repository-scoped operations. A search may omit them to run once per allowed repository and merge its bounded results; never issue a global search. Do not require a local git checkout. Sanitize and label GitHub read results as untrusted external data using the same defenses as `web_fetch`. The registered write-tool guidelines tell the model to mutate only when the current Discord user explicitly requests that specific change. The current execution layer validates parameters and repository scope but does not independently reconstruct conversational intent. Do not recreate CASE-specific issue watches.
 
+### Memory tool contract
+
+Artemis registers `memory_remember`, `memory_recall`, `memory_supersede`,
+`memory_forget`, `memory_believed_at`, and `memory_audit` for every profile.
+Bind every operation to the stable conversation key in application code; never
+accept a model-supplied scope. Bind writes to the triggering Discord author and
+message IDs. Writes occur only for an explicit current-user request and store no
+secrets. Remember inserts one fact. Supersede atomically tombstones an active
+same-scope fact and links its successor. Forget tombstones without hard deletion.
+Recall returns only current facts; historical and audit reads retain ended facts.
+Memory survives PI session clears because its identity is the conversation key.
+See [Graph memory](memory.md) for the authoritative schema and failure contract.
+
 ### Using a language without a PI SDK
 
 Prefer one of these approaches:
@@ -303,6 +321,10 @@ Before connecting Discord, perform a bounded health check against the model serv
 ## Persistence contract
 
 SQLite is the durable system of record. Open it before connecting Discord, create its parent directory when needed, enable foreign keys, enable WAL mode, and apply versioned migrations.
+
+Dgraph is the durable system of record for memory facts. Its named volume
+survives process and Compose restarts. Apply the additive fact schema before
+Discord login; fail startup if that operation fails.
 
 The minimal logical schema is:
 
@@ -409,6 +431,7 @@ Load local environment configuration from `.env` or the process environment, opt
 | `PERSONA_PROFILE` | No | `artemis` | Named profile ID: `artemis` or `wartermis`. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token; blank disables all GitHub tools. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` in application code | Comma-separated GitHub repository allowlist; blank disables GitHub tools. The supplied `.env.example` explicitly sets only `HSV-AI/artemis`. |
+| `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint required by memory. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
 | `LOG_LEVEL` | No | `info` | Minimum routine level: `debug`, `info`, `warn`, or `error`. |
 
@@ -467,7 +490,7 @@ Each stage should finish with tests before the next begins.
 
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
-- Register and allowlist `web_fetch` plus token-gated GitHub tools, disable every built-in tool, and build the Artemis system instruction from conversation kind and the registered-tool metadata, including the Capability Gap Protocol.
+- Register and allowlist `web_fetch`, token-gated GitHub tools, and scoped memory tools; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
 - Add configured provider health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
 
@@ -476,8 +499,8 @@ Each stage should finish with tests before the next begins.
 - Build a multi-stage application image containing only the application and runtime dependencies.
 - Run the final application process as a non-root user.
 - Ensure the mounted SQLite directory is created and writable before dropping privileges.
-- Preserve the base `ollama`, model-preparation, and `artemis` Compose services.
-- Persist Ollama and Artemis data in separate volumes.
+- Preserve the base `ollama`, model-preparation, `dgraph`, and `artemis` Compose services.
+- Persist Ollama, Dgraph, and Artemis data in separate volumes.
 - Allow deployment-owned Compose overrides to select externally managed providers.
 - In an override, mount the selected model config read-only, set its in-container path, and preserve the SQLite data volume.
 - Document `docker compose up --build` as the one-command startup workflow after initial credentials/sign-in are prepared.
@@ -518,13 +541,14 @@ At minimum, prove all of the following:
 - Every guild and guild-thread response chunk replies to the triggering message; DM chunks use ordinary sends.
 - `web_fetch` rejects non-HTTP(S) targets, fetches directly without model credentials, bounds content, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and publish the explicit-mutation guideline in the model's tool registry.
+- Memory tools are present for every profile; every operation uses the immutable conversation scope, writes retain Discord provenance, corrections and forgetting create tombstones, and scope isolation survives PI session clearing.
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Guild sessions receive the channel-limits system-prompt block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3`, self-contained-thought rule) while DM sessions receive no limit messaging; prompt selection is deterministic from the conversation kind.
 - Every outbound Discord message (guild reply, DM send, chunked response, and slash-command reply) carries the `SuppressEmbeds` flag by default; `DISCORD_SUPPRESS_EMBEDS=false` omits it globally, and `DISCORD_EMBEDS_ALLOWED_CHANNEL_ID` omits it per channel with threads resolving through the parent channel.
 - Console logs continue when SQLite log persistence fails, without recursive failures.
 - Startup fails before Discord login when configuration, database migration, or model health validation fails.
-- The application image contains no model server; base Compose starts Ollama separately, while deployment-owned overrides may select an external provider.
+- The application image contains no model or Dgraph server; base Compose starts both separately, while deployment-owned overrides may select an external provider.
 
 ## Language-port checklist
 
@@ -557,6 +581,7 @@ After automated tests pass:
 8. Restart Artemis and confirm the next DM and guild turns retain their respective histories without crossing contexts.
 9. Force a model failure and confirm Discord receives nothing while console and SQLite contain correlated diagnostics.
 10. Inspect the SQLite volume and confirm conversations, sessions, messages, events, application logs, and incoming-message audit rows are durable.
+11. Explicitly remember and recall a non-sensitive fact, clear the PI session, and confirm the fact remains available only in the same DM or parent guild channel.
 
 Use test Discord credentials and non-sensitive content for this check because raw messages and model metadata are retained indefinitely.
 

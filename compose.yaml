@@ -21,6 +21,18 @@ services:
       ollama:
         condition: service_healthy
 
+  dgraph:
+    image: dgraph/standalone:v25.4.0
+    restart: unless-stopped
+    volumes:
+      - dgraph-data:/dgraph
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   artemis:
     build:
       context: .
@@ -30,6 +42,7 @@ services:
         required: true
     environment:
       OLLAMA_BASE_URL: http://ollama:11434/v1
+      DGRAPH_URL: http://dgraph:8080
       SQLITE_PATH: /data/artemis.sqlite
     volumes:
       - artemis-data:/data
@@ -38,7 +51,10 @@ services:
         condition: service_healthy
       ollama-model:
         condition: service_completed_successfully
+      dgraph:
+        condition: service_healthy
 
 volumes:
   artemis-data:
+  dgraph-data:
   ollama-data:
