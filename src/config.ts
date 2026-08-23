@@ -46,6 +46,8 @@ export interface ArtemisConfig {
   githubToken: string;
   githubAllowedRepositories: readonly string[];
   dgraphUrl: string;
+  memoryEmbedUrl: string;
+  memoryInject: boolean;
   sqlitePath: string;
   logLevel: LogLevel;
 }
@@ -96,6 +98,11 @@ function parseUrl(value: string, name: string): string {
     throw new Error(`Invalid URL configuration: ${name}`);
   }
   return value.replace(/\/$/, "");
+}
+
+function parseOptionalUrl(value: string | undefined, name: string): string {
+  const normalized = value?.trim() ?? "";
+  return normalized ? parseUrl(normalized, name) : "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -223,6 +230,12 @@ export function parseConfig(
     githubToken: env.GITHUB_TOKEN?.trim() ?? "",
     githubAllowedRepositories: parseAllowedRepositories(env.GITHUB_ALLOWED_REPOSITORY),
     dgraphUrl: parseUrl(valueOrDefault(env, "DGRAPH_URL", DEFAULT_DGRAPH_URL), "DGRAPH_URL"),
+    memoryEmbedUrl: parseOptionalUrl(env.MEMORY_EMBED_URL, "MEMORY_EMBED_URL"),
+    memoryInject: parseBoolean(
+      valueOrDefault(env, "MEMORY_INJECT", "false"),
+      "MEMORY_INJECT",
+      false
+    ),
     sqlitePath: valueOrDefault(env, "SQLITE_PATH", DEFAULT_SQLITE_PATH),
     logLevel: parseLogLevel(valueOrDefault(env, "LOG_LEVEL", "info"))
   };

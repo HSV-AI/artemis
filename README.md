@@ -63,6 +63,8 @@ cp .env.example .env
 | `GITHUB_TOKEN` | No | Empty | GitHub API token. A blank value disables every GitHub tool. Grant only the repository permissions needed for the desired read or write operations. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `HSV-AI/artemis` | Comma-separated `owner/repository` allowlist. A blank list disables every GitHub tool. Matching is case-insensitive. |
 | `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint used by the memory tools. |
+| `MEMORY_EMBED_URL` | No | Empty | OpenAI-compatible embeddings base URL. Blank disables semantic retrieval and uses token overlap for novelty checks. |
+| `MEMORY_INJECT` | No | `false` | When `true`, inject a bounded snapshot of current memories once per PI session. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error`. |
 
@@ -127,7 +129,8 @@ The base Compose file starts `ollama`, the `ollama-model` pull job, Dgraph, and
 `artemis`. Deployments using another provider should layer their own Compose
 override over this file. Artemis checks the selected provider's `/models`
 endpoint and initializes the Dgraph schema before connecting to Discord. The
-[graph memory protocol](design/memory.md) defines memory behavior and retention.
+[graph memory protocol](design/memory.md) defines ranked retrieval, stable
+session snapshots, novelty control, and retention.
 
 View operator logs with:
 

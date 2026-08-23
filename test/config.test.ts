@@ -50,6 +50,8 @@ describe("parseConfig", () => {
       githubToken: "",
       githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
       dgraphUrl: DEFAULT_DGRAPH_URL,
+      memoryEmbedUrl: "",
+      memoryInject: false,
       sqlitePath: DEFAULT_SQLITE_PATH,
       logLevel: "info"
     });
@@ -80,6 +82,8 @@ describe("parseConfig", () => {
       GITHUB_TOKEN: " github-secret ",
       GITHUB_ALLOWED_REPOSITORY: " mbrooks/artemis, HSV-AI/artemis, MBROOKS/ARTEMIS ",
       DGRAPH_URL: "http://memory.example:8080/",
+      MEMORY_EMBED_URL: "https://embeddings.example/v1/",
+      MEMORY_INJECT: "true",
       SQLITE_PATH: ":memory:",
       LOG_LEVEL: "debug"
     }, { ...providerDefinition, baseUrl: "https://model.example/v1/" });
@@ -97,6 +101,8 @@ describe("parseConfig", () => {
       githubToken: "github-secret",
       githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
       dgraphUrl: "http://memory.example:8080",
+      memoryEmbedUrl: "https://embeddings.example/v1",
+      memoryInject: true,
       sqlitePath: ":memory:",
       logLevel: "debug"
     });
@@ -146,6 +152,14 @@ describe("parseConfig", () => {
       DISCORD_TOKEN: "token",
       DGRAPH_URL: "file:///data/dgraph"
     })).toThrow("Invalid URL configuration: DGRAPH_URL");
+    expect(() => parseConfig({
+      DISCORD_TOKEN: "token",
+      MEMORY_EMBED_URL: "file:///models/embeddings"
+    })).toThrow("Invalid URL configuration: MEMORY_EMBED_URL");
+    expect(() => parseConfig({
+      DISCORD_TOKEN: "token",
+      MEMORY_INJECT: "sometimes"
+    })).toThrow("Invalid configuration: MEMORY_INJECT must be true or false");
   });
 
   it("loads model settings from MODEL_CONFIG_PATH", () => {

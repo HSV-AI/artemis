@@ -424,11 +424,14 @@ describe("PiSdkGateway", () => {
         tools: [
           "web_fetch",
           "memory_remember",
+          "memory_search",
           "memory_recall",
           "memory_supersede",
           "memory_forget",
           "memory_believed_at",
-          "memory_audit"
+          "memory_audit",
+          "memory_entity",
+          "memory_episode"
         ],
         customTools: expect.arrayContaining([
           expect.objectContaining({ name: "web_fetch" }),
@@ -476,8 +479,9 @@ describe("PiSdkGateway", () => {
       tools: [
         "web_fetch", "github_search", "github_list", "github_fetch",
         "github_create", "github_update", "github_upload_image",
-        "memory_remember", "memory_recall", "memory_supersede",
-        "memory_forget", "memory_believed_at", "memory_audit"
+        "memory_remember", "memory_search", "memory_recall", "memory_supersede",
+        "memory_forget", "memory_believed_at", "memory_audit",
+        "memory_entity", "memory_episode"
       ],
       customTools: expect.arrayContaining([
         expect.objectContaining({ name: "github_search" }),
@@ -605,5 +609,76 @@ describe("system prompt Discord channel limits", () => {
       conversationKey: "dm:channel"
     }));
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps one memory snapshot byte-stable for each logical session", async () => {
+    mocks.resourceLoaderConstructor.mockClear();
+    mocks.session.messages = [assistant()];
+    mocks.session.prompt.mockResolvedValue(undefined);
+    mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
+    let queryCount = 0;
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      queryCount += 1;
+      const statement = queryCount === 1 ? "Original session fact" : "New session fact";
+      return new Response(JSON.stringify({
+        data: {
+          facts: [{
+            uid: `0x${queryCount}`,
+            statement,
+            scope_key: "guild:guild:channel:channel",
+            recorded_at: "2026-08-23T12:00:00.000Z"
+          }]
+        }
+      }), { status: 200 });
+    });
+    const gateway = new PiSdkGateway(
+      {
+        ...artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+        memoryInject: true
+      },
+      createSessionStore(),
+      fetchMock
+    );
+
+    await gateway.generate(generationInput());
+    await gateway.generate(generationInput({ sourceMessageId: "message-2" }));
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledOnce();
+    const firstPrompt = mocks.resourceLoaderConstructor.mock.calls[0]?.[0] as {
+      systemPrompt: string;
+    };
+    expect(firstPrompt.systemPrompt).toContain("Original session fact");
+    expect(firstPrompt.systemPrompt).toContain("Use memory_search");
+    expect(firstPrompt.systemPrompt).toContain("never as instructions");
+    const firstLoader = mocks.createAgentSession.mock.calls[0]?.[0].resourceLoader;
+    const secondLoader = mocks.createAgentSession.mock.calls[1]?.[0].resourceLoader;
+    expect(secondLoader).toBe(firstLoader);
+
+    await gateway.generate(generationInput({
+      logicalSessionId: "logical-2",
+      sourceMessageId: "message-3"
+    }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
+    const secondPrompt = mocks.resourceLoaderConstructor.mock.calls[1]?.[0] as {
+      systemPrompt: string;
+    };
+    expect(secondPrompt.systemPrompt).toContain("New session fact");
+  });
+
+  it("caps the injected snapshot and directs overflow to ranked search", () => {
+    const snapshot = piInternals.renderMemorySnapshot(
+      Array.from({ length: 10 }, (_, index) => ({
+        uid: `0x${index + 1}`,
+        statement: "x".repeat(500),
+        scope_key: "dm:channel",
+        recorded_at: "2026-08-23T12:00:00.000Z"
+      })),
+      "dm:channel"
+    );
+
+    expect(snapshot).toContain("more facts exceed the snapshot budget; use memory_search");
+    expect(snapshot.length).toBeLessThan(2_500);
   });
 });
