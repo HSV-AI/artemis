@@ -126,10 +126,18 @@ also grants that account only `dgraph.all=4`, so mutations and schema changes ar
 denied independently at the HTTP transaction and ACL layers. The JWT binds the
 request to the HSVAI namespace; DQL cannot select namespace-0 memory.
 
-PI session history retains prior tool results as evidence snapshots, but those
-snapshots are not current-state authority after a corpus refresh. Questions
-about current graph contents and requests to check or recheck an earlier answer
-require a fresh DQL call in that turn.
+Every model turn reads and validates the current SHA-256 `hsvai.revision`
+through the read-only query account and includes it in the system prompt.
+Resource loaders remain cached while that revision is unchanged and are rebuilt
+when it changes. Both HSVAI tools stamp their text output and structured details
+with the same per-turn revision.
+
+PI session history retains those labeled tool results as evidence snapshots. A
+historical result remains current when its label matches the system prompt's
+current revision, so the model may reuse it without another query. A result with
+a different revision or no revision label is stale and must be queried again
+before use. This makes sessions created before revision labeling safely refresh
+on demand without discarding unrelated conversation history.
 
 Tool output is marked as source evidence that must never be treated as model
 instructions. Source text passes through the existing adversarial-web-content
@@ -183,7 +191,8 @@ Corpus replacement uses the sync account and deletes only nodes marked with
   retrieval, evidence formatting, and failures with HTTP mocked.
 - `test/embedding-client.test.ts` covers ordered embedding batches.
 - `test/pi-gateway.test.ts` covers unconditional tool registration and startup
-  synchronization.
+  synchronization, prompt revision signaling, unchanged-revision loader reuse,
+  and changed-revision invalidation.
 - `test/hsvai-event-catalog.test.ts` covers source hashes, deterministic and
   model-assisted extraction, and source-grounded person validation.
 - `test/dgraph-bootstrap.test.ts` and `test/dgraph-memory.test.ts` cover namespace

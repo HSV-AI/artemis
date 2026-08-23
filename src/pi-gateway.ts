@@ -88,7 +88,8 @@ export function buildSystemPrompt(
   kind: ConversationKind,
   persona: PersonaProfile,
   tools: readonly ToolRegistryEntry[] = [],
-  memorySnapshot = ""
+  memorySnapshot = "",
+  hsvaiCorpusRevision = ""
 ): string {
   const channelLimits = kind === "guild" ? CHANNEL_LIMITS_PROMPT_BLOCK : "";
   const registry = tools.length === 0
@@ -104,7 +105,13 @@ export function buildSystemPrompt(
           return lines.join("\n");
         })
         .join("\n");
-  return `${persona.instructions.trim()} ${DISCORD_BEHAVIOR_PROMPT}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}${memorySnapshot}`;
+  const corpusState = hsvaiCorpusRevision
+    ? "\n\n## HSVAI Corpus State\n" +
+      `Current corpus revision: ${hsvaiCorpusRevision}. ` +
+      "Historical HSVAI tool results with this revision remain current and may be reused. " +
+      "Results with a different revision or no revision label are stale and must be queried again before use."
+    : "";
+  return `${persona.instructions.trim()} ${DISCORD_BEHAVIOR_PROMPT}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}${memorySnapshot}${corpusState}`;
 }
 
 function renderMemorySnapshot(facts: MemoryFact[], scopeKey: string): string {
@@ -167,7 +174,10 @@ function extractGeneration(message: AssistantMessage): PiGenerationResult {
 
 export class PiSdkGateway implements PiGateway {
   private modelRuntime: ModelRuntime | undefined;
-  private readonly resourceLoaders = new Map<string, DefaultResourceLoader>();
+  private readonly resourceLoaders = new Map<string, {
+    hsvaiCorpusRevision: string;
+    loader: DefaultResourceLoader;
+  }>();
   private customTools: ReturnType<typeof createCustomTools> = [];
   private readonly memory: GraphMemory;
   private readonly knowledge: HsvaiKnowledge;
@@ -255,10 +265,11 @@ export class PiSdkGateway implements PiGateway {
 
   public async generate(input: PiGenerationInput): Promise<PiGenerationResult> {
     await this.initialize();
+    const hsvaiCorpusRevision = await this.knowledge.corpusRevision();
     const customTools = [
       ...this.customTools,
-      createHsvaiKnowledgeTool(this.knowledge),
-      createHsvaiGraphQueryTool(this.knowledge),
+      createHsvaiKnowledgeTool(this.knowledge, hsvaiCorpusRevision),
+      createHsvaiGraphQueryTool(this.knowledge, hsvaiCorpusRevision),
       ...createMemoryTools(this.memory, {
         scopeKey: input.conversationKey,
         authorId: input.authorId,
@@ -270,7 +281,7 @@ export class PiSdkGateway implements PiGateway {
     if (!modelRuntime) {
       throw new Error("PI gateway failed to initialize");
     }
-    const resourceLoader = await this.getResourceLoader(input, customTools);
+    const resourceLoader = await this.getResourceLoader(input, customTools, hsvaiCorpusRevision);
     const model = modelRuntime.getModel(
       this.config.model.providerId,
       this.config.model.modelId
@@ -368,14 +379,15 @@ export class PiSdkGateway implements PiGateway {
 
   private async getResourceLoader(
     input: PiGenerationInput,
-    tools: readonly ToolRegistryEntry[]
+    tools: readonly ToolRegistryEntry[],
+    hsvaiCorpusRevision: string
   ): Promise<DefaultResourceLoader> {
     const cacheKey = this.config.memoryInject
       ? input.logicalSessionId
       : input.conversationKind;
     const existing = this.resourceLoaders.get(cacheKey);
-    if (existing) {
-      return existing;
+    if (existing?.hsvaiCorpusRevision === hsvaiCorpusRevision) {
+      return existing.loader;
     }
     const memorySnapshot = this.config.memoryInject
       ? renderMemorySnapshot(
@@ -395,11 +407,12 @@ export class PiSdkGateway implements PiGateway {
         input.conversationKind,
         this.config.persona,
         tools,
-        memorySnapshot
+        memorySnapshot,
+        hsvaiCorpusRevision
       )
     });
     await resourceLoader.reload();
-    this.resourceLoaders.set(cacheKey, resourceLoader);
+    this.resourceLoaders.set(cacheKey, { hsvaiCorpusRevision, loader: resourceLoader });
     return resourceLoader;
   }
 }

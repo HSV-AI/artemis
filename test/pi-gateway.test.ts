@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => {
     loaderReload: vi.fn().mockResolvedValue(undefined),
     hsvaiSourceConstructor: vi.fn(),
     hsvaiInitializeAndSync: vi.fn().mockResolvedValue(undefined),
+    hsvaiCorpusRevision: vi.fn().mockResolvedValue("revision-1"),
     settings: {}
   };
 });
@@ -64,6 +65,7 @@ vi.mock("../src/hsvai-knowledge.js", () => ({
   },
   HsvaiKnowledge: class HsvaiKnowledge {
     public initializeAndSync = mocks.hsvaiInitializeAndSync;
+    public corpusRevision = mocks.hsvaiCorpusRevision;
     public search = vi.fn().mockResolvedValue([]);
     public queryDql = vi.fn().mockResolvedValue({});
   },
@@ -258,6 +260,7 @@ describe("PiSdkGateway", () => {
     mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
     mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
     mocks.loaderReload.mockResolvedValue(undefined);
+    mocks.hsvaiCorpusRevision.mockResolvedValue("revision-1");
     mocks.session.prompt.mockResolvedValue(undefined);
     mocks.session.messages = [assistant()];
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
@@ -496,6 +499,11 @@ describe("PiSdkGateway", () => {
         systemPrompt: expect.stringContaining("- web_fetch: Fetch and extract text from a specific URL")
       })
     );
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemPrompt: expect.stringContaining("Current corpus revision: revision-1")
+      })
+    );
     expect(mocks.session.dispose).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ text: "answer", model: "model" });
   });
@@ -643,6 +651,7 @@ describe("system prompt Discord channel limits", () => {
     mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
     mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
     mocks.loaderReload.mockResolvedValue(undefined);
+    mocks.hsvaiCorpusRevision.mockResolvedValue("revision-1");
   });
 
   it("applies channel limits only to guild sessions", async () => {
@@ -670,6 +679,29 @@ describe("system prompt Discord channel limits", () => {
       conversationKey: "dm:channel"
     }));
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
+  });
+
+  it("rebuilds the resource loader when the HSVAI corpus revision changes", async () => {
+    mocks.resourceLoaderConstructor.mockClear();
+    mocks.hsvaiCorpusRevision
+      .mockResolvedValueOnce("revision-1")
+      .mockResolvedValueOnce("revision-2");
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      vi.fn()
+    );
+
+    await gateway.generate(generationInput());
+    await gateway.generate(generationInput({ sourceMessageId: "message-2" }));
+
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
+    const prompts = mocks.resourceLoaderConstructor.mock.calls.map(
+      ([options]) => (options as { systemPrompt: string }).systemPrompt
+    );
+    expect(prompts[0]).toContain("Current corpus revision: revision-1");
+    expect(prompts[1]).toContain("Current corpus revision: revision-2");
+    expect(prompts[1]).toContain("Results with a different revision or no revision label are stale");
   });
 
   it("keeps one memory snapshot byte-stable for each logical session", async () => {
