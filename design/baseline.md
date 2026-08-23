@@ -4,7 +4,7 @@ Status: Implemented baseline
 
 Source: [HSV-AI/artemis issue #1](https://github.com/HSV-AI/artemis/issues/1)
 
-Last updated: 2026-08-22
+Last updated: 2026-08-23
 
 ## Summary
 
@@ -14,7 +14,7 @@ The implementation uses PI and the PI SDK as the conversational harness, SQLite 
 
 ## Design document map
 
-Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). [Discord link-embed suppression](discord-link-embeds.md) enforces removal of link-preview cards on every outbound Discord message at the application layer, independent of the model, with a global default and per-channel override. [Persona profiles](persona-profile.md) let deployments vary identity and tone while preserving the common behavioral boundary. [Graph memory](memory.md) defines the Dgraph-backed fact lifecycle and PI tools. [HSVAI GraphRAG](hsvai-graphrag.md) defines synchronization and source-grounded retrieval over public Huntsville AI transcripts and events. [Native PI session persistence](pi-session-persistence.md) preserves PI tool, compaction, tree, and usage entries directly in SQLite across turns and restarts. The complete catalog is maintained in the [design document index](README.md).
+Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). [Discord link-embed suppression](discord-link-embeds.md) enforces removal of link-preview cards on every outbound Discord message at the application layer, independent of the model, with a global default and per-channel override. [Persona profiles](persona-profile.md) let deployments vary identity and tone while preserving the common behavioral boundary. [Graph memory](memory.md) defines the Dgraph-backed fact lifecycle and PI tools. [Dgraph access control and namespaces](dgraph-access-control.md) defines authenticated service accounts and database-enforced separation between memory and public knowledge. [HSVAI GraphRAG](hsvai-graphrag.md) defines synchronization, hybrid retrieval, and direct read-only DQL over public Huntsville AI transcripts and events. [Native PI session persistence](pi-session-persistence.md) preserves PI tool, compaction, tree, and usage entries directly in SQLite across turns and restarts. The complete catalog is maintained in the [design document index](README.md).
 
 ## Goals
 
@@ -27,7 +27,7 @@ Detailed protocols and major features live in focused subdocuments so this basel
 - Let deployments select a distinct bot identity and conversational style without forking application code or replacing fixed safety and capability rules.
 - Let the model fetch web pages and, when configured, operate on GitHub through explicitly allowlisted custom tools while keeping built-in coding tools disabled.
 - Let Artemis explicitly retain novel facts, correct, forget, recall, rank, query past beliefs, and audit facts without sharing them across Discord conversation keys.
-- Let Artemis search connected, cited evidence from Huntsville AI transcripts and calendar events.
+- Let Artemis search connected, cited evidence and plan arbitrary read-only DQL over Huntsville AI transcripts and calendar events.
 - Show a typing indicator while generating and attach every guild response to its triggering question with a Discord reply.
 - Let a guild user continue a conversation by replying directly to an Artemis message without repeating a mention.
 - Record enough activity, errors, chat history, and available model diagnostics for operators to debug conversations.
@@ -54,7 +54,7 @@ Detailed protocols and major features live in focused subdocuments so this basel
 | Channel-aware response limits | Group/channel (guild) responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained Discord messages per turn; DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind. |
 | Isolated, persistent context | Associate each conversation key with one active logical session, store its native PI entries in SQLite, and restore those entries directly for later turns without replaying the normalized transcript. |
 | Long-term memory | Bind each memory tool call to the immutable Discord conversation key, author ID, source message ID, and durable PI-session episode; persist facts, embeddings, entity links, and tombstones in Dgraph across PI sessions; optionally inject one byte-stable bounded snapshot per session. |
-| Huntsville AI knowledge | Synchronize public transcript posts and calendar events before Discord login, persist their source graph separately from memory, and expose read-only hybrid retrieval with stable citations. |
+| Huntsville AI knowledge | Synchronize public transcript posts and calendar events before Discord login, isolate their source graph from memory with a Dgraph namespace, and expose both cited hybrid retrieval and arbitrary read-only DQL. |
 | Configurable model and runtime | Read provider metadata from an optional local JSON file and credentials plus other runtime settings from environment variables loaded through `.env`. |
 | Reconnection | Use the Discord client's reconnect and resume behavior, and log connection lifecycle events. |
 | Debuggable operation | Emit structured application logs and persist sessions, chat messages, model metadata, and available reasoning or diagnostics. |
@@ -102,10 +102,10 @@ flowchart LR
         PI --> WebFetch[web_fetch tool<br/>sanitized external content]
         PI --> GitHub[GitHub tools<br/>token-gated and sanitized]
         PI --> Memory[Memory tools<br/>explicit and conversation-scoped]
-        PI --> Knowledge[HSVAI graph search<br/>shared and read-only]
+        PI --> Knowledge[HSVAI hybrid search and DQL<br/>shared and read-only]
         WebFetch --> Web[HTTP or HTTPS page]
         GitHub --> GitHubAPI[GitHub API]
-        Memory --> Dgraph[(Dgraph<br/>durable facts and tombstones)]
+        Memory --> Dgraph[(Dgraph<br/>ACL and namespaces)]
         Knowledge --> Dgraph
         Knowledge --> HSVAI[Huntsville AI<br/>WordPress APIs]
         PI --> Model[Configured OpenAI-compatible endpoint<br/>Ollama default or operator-selected provider]
@@ -131,7 +131,7 @@ Configuration is loaded once at startup, parsed into a typed runtime object, and
 - Existing Ollama endpoint, model, and API key variables, plus an optional model config path and API key. A selected JSON definition owns provider identity, endpoint, model, context limits, optional explicit reasoning effort, reasoning support, and PI compatibility flags.
 - A named persona profile, defaulting to `artemis`, selected from complete source-controlled profiles under `src/personas/`.
 - Optional GitHub API token and a comma-separated repository allowlist. When the variable is absent, the application fallback is `mbrooks/artemis,HSV-AI/artemis`; the supplied `.env.example` explicitly selects only `HSV-AI/artemis`. A blank token or an explicitly blank repository allowlist disables all GitHub tools.
-- A Dgraph HTTP endpoint, defaulting to `http://dgraph:8080`.
+- A Dgraph HTTP endpoint, authenticated memory credentials for namespace `0`, and separate HSVAI synchronization and read-only query credentials for the public namespace.
 - An optional provider-owned OpenAI-compatible embedding model and endpoint plus a boolean memory session-snapshot switch, both disabled by default. HSVAI synchronization uses the fixed public `https://hsv.ai` source.
 - SQLite database path.
 - Log level and other non-secret runtime controls.
@@ -179,7 +179,7 @@ An authorized `/clear-session` closes the active session for the same conversati
 
 PI is the base conversational harness and owns interaction with the configured OpenAI-compatible model endpoint. Application code supplies the isolated conversation session and user message, then consumes the assistant response plus any available reasoning or diagnostic metadata. [Configurable model provider](model-provider.md) defines the provider file and startup contract.
 
-Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, fetches it directly as a PI custom tool, bounds and extracts its content, and sanitizes the returned page independently of the model provider. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers the six documented GitHub tools behind their repository allowlist, sanitizes read results as untrusted content, and publishes the explicit-mutation guideline in the tool descriptions. Artemis registers nine Dgraph-backed [memory tools](memory.md) bound to the current conversation key, Discord author, source message, and durable PI-session episode. It also registers the shared, read-only `hsvai_graph_search` tool backed by the fixed `https://hsv.ai` source defined in [HSVAI GraphRAG](hsvai-graphrag.md). PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Novelty refusals are returned as tool data; other tool failures follow the normal generation-failure path and produce no Discord response.
+Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, fetches it directly as a PI custom tool, bounds and extracts its content, and sanitizes the returned page independently of the model provider. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers the six documented GitHub tools behind their repository allowlist, sanitizes read results as untrusted content, and publishes the explicit-mutation guideline in the tool descriptions. Artemis registers nine Dgraph-backed [memory tools](memory.md) bound to the current conversation key, Discord author, source message, and durable PI-session episode. It also registers shared, read-only `hsvai_graph_search` and `hsvai_graph_query` tools backed by the fixed `https://hsv.ai` source defined in [HSVAI GraphRAG](hsvai-graphrag.md). The latter accepts arbitrary DQL but uses only Dgraph's read-only query endpoint and an ACL account bound to the public namespace. PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Novelty refusals are returned as tool data; other tool failures follow the normal generation-failure path and produce no Discord response.
 
 The system prompt is built from the conversation kind, the selected persona profile, and the tools that were actually registered. Each profile supplies its complete identity from a dedicated file under `src/personas/`; prompt construction does not special-case the default profile. Discord speaker handling, conversation-kind limits, and capability rules remain application-owned. The Capability Gap Protocol tells Artemis to acknowledge an unavailable capability, avoid source exploration or improvised code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when that tool is available. Its Available Tools section is generated from the live custom-tool registry so the prompt does not advertise unregistered tools.
 
@@ -203,7 +203,7 @@ Foreign keys and WAL mode are enabled. Conversation keys, source Discord message
 
 The SQLite file lives on a persistent Docker volume and remains available across container restarts and upgrades. Schema migrations run before Discord connects and must be backward-safe for existing local data.
 
-Memory facts, embeddings, episodes, and entity links are stored separately in Dgraph under the same stable conversation key. The `dgraph-data` volume survives restarts and `/clear-session`; memory has no automatic expiration, and correction or forgetting retains ended facts for audit.
+Memory facts, embeddings, episodes, and entity links are stored in Dgraph namespace `0` under the same stable conversation key. The public HSVAI corpus occupies a separate authenticated namespace in the same `dgraph-data` volume. The volume survives restarts and `/clear-session`; memory has no automatic expiration, and correction or forgetting retains ended facts for audit.
 
 There is no automatic retention or deletion policy. Chat content, session data, and model reasoning or diagnostics remain in SQLite indefinitely unless an operator deliberately removes records or deletes the local data volume.
 
@@ -217,7 +217,7 @@ Chat content, PI session history, and model-provided reasoning or diagnostics ar
 
 #### Container topology
 
-Base Docker Compose contains `ollama`, the one-shot `ollama-model` pull job, `dgraph`, and `artemis`. A deployment-owned override may select an external provider without changing the upstream topology. Artemis validates the model provider and applies the Dgraph fact schema before Discord login.
+Base Docker Compose contains `ollama`, the one-shot `ollama-model` pull job, ACL-enabled `dgraph`, one-shot `dgraph-bootstrap`, and `artemis`. A deployment-owned override may select an external provider without changing the upstream topology. Bootstrap creates namespace-scoped service accounts before Artemis validates the model provider and applies the two independent Dgraph schemas.
 
 ## Runtime flows
 

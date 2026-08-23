@@ -84,9 +84,12 @@ and the fused score.
 ## Configuration
 
 `DGRAPH_URL` is an HTTP(S) Dgraph Alpha endpoint and defaults to
-`http://dgraph:8080`. Base Compose runs `dgraph/standalone:v25.4.0`, waits for
-`/health`, and persists `/dgraph` in the `dgraph-data` volume. Artemis applies the
-additive DQL schema after model health validation and before Discord login.
+`http://dgraph:8080`. `DGRAPH_USER` and `DGRAPH_PASSWORD` are required and bind
+the client to namespace `0`. Base Compose runs
+`dgraph/standalone:v25.4.0` with ACL enabled, waits for `/health`, bootstraps a
+permission-7 memory service account, and persists `/dgraph` in the `dgraph-data`
+volume. Artemis applies the additive DQL schema after model health validation
+and before Discord login.
 
 The optional model-provider `embedding` object supplies an explicit embedding
 model and OpenAI-compatible API base URL. Its base URL defaults to the model
@@ -112,13 +115,16 @@ read and write is constrained to one conversation scope.
 
 Memory facts are user data and have no automatic expiration. Forgetting is a
 logical tombstone, not physical erasure. Base Compose does not publish Dgraph to
-a host port, and Artemis does not send credentials to Dgraph. Tool guidance
-prohibits storing credentials or secrets. Entity tools and graph traversal do not
-provide a cross-conversation read path.
+a host port. Artemis authenticates every operation with the namespace-0 memory
+service account. HSVAI data and model-authored DQL live in a different Dgraph
+namespace, providing a database-enforced boundary in addition to conversation
+scope filters. Tool guidance prohibits storing credentials or secrets. Entity
+tools and graph traversal do not provide a cross-conversation read path.
 
 ## Failure handling
 
 - Invalid `DGRAPH_URL` fails configuration loading.
+- Missing Dgraph credentials, authentication failures, or an invalid namespace fail startup.
 - Invalid embedding provider metadata or invalid `MEMORY_INJECT` fails configuration loading.
 - Schema initialization failure prevents Discord login.
 - Invalid, inactive, or cross-scope fact UIDs fail without changing data.
@@ -141,4 +147,5 @@ provide a cross-conversation read path.
 
 - [Baseline design](baseline.md)
 - [Clean-room rebuild guide](rebuild-guide.md)
+- [Dgraph access control and namespaces](dgraph-access-control.md)
 - [Design document index](README.md)

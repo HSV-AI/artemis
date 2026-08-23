@@ -13,6 +13,11 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
+function accessToken(expiresAt = Date.now() + 60_000): string {
+  const payload = Buffer.from(JSON.stringify({ exp: Math.ceil(expiresAt / 1_000) })).toString("base64url");
+  return `header.${payload}.signature`;
+}
+
 const input = {
   scopeKey: "dm:channel",
   statement: "The user prefers concise answers.",
@@ -44,11 +49,63 @@ describe("DgraphClient", () => {
       headers: { "Content-Type": "application/dql" },
       body: "name: string ."
     });
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "http://dgraph:8080/query", {
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "http://dgraph:8080/query?ro=true", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: "query {}", variables: { $scope: "scope" } })
     });
+  });
+
+  it("authenticates once and sends the namespace JWT on concurrent requests", async () => {
+    const token = accessToken();
+    const fetchMock = vi.fn().mockImplementation(async (input: URL | RequestInfo) =>
+      String(input).endsWith("/admin")
+        ? jsonResponse({ data: { login: { response: { accessJWT: token } } } })
+        : jsonResponse({ data: { facts: [] } })
+    );
+    const client = new DgraphClient("http://dgraph:8080", fetchMock, {
+      username: "reader",
+      password: "secret",
+      namespace: 7
+    });
+
+    await Promise.all([client.query("query one {}"), client.query("query two {}")]);
+
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/admin"))).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledWith("http://dgraph:8080/admin", expect.objectContaining({
+      body: expect.stringContaining("namespace: 7")
+    }));
+    expect(fetchMock).toHaveBeenCalledWith("http://dgraph:8080/query?ro=true", expect.objectContaining({
+      headers: expect.objectContaining({ "X-Dgraph-AccessToken": token })
+    }));
+  });
+
+  it("logs in again and retries once after an unauthorized response", async () => {
+    const firstToken = accessToken();
+    const secondToken = accessToken(Date.now() + 120_000);
+    let loginCount = 0;
+    let queryCount = 0;
+    const fetchMock = vi.fn().mockImplementation(async (input: URL | RequestInfo) => {
+      if (String(input).endsWith("/admin")) {
+        loginCount += 1;
+        return jsonResponse({
+          data: { login: { response: { accessJWT: loginCount === 1 ? firstToken : secondToken } } }
+        });
+      }
+      queryCount += 1;
+      return queryCount === 1
+        ? jsonResponse({ errors: [{ message: "unauthorized" }] }, 401)
+        : jsonResponse({ data: { facts: [] } });
+    });
+    const client = new DgraphClient("http://dgraph:8080", fetchMock, {
+      username: "reader",
+      password: "secret",
+      namespace: 1
+    });
+
+    await expect(client.query("query {}", {})).resolves.toEqual({ facts: [] });
+    expect(loginCount).toBe(2);
+    expect(queryCount).toBe(2);
   });
 
   it("reports HTTP and Dgraph response errors", async () => {

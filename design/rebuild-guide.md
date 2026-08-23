@@ -23,10 +23,10 @@ The following behavior is fixed:
 - Every Discord message event is logged to the console and SQLite before filtering, including DMs, bot messages, unauthorized messages, unmentioned messages, and messages from disallowed channels.
 - Accepted conversations retain their history in SQLite across restarts. There is no automatic retention or deletion.
 - Model or harness failures are logged and persisted, but produce no Discord response.
-- The model may use explicitly registered custom tools: `web_fetch`, six GitHub tools when a token is configured, nine conversation-scoped Dgraph memory tools, and the read-only `hsvai_graph_search` tool backed by the fixed Huntsville AI source. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
+- The model may use explicitly registered custom tools: `web_fetch`, six GitHub tools when a token is configured, nine conversation-scoped Dgraph memory tools, and the read-only `hsvai_graph_search` and `hsvai_graph_query` tools backed by the fixed Huntsville AI source. The query tool accepts arbitrary DQL but is bound by a Dgraph JWT to the public namespace and invokes only the read-only query endpoint. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Group/channel (guild) assistant responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) self-contained Discord messages per turn. DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind (`guild` vs `dm`).
-- Base Compose retains Ollama as a separate service, the model-preparation job, persistent Dgraph, and Artemis. An optional provider-specific Compose path may omit Ollama while retaining Dgraph.
+- Base Compose retains Ollama as a separate service, the model-preparation job, persistent ACL-enabled Dgraph, a one-shot namespace bootstrap, and Artemis. An optional provider-specific Compose path may omit Ollama while retaining Dgraph and its bootstrap.
 
 The following may be replaced:
 
@@ -53,9 +53,11 @@ flowchart LR
     Harness --> WebFetch[web_fetch tool]
     Harness --> GitHubTools[Token-gated GitHub tools]
     Harness --> MemoryTools[Memory tools]
+    Harness --> KnowledgeTools[HSVAI search and DQL]
     WebFetch --> Web[HTTP or HTTPS page]
     GitHubTools --> GitHubAPI[GitHub API]
     MemoryTools --> Dgraph[(Dgraph facts)]
+    KnowledgeTools --> Dgraph
     Model --> Provider[Configured OpenAI-compatible endpoint]
     Commands -- clear-session only --> Store
     Commands --> Discord
@@ -239,7 +241,7 @@ The model-facing implementation must:
 - Apply a provider definition's explicit reasoning effort to every model request when configured.
 - Restore the native harness state for the logical session directly from durable SQLite entries.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
-- Enable only `web_fetch`, the six GitHub custom tools when configured, the nine scoped memory tools, and the fixed-source `hsvai_graph_search` tool. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
+- Enable only `web_fetch`, the six GitHub custom tools when configured, the nine scoped memory tools, and the fixed-source `hsvai_graph_search` and `hsvai_graph_query` tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply the complete identity instructions from the profile selected by `PERSONA_PROFILE`, which defaults to `artemis` and includes `wartermis` as a bundled alternative. Keep each profile in its own source file and compose the fixed Discord instruction after it. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, and tool registry.
 - Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
@@ -448,6 +450,13 @@ Load local environment configuration from `.env` or the process environment, opt
 | `GITHUB_TOKEN` | No | Empty | GitHub API token; blank disables all GitHub tools. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` in application code | Comma-separated GitHub repository allowlist; blank disables GitHub tools. The supplied `.env.example` explicitly sets only `HSV-AI/artemis`. |
 | `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint required by memory. |
+| `DGRAPH_INITIAL_GROOT_PASSWORD` | No | `password` | First-start galaxy password used only to rotate Dgraph's default. |
+| `DGRAPH_GROOT_PASSWORD` | Yes | None | Galaxy guardian password used by the bootstrap service. |
+| `DGRAPH_USER` / `DGRAPH_PASSWORD` | Yes | None | Namespace-0 memory service account with `dgraph.all=7`. |
+| `HSVAI_DGRAPH_GROOT_PASSWORD` | Yes | None | Guardian password for the public HSVAI namespace. |
+| `HSVAI_DGRAPH_SYNC_USER` / `HSVAI_DGRAPH_SYNC_PASSWORD` | Yes | None | Public-corpus schema and ingestion account with `dgraph.all=7`. |
+| `HSVAI_DGRAPH_QUERY_USER` / `HSVAI_DGRAPH_QUERY_PASSWORD` | Yes | None | Public-corpus query account with `dgraph.all=4`. The query and sync usernames must differ. |
+| `HSVAI_DGRAPH_NAMESPACE` | No | `1` | Positive namespace ID containing the public HSVAI corpus. |
 | `MEMORY_INJECT` | No | `false` | Strict boolean enabling one bounded, byte-stable memory snapshot per durable PI session. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
 | `LOG_LEVEL` | No | `info` | Minimum routine level: `debug`, `info`, `warn`, or `error`. |
@@ -458,7 +467,9 @@ The optional provider JSON `embedding` object requires `modelId`; its optional
 `baseUrl` defaults to the provider base URL. It reuses `MODEL_API_KEY`. Omission
 disables semantic vectors while preserving lexical and graph retrieval. HSVAI
 GraphRAG always synchronizes from the fixed `https://hsv.ai` source and always
-registers `hsvai_graph_search`.
+registers `hsvai_graph_search` and `hsvai_graph_query`. Dgraph ACL must be enabled
+with an ignored 32-byte `dgraph-acl-secret`; bootstrap must finish before Artemis
+starts.
 
 ## Clean-room implementation sequence
 

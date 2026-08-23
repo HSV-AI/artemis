@@ -20,10 +20,32 @@ interface UpsertResult {
   queries: Record<string, unknown[]>;
 }
 
+export interface DgraphCredentials {
+  username: string;
+  password: string;
+  namespace: number;
+}
+
+interface LoginResponse {
+  data?: {
+    login?: {
+      response?: {
+        accessJWT?: string;
+      };
+    };
+  };
+  errors?: { message: string }[];
+}
+
 export class DgraphClient {
+  private accessToken: string | undefined;
+  private accessTokenExpiresAt = 0;
+  private loginPromise: Promise<string> | undefined;
+
   public constructor(
     private readonly baseUrl: string,
-    private readonly fetchImplementation: typeof fetch = fetch
+    private readonly fetchImplementation: typeof fetch = fetch,
+    private readonly credentials?: DgraphCredentials
   ) {}
 
   public async alter(schema: string): Promise<void> {
@@ -31,7 +53,7 @@ export class DgraphClient {
   }
 
   public async query<T>(dql: string, variables: Record<string, string> = {}): Promise<T> {
-    const result = await this.request("/query", JSON.stringify({ query: dql, variables }));
+    const result = await this.request("/query?ro=true", JSON.stringify({ query: dql, variables }));
     return (result as { data: T }).data;
   }
 
@@ -68,11 +90,12 @@ export class DgraphClient {
     body: string,
     contentType = "application/json"
   ): Promise<unknown> {
-    const response = await this.fetchImplementation(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": contentType },
-      body
-    });
+    let response = await this.authenticatedRequest(path, body, contentType);
+    if (response.status === 401 && this.credentials) {
+      this.accessToken = undefined;
+      this.accessTokenExpiresAt = 0;
+      response = await this.authenticatedRequest(path, body, contentType);
+    }
     const text = await response.text();
     if (!response.ok) {
       throw new DgraphHttpError(path, response.status, text);
@@ -86,6 +109,69 @@ export class DgraphClient {
       );
     }
     return parsed;
+  }
+
+  private async authenticatedRequest(
+    path: string,
+    body: string,
+    contentType: string
+  ): Promise<Response> {
+    const accessToken = this.credentials ? await this.login() : undefined;
+    return this.fetchImplementation(`${this.baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": contentType,
+        ...(accessToken ? { "X-Dgraph-AccessToken": accessToken } : {})
+      },
+      body
+    });
+  }
+
+  private async login(): Promise<string> {
+    if (this.accessToken && this.accessTokenExpiresAt > Date.now() + 30_000) {
+      return this.accessToken;
+    }
+    this.loginPromise ??= this.requestAccessToken().finally(() => {
+      this.loginPromise = undefined;
+    });
+    return this.loginPromise;
+  }
+
+  private async requestAccessToken(): Promise<string> {
+    if (!this.credentials) {
+      throw new Error("Dgraph credentials are required for login");
+    }
+    const { username, password, namespace } = this.credentials;
+    const response = await this.fetchImplementation(`${this.baseUrl}/admin`, {
+      method: "POST",
+      headers: { "Content-Type": "application/graphql" },
+      body: `mutation { login(userId: ${JSON.stringify(username)}, password: ${JSON.stringify(password)}, namespace: ${namespace}) { response { accessJWT } } }`
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new DgraphHttpError("/admin login", response.status, text);
+    }
+    const parsed = JSON.parse(text) as LoginResponse;
+    const token = parsed.data?.login?.response?.accessJWT;
+    if (!token || parsed.errors?.length) {
+      const message = parsed.errors?.map((error) => error.message).join("; ")
+        ?? "Dgraph login returned no access token";
+      throw new DgraphHttpError("/admin login", response.status, message);
+    }
+    this.accessToken = token;
+    this.accessTokenExpiresAt = tokenExpiration(token);
+    return token;
+  }
+}
+
+function tokenExpiration(token: string): number {
+  const payload = token.split(".")[1];
+  if (!payload) return 0;
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { exp?: number };
+    return typeof decoded.exp === "number" ? decoded.exp * 1_000 : 0;
+  } catch {
+    return 0;
   }
 }
 

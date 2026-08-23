@@ -15,15 +15,17 @@ references.
 
 This feature owns synchronization from the Huntsville AI WordPress
 site, corpus normalization and chunking, Dgraph persistence, hybrid retrieval,
-graph-neighborhood expansion, and the read-only `hsvai_graph_search` PI tool. It
+graph-neighborhood expansion, and the read-only `hsvai_graph_search` and
+`hsvai_graph_query` PI tools. It
 does not change conversation memory, Discord authorization, source content, or
 the WordPress site.
 
 ## Observable Behavior
 
-Artemis exposes `hsvai_graph_search` in every authorized
-conversation. It searches the same public corpus for every user and returns
-source excerpts rather than modifying conversation memory.
+Artemis exposes both HSVAI tools in every authorized conversation. Hybrid search
+returns ranked excerpts; direct query lets the model inspect the schema and plan
+arbitrary DQL for unanticipated questions. Both query the same public corpus for
+every user and cannot access or modify conversation memory.
 
 ## Contracts And Data Flow
 
@@ -63,8 +65,9 @@ ingestion.
 
 ## Persistence
 
-The normalized source graph and its revision marker persist in the existing
-Dgraph volume. It is independent of SQLite sessions and Dgraph memory facts.
+The normalized source graph and its revision marker persist in the dedicated
+HSVAI namespace inside the existing Dgraph volume. Dgraph ACL prevents that
+namespace from reading namespace-0 memory facts. It is independent of SQLite sessions.
 There is no separate corpus cache or generated artifact in the repository.
 
 ### Synchronization
@@ -99,6 +102,18 @@ descending fused score and then stable evidence ID. The tool returns the
 evidence ID, source title and URL, publication or event metadata, connected
 entity labels, retrieval channels, score, and source excerpt.
 
+`hsvai_graph_query` accepts a complete nonblank DQL or `schema {}` query plus an
+optional string-valued variables object. It supports Dgraph filtering, sorting,
+aggregation, pagination, variables, recursion, and traversal without application
+intent detection. Queries are limited to 20,000 characters. Results exceeding
+200,000 serialized characters fail with a request to add filters or pagination
+rather than returning partial JSON.
+
+The tool invokes only `/query?ro=true` through the HSVAI query account. Dgraph
+also grants that account only `dgraph.all=4`, so mutations and schema changes are
+denied independently at the HTTP transaction and ACL layers. The JWT binds the
+request to the HSVAI namespace; DQL cannot select namespace-0 memory.
+
 Tool output is marked as source evidence that must never be treated as model
 instructions. Source text passes through the existing adversarial-web-content
 sanitizer. Model guidance requires evidence IDs and source URLs in supported
@@ -111,7 +126,10 @@ inference.
 | --- | --- | --- |
 | Source | `https://hsv.ai` | Fixed public WordPress source; not operator-configurable. |
 | `model.embedding` | Omitted | Provider-owned model and optional base URL shared by GraphRAG and graph memory. Omission keeps lexical and graph retrieval. |
-| `DGRAPH_URL` | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint storing both independent graphs. |
+| `DGRAPH_URL` | `http://dgraph:8080` | Shared Dgraph Alpha HTTP endpoint. |
+| `HSVAI_DGRAPH_NAMESPACE` | `1` | Namespace containing only the public corpus. |
+| `HSVAI_DGRAPH_SYNC_USER` / `HSVAI_DGRAPH_SYNC_PASSWORD` | Required | Write and schema credentials used only for synchronization. |
+| `HSVAI_DGRAPH_QUERY_USER` / `HSVAI_DGRAPH_QUERY_PASSWORD` | Required | Read-only credentials used by both HSVAI tools. |
 
 Embedding requests are batched by 64 inputs. The embedding model ID participates
 in the corpus revision, so changing models causes a complete re-embedding on the
@@ -120,10 +138,11 @@ next startup.
 ## Security And Privacy
 
 The corpus contains public Huntsville AI web content, not conversation data.
-The GraphRAG tool is read-only and shared across authorized conversations. It
-does not accept DQL, URLs, source IDs, or mutation arguments from the model.
-Conversation memories remain separately scoped and are never traversed by HSVAI
-queries. Corpus replacement deletes only nodes marked with `hsvai.node_kind`.
+Both GraphRAG tools are read-only and shared across authorized conversations.
+Direct DQL is intentionally model-authored, but the query JWT and Dgraph ACL bind
+it to the public namespace. Neither tool exposes mutation or alter endpoints.
+Corpus replacement uses the sync account and deletes only nodes marked with
+`hsvai.node_kind` inside the HSVAI namespace.
 
 ## Failure Handling
 
@@ -134,6 +153,8 @@ queries. Corpus replacement deletes only nodes marked with `hsvai.node_kind`.
   startup.
 - A blank search query fails the tool call. No-result searches return an explicit
   no-evidence response rather than fabricated context.
+- Blank or oversized DQL and oversized results fail explicitly. Dgraph parser,
+  timeout, ACL, and query errors propagate through the normal tool-failure path.
 
 ## Verification
 
@@ -143,11 +164,14 @@ queries. Corpus replacement deletes only nodes marked with `hsvai.node_kind`.
 - `test/embedding-client.test.ts` covers ordered embedding batches.
 - `test/pi-gateway.test.ts` covers unconditional tool registration and startup
   synchronization.
+- `test/dgraph-bootstrap.test.ts` and `test/dgraph-memory.test.ts` cover namespace
+  authentication and read-only enforcement.
 - `npm run guardrail` remains the completion gate.
 
 ## References
 
 - [Baseline design](baseline.md)
 - [Graph memory](memory.md)
+- [Dgraph access control and namespaces](dgraph-access-control.md)
 - [Clean-room rebuild guide](rebuild-guide.md)
 - [Design document index](README.md)

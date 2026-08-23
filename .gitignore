@@ -3,6 +3,7 @@ dist/
 coverage/
 .env
 model.config.json
+dgraph-acl-secret
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

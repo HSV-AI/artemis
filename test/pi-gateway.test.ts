@@ -65,12 +65,19 @@ vi.mock("../src/hsvai-knowledge.js", () => ({
   HsvaiKnowledge: class HsvaiKnowledge {
     public initializeAndSync = mocks.hsvaiInitializeAndSync;
     public search = vi.fn().mockResolvedValue([]);
+    public queryDql = vi.fn().mockResolvedValue({});
   },
   createHsvaiKnowledgeTool: vi.fn(() => ({
     name: "hsvai_graph_search",
     label: "Search HSVAI Knowledge",
     description: "Search source-grounded Huntsville AI transcripts and calendar events.",
     promptSnippet: "Search Huntsville AI transcripts and events through their connected source graph"
+  })),
+  createHsvaiGraphQueryTool: vi.fn(() => ({
+    name: "hsvai_graph_query",
+    label: "Query HSVAI Graph",
+    description: "Run read-only DQL against Huntsville AI data.",
+    promptSnippet: "Query Huntsville AI with read-only DQL"
   }))
 }));
 
@@ -116,7 +123,13 @@ function generationInput(overrides: Partial<PiGenerationInput> = {}): PiGenerati
 }
 
 function healthyFetch() {
-  return vi.fn().mockImplementation(async () => new Response('{"data":{}}', { status: 200 }));
+  const payload = Buffer.from(JSON.stringify({ exp: Math.ceil(Date.now() / 1_000) + 60 })).toString("base64url");
+  return vi.fn().mockImplementation(async (input: URL | RequestInfo) => new Response(
+    String(input).endsWith("/admin")
+      ? JSON.stringify({ data: { login: { response: { accessJWT: `header.${payload}.signature` } } } })
+      : '{"data":{}}',
+    { status: 200 }
+  ));
 }
 
 function createSessionStore(): PiSessionStore {
@@ -445,6 +458,7 @@ describe("PiSdkGateway", () => {
         tools: [
           "web_fetch",
           "hsvai_graph_search",
+          "hsvai_graph_query",
           "memory_remember",
           "memory_search",
           "memory_recall",
@@ -501,7 +515,7 @@ describe("PiSdkGateway", () => {
       tools: [
         "web_fetch", "github_search", "github_list", "github_fetch",
         "github_create", "github_update", "github_upload_image",
-        "hsvai_graph_search",
+        "hsvai_graph_search", "hsvai_graph_query",
         "memory_remember", "memory_search", "memory_recall", "memory_supersede",
         "memory_forget", "memory_believed_at", "memory_audit",
         "memory_entity", "memory_episode"
@@ -519,7 +533,10 @@ describe("PiSdkGateway", () => {
       {
         model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
         persona: ARTEMIS_PROFILE,
-        dgraphUrl: "http://dgraph:8080"
+        dgraphUrl: "http://dgraph:8080",
+        dgraphAuth: { username: "memory", password: "secret", namespace: 0 },
+        hsvaiDgraphSyncAuth: { username: "sync", password: "secret", namespace: 1 },
+        hsvaiDgraphQueryAuth: { username: "query", password: "secret", namespace: 1 }
       },
       createSessionStore(),
       fetchMock
@@ -556,7 +573,7 @@ describe("PiSdkGateway", () => {
     }));
   });
 
-  it("always registers read-only HSVAI graph search against the fixed source", async () => {
+  it("always registers HSVAI hybrid search and read-only DQL tools", async () => {
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
       createSessionStore(),
@@ -566,7 +583,7 @@ describe("PiSdkGateway", () => {
     await gateway.generate(generationInput());
 
     expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
-      tools: expect.arrayContaining(["hsvai_graph_search"]),
+      tools: expect.arrayContaining(["hsvai_graph_search", "hsvai_graph_query"]),
       customTools: expect.arrayContaining([
         expect.objectContaining({ name: "hsvai_graph_search" })
       ])

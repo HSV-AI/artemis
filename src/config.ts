@@ -37,6 +37,12 @@ export interface ModelProviderConfig {
   };
 }
 
+export interface DgraphAuthConfig {
+  username: string;
+  password: string;
+  namespace: number;
+}
+
 type ModelProviderDefinition = Omit<ModelProviderConfig, "apiKey">;
 
 export interface ArtemisConfig {
@@ -50,6 +56,9 @@ export interface ArtemisConfig {
   githubToken: string;
   githubAllowedRepositories: readonly string[];
   dgraphUrl: string;
+  dgraphAuth: DgraphAuthConfig;
+  hsvaiDgraphSyncAuth: DgraphAuthConfig;
+  hsvaiDgraphQueryAuth: DgraphAuthConfig;
   memoryInject: boolean;
   sqlitePath: string;
   logLevel: LogLevel;
@@ -215,10 +224,40 @@ function parseBoolean(value: string, name: string, defaultValue: boolean): boole
   throw new Error(`Invalid configuration: ${name} must be true or false`);
 }
 
+function parseNamespace(value: string, name: string): number {
+  const namespace = Number(value);
+  if (!Number.isSafeInteger(namespace) || namespace < 0) {
+    throw new Error(`Invalid configuration: ${name} must be a nonnegative safe integer`);
+  }
+  return namespace;
+}
+
+function dgraphAuth(
+  env: Environment,
+  prefix: "DGRAPH" | "HSVAI_DGRAPH_SYNC" | "HSVAI_DGRAPH_QUERY",
+  namespace: number
+): DgraphAuthConfig {
+  return {
+    username: required(env, `${prefix}_USER`),
+    password: required(env, `${prefix}_PASSWORD`),
+    namespace
+  };
+}
+
 export function parseConfig(
   env: Environment = process.env,
   modelConfig?: unknown
 ): ArtemisConfig {
+  const dgraphAuthConfig = dgraphAuth(env, "DGRAPH", 0);
+  const hsvaiNamespace = parseNamespace(
+    valueOrDefault(env, "HSVAI_DGRAPH_NAMESPACE", "1"),
+    "HSVAI_DGRAPH_NAMESPACE"
+  );
+  const hsvaiDgraphSyncAuth = dgraphAuth(env, "HSVAI_DGRAPH_SYNC", hsvaiNamespace);
+  const hsvaiDgraphQueryAuth = dgraphAuth(env, "HSVAI_DGRAPH_QUERY", hsvaiNamespace);
+  if (hsvaiDgraphSyncAuth.username === hsvaiDgraphQueryAuth.username) {
+    throw new Error("Invalid configuration: HSVAI DGRAPH sync and query users must differ");
+  }
   return {
     discordToken: required(env, "DISCORD_TOKEN"),
     discordAllowedChannelIds: parseCommaSeparatedIds(env.DISCORD_ALLOWED_CHANNEL_ID),
@@ -246,6 +285,9 @@ export function parseConfig(
     githubToken: env.GITHUB_TOKEN?.trim() ?? "",
     githubAllowedRepositories: parseAllowedRepositories(env.GITHUB_ALLOWED_REPOSITORY),
     dgraphUrl: parseUrl(valueOrDefault(env, "DGRAPH_URL", DEFAULT_DGRAPH_URL), "DGRAPH_URL"),
+    dgraphAuth: dgraphAuthConfig,
+    hsvaiDgraphSyncAuth,
+    hsvaiDgraphQueryAuth,
     memoryInject: parseBoolean(
       valueOrDefault(env, "MEMORY_INJECT", "false"),
       "MEMORY_INJECT",

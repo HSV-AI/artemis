@@ -6,7 +6,7 @@ import {
   DEFAULT_OLLAMA_MODEL,
   DEFAULT_SQLITE_PATH,
   loadConfig,
-  parseConfig
+  parseConfig as parseRawConfig
 } from "../src/config.js";
 import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
 
@@ -21,6 +21,22 @@ const providerDefinition = {
   maxTokens: 8_192,
   supportsDeveloperRole: false
 };
+
+const dgraphEnvironment = {
+  DGRAPH_USER: "memory-user",
+  DGRAPH_PASSWORD: "memory-password",
+  HSVAI_DGRAPH_SYNC_USER: "hsvai-sync",
+  HSVAI_DGRAPH_SYNC_PASSWORD: "sync-password",
+  HSVAI_DGRAPH_QUERY_USER: "hsvai-query",
+  HSVAI_DGRAPH_QUERY_PASSWORD: "query-password"
+};
+
+function parseConfig(
+  env: Record<string, string | undefined>,
+  modelConfig?: unknown
+) {
+  return parseRawConfig({ ...dgraphEnvironment, ...env }, modelConfig);
+}
 
 describe("parseConfig", () => {
   it("loads required values, empty Discord allowlists, and safe defaults", () => {
@@ -50,6 +66,9 @@ describe("parseConfig", () => {
       githubToken: "",
       githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
       dgraphUrl: DEFAULT_DGRAPH_URL,
+      dgraphAuth: { username: "memory-user", password: "memory-password", namespace: 0 },
+      hsvaiDgraphSyncAuth: { username: "hsvai-sync", password: "sync-password", namespace: 1 },
+      hsvaiDgraphQueryAuth: { username: "hsvai-query", password: "query-password", namespace: 1 },
       memoryInject: false,
       sqlitePath: DEFAULT_SQLITE_PATH,
       logLevel: "info"
@@ -110,6 +129,9 @@ describe("parseConfig", () => {
       githubToken: "github-secret",
       githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
       dgraphUrl: "http://memory.example:8080",
+      dgraphAuth: expect.objectContaining({ namespace: 0 }),
+      hsvaiDgraphSyncAuth: expect.objectContaining({ namespace: 1 }),
+      hsvaiDgraphQueryAuth: expect.objectContaining({ namespace: 1 }),
       memoryInject: true,
       sqlitePath: ":memory:",
       logLevel: "debug"
@@ -176,7 +198,11 @@ describe("parseConfig", () => {
   it("loads model settings from MODEL_CONFIG_PATH", () => {
     const readFile = vi.fn().mockReturnValue(JSON.stringify(providerDefinition));
     const result = loadConfig(
-      { DISCORD_TOKEN: "token", MODEL_CONFIG_PATH: "model.config.json" },
+      {
+        ...dgraphEnvironment,
+        DISCORD_TOKEN: "token",
+        MODEL_CONFIG_PATH: "model.config.json"
+      },
       readFile
     );
     expect(readFile).toHaveBeenCalledWith("model.config.json", "utf8");
@@ -187,6 +213,20 @@ describe("parseConfig", () => {
       modelId: "configured-model",
       contextWindow: 64_000
     });
+  });
+
+  it("requires Dgraph credentials and validates namespace IDs", () => {
+    expect(() => parseRawConfig({
+      DISCORD_TOKEN: "token"
+    })).toThrow("Missing required configuration: DGRAPH_USER");
+    expect(() => parseConfig({
+      DISCORD_TOKEN: "token",
+      HSVAI_DGRAPH_NAMESPACE: "-1"
+    })).toThrow("HSVAI_DGRAPH_NAMESPACE must be a nonnegative safe integer");
+    expect(() => parseConfig({
+      DISCORD_TOKEN: "token",
+      HSVAI_DGRAPH_QUERY_USER: "hsvai-sync"
+    })).toThrow("sync and query users must differ");
   });
 
   it("defaults an embedding provider to the model base URL", () => {

@@ -18,6 +18,7 @@ import type {
 import { createGitHubTools } from "./github-tools.js";
 import { EmbeddingClient } from "./embedding-client.js";
 import {
+  createHsvaiGraphQueryTool,
   createHsvaiKnowledgeTool,
   HsvaiKnowledge,
   HsvaiWordPressSource
@@ -177,6 +178,9 @@ export class PiSdkGateway implements PiGateway {
         | "githubToken"
         | "githubAllowedRepositories"
         | "dgraphUrl"
+        | "dgraphAuth"
+        | "hsvaiDgraphSyncAuth"
+        | "hsvaiDgraphQueryAuth"
         | "memoryInject"
       >>,
     private readonly sessionStore: PiSessionStore,
@@ -190,21 +194,36 @@ export class PiSdkGateway implements PiGateway {
           fetchImplementation
         )
       : undefined;
-    const dgraph = new DgraphClient(config.dgraphUrl ?? DEFAULT_DGRAPH_URL, fetchImplementation);
+    const dgraph = new DgraphClient(
+      config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
+      fetchImplementation,
+      config.dgraphAuth
+    );
+    const hsvaiSync = new DgraphClient(
+      config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
+      fetchImplementation,
+      config.hsvaiDgraphSyncAuth
+    );
+    const hsvaiQuery = new DgraphClient(
+      config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
+      fetchImplementation,
+      config.hsvaiDgraphQueryAuth
+    );
     this.memory = new GraphMemory(
       dgraph,
       embeddingClient ? { embed: embeddingClient.embed } : {}
     );
     this.knowledge = new HsvaiKnowledge(
-      dgraph,
+      hsvaiSync,
       new HsvaiWordPressSource(fetchImplementation),
       embeddingClient
         ? {
             embed: embeddingClient.embed,
             embedMany: embeddingClient.embedMany,
-            embeddingVersion: () => embeddingClient.embeddingModel()
+            embeddingVersion: () => embeddingClient.embeddingModel(),
+            queryClient: hsvaiQuery
           }
-        : {}
+        : { queryClient: hsvaiQuery }
     );
   }
 
@@ -238,6 +257,7 @@ export class PiSdkGateway implements PiGateway {
     const customTools = [
       ...this.customTools,
       createHsvaiKnowledgeTool(this.knowledge),
+      createHsvaiGraphQueryTool(this.knowledge),
       ...createMemoryTools(this.memory, {
         scopeKey: input.conversationKey,
         authorId: input.authorId,

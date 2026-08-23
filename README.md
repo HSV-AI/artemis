@@ -46,7 +46,13 @@ Copy the example file and fill in the required values:
 
 ```sh
 cp .env.example .env
+openssl rand -out dgraph-acl-secret 32
 ```
+
+Generate independent random values for every blank Dgraph password in `.env`.
+Compose enables Dgraph ACL, rotates the first-start `groot/password` credential,
+creates the HSVAI namespace, and provisions least-privilege service accounts
+before Artemis starts.
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
@@ -64,13 +70,23 @@ cp .env.example .env
 | `GITHUB_TOKEN` | No | Empty | GitHub API token. A blank value disables every GitHub tool. Grant only the repository permissions needed for the desired read or write operations. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `HSV-AI/artemis` | Comma-separated `owner/repository` allowlist. A blank list disables every GitHub tool. Matching is case-insensitive. |
 | `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint used by memory and HSVAI GraphRAG. |
+| `DGRAPH_INITIAL_GROOT_PASSWORD` | No | `password` | Dgraph's first-start galaxy password, used only to rotate it. |
+| `DGRAPH_GROOT_PASSWORD` | Yes | None | Galaxy guardian password used only by `dgraph-bootstrap`. |
+| `DGRAPH_USER` | Yes | `artemis-memory` in `.env.example` | Namespace-0 memory service user. |
+| `DGRAPH_PASSWORD` | Yes | None | Memory service password. |
+| `HSVAI_DGRAPH_GROOT_PASSWORD` | Yes | None | Guardian password for the public HSVAI namespace. |
+| `HSVAI_DGRAPH_SYNC_USER` | Yes | `artemis-hsvai-sync` in `.env.example` | Public-corpus schema and ingestion user. |
+| `HSVAI_DGRAPH_SYNC_PASSWORD` | Yes | None | Public-corpus ingestion password. |
+| `HSVAI_DGRAPH_QUERY_USER` | Yes | `artemis-hsvai-query` in `.env.example` | Public-corpus read-only user used by both HSVAI tools. |
+| `HSVAI_DGRAPH_QUERY_PASSWORD` | Yes | None | Public-corpus read-only password. |
+| `HSVAI_DGRAPH_NAMESPACE` | No | `1` | Namespace containing only public HSVAI data. |
 | `MEMORY_INJECT` | No | `false` | When `true`, inject a bounded snapshot of current memories once per PI session. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error`. |
 
 When upgrading an existing `.env`, remove `DISCORD_GUILD_ID`, replace `AUTHORIZED_USER_ID` with `DISCORD_ALLOWED_USER_ID`, and add `DISCORD_ALLOWED_CHANNEL_ID`. Separate multiple IDs with commas; surrounding whitespace and duplicate IDs are removed. A blank user allowlist disables DMs, while a blank channel allowlist disables guild responses.
 
-Never commit `.env`, `model.config.json`, the SQLite database, model credentials, or GitHub tokens. Artemis rejects every GitHub operation outside the repository allowlist. GitHub mutations are available only when the current Discord request explicitly asks for the specific mutation.
+Never commit `.env`, `dgraph-acl-secret`, `model.config.json`, the SQLite database, model credentials, or GitHub tokens. Artemis rejects every GitHub operation outside the repository allowlist. GitHub mutations are available only when the current Discord request explicitly asks for the specific mutation.
 
 GitHub repository-scoped operations require both `owner` and `repo`, and both must match an allowlist entry. A search may omit them to search every allowed repository.
 
