@@ -75,7 +75,8 @@ namespace from reading namespace-0 memory facts. It is independent of SQLite ses
 The reviewed event-catalog baseline is a checked-in artifact, and its optional
 runtime overlay persists in the Artemis data volume. Neither stores embeddings
 or Dgraph UIDs. The BM25 index is rebuilt in process from the normalized chunks
-on every startup and is not a separate persisted artifact.
+on every startup, bound to the resulting corpus revision, and not persisted as a
+separate artifact.
 
 ### Synchronization
 
@@ -85,8 +86,9 @@ Startup performs these steps before Discord connects:
 2. Load and validate the event-catalog baseline and optional runtime overlay.
 3. Fetch every transcript post and event page from the JSON APIs, applying only
    catalog records whose source hash matches.
-4. Normalize and chunk the corpus, build the BM25 index, then compute a SHA-256
-   revision over the normalized documents and selected embedding model.
+4. Normalize and chunk the corpus, compute a SHA-256 revision over the normalized
+   documents and selected embedding model, and build a BM25 snapshot carrying
+   that revision.
 5. Stop when the stored revision already matches.
 6. Otherwise delete only nodes carrying the `hsvai.node_kind` marker, rebuild
    entities and documents, write chunks in bounded batches, and write the corpus
@@ -135,8 +137,10 @@ request to the HSVAI namespace; DQL cannot select namespace-0 memory.
 Every model turn reads and validates the current SHA-256 `hsvai.revision`
 through the read-only query account and includes it in the system prompt.
 Resource loaders remain cached while that revision is unchanged and are rebuilt
-when it changes. Both HSVAI tools stamp their text output and structured details
-with the same per-turn revision.
+when it changes. The in-process BM25 snapshot must carry that same revision. A
+mismatch fails the turn until Artemis restarts and rebuilds the index rather than
+labeling stale lexical results as current. Both HSVAI tools stamp their text
+output and structured details with the same per-turn revision.
 
 PI session history retains those labeled tool results as evidence snapshots. A
 historical result remains current when its label matches the system prompt's
@@ -186,6 +190,8 @@ Corpus replacement uses the sync account and deletes only nodes marked with
   results, invalid dates, embedding failures, and Dgraph failures abort startup.
 - An interrupted rebuild has no new revision marker and is rebuilt on the next
   startup.
+- A Dgraph revision that does not match the running process's BM25 snapshot fails
+  generation until Artemis restarts and rebuilds the index.
 - A blank search query fails the tool call. No-result searches return an explicit
   no-evidence response rather than fabricated context.
 - Blank or oversized DQL and oversized results fail explicitly. Dgraph parser,

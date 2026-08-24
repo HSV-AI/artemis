@@ -248,6 +248,11 @@ interface Bm25Index {
   averageDocumentLength: number;
 }
 
+interface Bm25Snapshot {
+  revision: string;
+  index: Bm25Index;
+}
+
 function decodeHtmlEntities(value: string): string {
   const named: Record<string, string> = {
     amp: "&",
@@ -600,7 +605,7 @@ export class HsvaiKnowledge {
   private readonly embedMany: EmbedBatchFunction | undefined;
   private readonly embeddingVersion: () => Promise<string>;
   private readonly queryClient: DgraphClient;
-  private lexicalIndex = createBm25Index([]);
+  private lexicalSnapshot: Bm25Snapshot | undefined;
 
   public constructor(
     private readonly client: DgraphClient,
@@ -618,7 +623,6 @@ export class HsvaiKnowledge {
     await this.client.dropAttribute("hsvai.facilitators");
     const documents = await this.source.fetchDocuments();
     const chunks = documents.flatMap(documentChunks);
-    this.lexicalIndex = createBm25Index(chunks);
     const entities = new Map<string, CorpusEntity>();
     for (const chunk of chunks) {
       for (const entity of chunk.entities) {
@@ -626,12 +630,14 @@ export class HsvaiKnowledge {
       }
     }
     const revision = sourceRevision(documents, await this.embeddingVersion());
+    const lexicalSnapshot = { revision, index: createBm25Index(chunks) };
     const existing = await this.client.query<{ corpus?: { revision?: string }[] }>(
       `query { corpus(func: eq(hsvai.corpus_id, "hsvai")) @filter(type(HsvaiCorpus)) {
         revision: hsvai.revision
       } }`
     );
     if (existing.corpus?.[0]?.revision === revision) {
+      this.lexicalSnapshot = lexicalSnapshot;
       return {
         changed: false,
         documents: documents.length,
@@ -642,6 +648,7 @@ export class HsvaiKnowledge {
     }
 
     await this.replaceCorpus(documents, chunks, [...entities.values()], revision);
+    this.lexicalSnapshot = lexicalSnapshot;
     return {
       changed: true,
       documents: documents.length,
@@ -709,6 +716,12 @@ export class HsvaiKnowledge {
     }
     if (!CORPUS_REVISION_PATTERN.test(revision)) {
       throw new Error("HSVAI corpus revision is invalid");
+    }
+    const lexicalSnapshot = this.requireLexicalSnapshot();
+    if (lexicalSnapshot.revision !== revision) {
+      throw new Error(
+        `HSVAI BM25 index revision ${lexicalSnapshot.revision} does not match corpus revision ${revision}; restart Artemis to rebuild the index`
+      );
     }
     return revision;
   }
@@ -817,7 +830,7 @@ export class HsvaiKnowledge {
   }
 
   private async searchBm25(query: string, limit: number): Promise<KnowledgeChunk[]> {
-    const rankedIds = rankBm25(this.lexicalIndex, query, limit);
+    const rankedIds = rankBm25(this.requireLexicalSnapshot().index, query, limit);
     if (!rankedIds.length) return [];
     const data = await this.queryClient.query<{ chunks?: KnowledgeChunk[] }>(
       `query {
@@ -831,6 +844,13 @@ export class HsvaiKnowledge {
       const chunk = chunksById.get(id);
       return chunk ? [chunk] : [];
     });
+  }
+
+  private requireLexicalSnapshot(): Bm25Snapshot {
+    if (!this.lexicalSnapshot) {
+      throw new Error("HSVAI BM25 index is unavailable");
+    }
+    return this.lexicalSnapshot;
   }
 
   private async searchSemantic(vector: number[], limit: number): Promise<KnowledgeChunk[]> {
