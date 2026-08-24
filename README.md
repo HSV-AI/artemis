@@ -2,7 +2,7 @@
 
 Artemis is a small, community-run Discord chatbot built with TypeScript, the PI SDK, a configurable OpenAI-compatible model provider, and SQLite. It supports allowlisted users in direct messages and any user in selected channels across Discord guilds, while keeping each conversation isolated across restarts.
 
-The product and implementation baseline is documented in [design/baseline.md](design/baseline.md). Coding agents can reproduce Artemis in another language or with another conversational harness by following the [clean-room rebuild guide](design/rebuild-guide.md).
+The original implementation is preserved in the historical [design baseline](design/baseline.md) and [clean-room rebuild guide](design/rebuild-guide.md). Current features are indexed in the [design documents](design/README.md).
 
 ## Behavior
 

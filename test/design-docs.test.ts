@@ -37,7 +37,6 @@ describe("design documentation guardrail", () => {
 
     expect(errors).toContain("design/orphan.md is not linked from design/README.md");
     expect(errors).toContain("design/README.md contains a broken local link: missing.md");
-    expect(errors).toContain("design/orphan.md is not linked from design/baseline.md");
     expect(errors).toContain("design/orphan.md is missing required section: Status");
     expect(errors).toContain("design/orphan.md is missing required section: Verification");
   });

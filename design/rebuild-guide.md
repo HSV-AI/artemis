@@ -23,11 +23,10 @@ The following behavior is fixed:
 - Every Discord message event is logged to the console and SQLite before filtering, including DMs, bot messages, unauthorized messages, unmentioned messages, and messages from disallowed channels.
 - Accepted conversations retain their history in SQLite across restarts. There is no automatic retention or deletion.
 - Model or harness failures are logged and persisted, but produce no Discord response.
-- The model may use explicitly registered custom tools: `web_fetch`, six GitHub tools when a token is configured, nine conversation-scoped Dgraph memory tools, and the read-only `hsvai_graph_search` and `hsvai_graph_query` tools backed by the fixed Huntsville AI source. Events expose source-matched `research`, `building`, or `community` themes and first-class speaker edges from the reviewed event catalog; presenters and discussion facilitators share that role, while reviewed speakerless events use a complete empty speaker list. Stale events are marked pending. The query tool accepts arbitrary DQL but is bound by a Dgraph JWT to the public namespace and invokes only the read-only query endpoint. Each model turn receives the current corpus revision, and both HSVAI tools label results with that revision. The in-process BM25 index must carry the same revision; if Dgraph advances independently, Artemis must reject generation until the index is rebuilt rather than label stale lexical results as current. Matching historical results remain reusable; unlabeled or mismatched results require a new query. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
+- The model may use explicitly registered custom tools: `web_fetch`, six GitHub tools when a token is configured, and six conversation-scoped Dgraph memory tools. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Group/channel (guild) assistant responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) self-contained Discord messages per turn. DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind (`guild` vs `dm`).
-- Base Compose retains Ollama as a separate service, the model-preparation job, persistent ACL-enabled Dgraph, a one-shot namespace bootstrap, and Artemis. An optional provider-specific Compose path may omit Ollama while retaining Dgraph and its bootstrap.
-- Startup loads a checked-in HSVAI event-catalog baseline plus an optional durable runtime overlay but never calls the model for catalog enrichment. Operators stop the serving process before `npm run catalog:hsvai-events`, which enriches new or changed events through the configured provider, atomically writes the overlay, and resynchronizes Dgraph, then restart Artemis to rebuild its BM25 snapshot before serving resumes.
+- Base Compose retains Ollama as a separate service, the model-preparation job, persistent Dgraph, and Artemis. An optional provider-specific Compose path may omit Ollama while retaining Dgraph.
 
 The following may be replaced:
 
@@ -54,11 +53,9 @@ flowchart LR
     Harness --> WebFetch[web_fetch tool]
     Harness --> GitHubTools[Token-gated GitHub tools]
     Harness --> MemoryTools[Memory tools]
-    Harness --> KnowledgeTools[HSVAI search and DQL]
     WebFetch --> Web[HTTP or HTTPS page]
     GitHubTools --> GitHubAPI[GitHub API]
     MemoryTools --> Dgraph[(Dgraph facts)]
-    KnowledgeTools --> Dgraph
     Model --> Provider[Configured OpenAI-compatible endpoint]
     Commands -- clear-session only --> Store
     Commands --> Discord
@@ -242,7 +239,7 @@ The model-facing implementation must:
 - Apply a provider definition's explicit reasoning effort to every model request when configured.
 - Restore the native harness state for the logical session directly from durable SQLite entries.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
-- Enable only `web_fetch`, the six GitHub custom tools when configured, the nine scoped memory tools, and the fixed-source `hsvai_graph_search` and `hsvai_graph_query` tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
+- Enable only `web_fetch`, the six GitHub custom tools when configured, and the six scoped memory tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply the complete identity instructions from the profile selected by `PERSONA_PROFILE`, which defaults to `artemis` and includes `wartermis` as a bundled alternative. Keep each profile in its own source file and compose the fixed Discord instruction after it. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, and tool registry.
 - Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
@@ -325,13 +322,6 @@ SQLite is the durable system of record. Open it before connecting Discord, creat
 Dgraph is the durable system of record for memory facts. Its named volume
 survives process and Compose restarts. Apply the additive fact schema before
 Discord login; fail startup if that operation fails.
-
-The application image must contain the reviewed HSVAI event-catalog baseline.
-Load an optional overlay from `/data/hsvai-event-catalog.jsonl`, or
-`HSVAI_EVENT_CATALOG_PATH` when set. Overlay records replace baseline records by
-source ID, but apply only when their source hash matches the normalized event.
-Malformed catalog data fails loudly; stale records produce pending event
-metadata rather than stale graph edges.
 
 The minimal logical schema is:
 
@@ -458,29 +448,10 @@ Load local environment configuration from `.env` or the process environment, opt
 | `GITHUB_TOKEN` | No | Empty | GitHub API token; blank disables all GitHub tools. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `mbrooks/artemis,HSV-AI/artemis` in application code | Comma-separated GitHub repository allowlist; blank disables GitHub tools. The supplied `.env.example` explicitly sets only `HSV-AI/artemis`. |
 | `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint required by memory. |
-| `DGRAPH_INITIAL_GROOT_PASSWORD` | No | `password` | First-start galaxy password used only to rotate Dgraph's default. |
-| `DGRAPH_GROOT_PASSWORD` | Yes | None | Galaxy guardian password used by the bootstrap service. |
-| `DGRAPH_USER` / `DGRAPH_PASSWORD` | Yes | None | Namespace-0 memory service account with `dgraph.all=7`. |
-| `HSVAI_DGRAPH_GROOT_PASSWORD` | Yes | None | Guardian password for the public HSVAI namespace. |
-| `HSVAI_DGRAPH_SYNC_USER` / `HSVAI_DGRAPH_SYNC_PASSWORD` | Yes | None | Public-corpus schema and ingestion account with `dgraph.all=7`. |
-| `HSVAI_DGRAPH_QUERY_USER` / `HSVAI_DGRAPH_QUERY_PASSWORD` | Yes | None | Public-corpus query account with `dgraph.all=4`. The query and sync usernames must differ. |
-| `HSVAI_DGRAPH_NAMESPACE` | No | `1` | Positive namespace ID containing the public HSVAI corpus. |
-| `HSVAI_EVENT_CATALOG_PATH` | No | `/data/hsvai-event-catalog.jsonl` | Durable event-catalog overlay read at startup and written by the operator refresh task. |
-| `MEMORY_INJECT` | No | `false` | Strict boolean enabling one bounded, byte-stable memory snapshot per durable PI session. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
 | `LOG_LEVEL` | No | `info` | Minimum routine level: `debug`, `info`, `warn`, or `error`. |
 
 The received-message audit ignores `LOG_LEVEL`; all other logs obey it.
-
-The optional provider JSON `embedding` object requires `modelId`; its optional
-`baseUrl` defaults to the provider base URL. Its presence is the sole embedding
-enablement switch, and it reuses `MODEL_API_KEY`. Omission disables semantic
-vectors while preserving HSVAI BM25 and graph retrieval plus memory lexical,
-graph, and recency retrieval. HSVAI
-GraphRAG always synchronizes from the fixed `https://hsv.ai` source and always
-registers `hsvai_graph_search` and `hsvai_graph_query`. Dgraph ACL must be enabled
-with an ignored 32-byte `dgraph-acl-secret`; bootstrap must finish before Artemis
-starts.
 
 ## Clean-room implementation sequence
 
@@ -536,9 +507,7 @@ Each stage should finish with tests before the next begins.
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
 - Connect the harness's native session manager to ordered SQLite storage and complete the atomic one-time PI cutover before Discord login.
-- Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, and fixed-source HSVAI graph search; disable every built-in tool and build the system instruction from conversation kind, registered-tool metadata, and an optional per-session memory snapshot, including the Capability Gap Protocol.
-- Load the reviewed HSVAI event baseline and runtime overlay before source synchronization. Merge legacy facilitators into speakers, then project source-matched themes, speaker edges, and complete/pending status without model calls during startup.
-- Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, optional semantic, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
+- Register and allowlist `web_fetch`, token-gated GitHub tools, and scoped memory tools; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
 - Add configured provider health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
 
@@ -549,7 +518,6 @@ Each stage should finish with tests before the next begins.
 - Ensure the mounted SQLite directory is created and writable before dropping privileges.
 - Preserve the base `ollama`, model-preparation, `dgraph`, and `artemis` Compose services.
 - Persist Ollama, Dgraph, and Artemis data in separate volumes.
-- Ship the reviewed event baseline in the image and persist its operator-refreshed overlay on the Artemis data volume.
 - Allow deployment-owned Compose overrides to select externally managed providers.
 - In an override, mount the selected model config read-only, set its in-container path, and preserve the SQLite data volume.
 - Document `docker compose up --build` as the one-command startup workflow after initial credentials/sign-in are prepared.
@@ -592,8 +560,6 @@ At minimum, prove all of the following:
 - `web_fetch` rejects non-HTTP(S) targets, fetches directly without model credentials, bounds content, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and publish the explicit-mutation guideline in the model's tool registry.
 - Memory tools are present for every profile; every operation uses the immutable conversation scope, writes retain Discord provenance, corrections and forgetting create tombstones, and scope isolation survives PI session clearing.
-- HSVAI startup synchronization follows source pagination, builds a corpus-wide BM25 index, replaces only marked corpus nodes, skips an unchanged source/model revision, and returns cited BM25, optional semantic, and connected-neighborhood evidence through a read-only tool. Omitting `model.embedding` makes no embedding requests and leaves BM25 plus graph retrieval active.
-- HSVAI catalog loading merges the baseline and overlay by source ID, rejects malformed data, applies only source-hash matches, exposes stale events as pending, and projects themes plus role-specific person edges. Its model boundary is covered only with synthetic records and mocked HTTP.
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Guild sessions receive the channel-limits system-prompt block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3`, self-contained-thought rule) while DM sessions receive no limit messaging; prompt selection is deterministic from the conversation kind.
@@ -634,10 +600,6 @@ After automated tests pass:
 9. Force a model failure and confirm Discord receives nothing while console and SQLite contain correlated diagnostics.
 10. Inspect the SQLite volume and confirm conversations, sessions, messages, events, application logs, and incoming-message audit rows are durable.
 11. Explicitly remember and recall a non-sensitive fact, clear the PI session, and confirm the fact remains available only in the same DM or parent guild channel.
-12. Stop Artemis, run `npm run catalog:hsvai-events` with the configured provider,
-    restart Artemis after synchronization succeeds, confirm the overlay is
-    atomically updated on the Artemis data volume, and query one event's theme
-    and role-specific person edges through the read-only HSVAI account.
 
 Use test Discord credentials and non-sensitive content for this check because raw messages and model metadata are retained indefinitely.
 

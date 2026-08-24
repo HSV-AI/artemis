@@ -26,9 +26,9 @@ Small corrections to an existing feature update that feature's existing document
 
 ## Observable behavior
 
-Before implementation, the coding agent reads the design index, baseline, and relevant subdocuments and classifies the change's design impact. Before completion, it compares the final diff with the documented behavior and updates all affected documents in the same change.
+Before implementation, the coding agent reads the design index and relevant subdocuments and classifies the change's design impact. Before completion, it compares the final diff with the documented behavior and updates all affected feature or protocol documents in the same change.
 
-Every new protocol or major feature has its own `design/<feature-or-protocol>.md` document. That document is linked from the design index and summarized with a link in the baseline. Compatibility changes also update the rebuild guide.
+Every new protocol or major feature has its own `design/<feature-or-protocol>.md` document linked from the design index. The baseline and rebuild guide remain unchanged historical records of the original design.
 
 A change is incomplete when its design impact has not been reviewed, required documentation is absent, the design check fails, or the complete guardrail fails.
 
@@ -39,20 +39,19 @@ Documentation ownership is hierarchical:
 | Document | Responsibility |
 | --- | --- |
 | `design/README.md` | Complete catalog and discovery entry point. |
-| `design/baseline.md` | High-level current architecture and summaries linking to detailed documents. |
-| `design/rebuild-guide.md` | Observable compatibility contract for a clean-room implementation. |
+| `design/baseline.md` | Historical record of the original implemented design. |
+| `design/rebuild-guide.md` | Historical clean-room contract for reconstructing the original design. |
 | `design/<feature-or-protocol>.md` | Authoritative detailed contract for one major feature or protocol. |
 
 The required workflow is:
 
-1. Read the index, baseline, and relevant subdocuments before changing behavior.
+1. Read the index and relevant subdocuments before changing behavior.
 2. Classify the change as no design impact, an update to existing design, or a new protocol/major feature.
 3. Create or update the authoritative subdocument alongside the implementation.
-4. Update the baseline summary and rebuild contract when their scope is affected.
-5. Select one design-impact outcome in the pull-request checklist and provide the document path or no-impact rationale.
-6. Run `npm run check:design` and `npm run guardrail`.
+4. Select one design-impact outcome in the pull-request checklist and provide the document path or no-impact rationale.
+5. Run `npm run check:design` and `npm run guardrail`.
 
-Detailed behavior belongs in one authoritative subdocument. The baseline and rebuild guide summarize or express compatibility requirements and link to the detailed contract rather than copying it wholesale.
+Detailed behavior belongs in one authoritative feature or protocol subdocument. The baseline and rebuild guide are not updated for later features.
 
 ## Configuration
 
@@ -79,7 +78,6 @@ Structural automation cannot prove that prose is semantically correct. Reviewers
 - Every Markdown file under `design/` is linked from `design/README.md`.
 - Every indexed local document exists.
 - Every local Markdown link within `design/` resolves.
-- Every protocol or major-feature subdocument is linked from `design/baseline.md`.
 - Every protocol or major-feature subdocument contains the required contract sections.
 
 The pull-request checklist records the semantic design-impact review. The complete `npm run guardrail` remains the completion gate.

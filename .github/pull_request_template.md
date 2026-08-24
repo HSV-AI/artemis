@@ -12,9 +12,8 @@ Select exactly one outcome and provide the requested detail.
 
 Confirm all applicable documentation work is complete:
 
-- [ ] I reviewed `design/README.md`, `design/baseline.md`, and the relevant subdocuments.
-- [ ] I linked every new protocol or major-feature subdocument from both the design index and baseline.
-- [ ] I updated `design/rebuild-guide.md` if observable compatibility changed.
+- [ ] I reviewed `design/README.md` and the relevant subdocuments.
+- [ ] I linked every new protocol or major-feature subdocument from the design index.
 
 ## Verification
 
