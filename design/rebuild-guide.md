@@ -327,7 +327,7 @@ survives process and Compose restarts. Apply the additive fact schema before
 Discord login; fail startup if that operation fails.
 
 The application image must contain the reviewed HSVAI event-catalog baseline.
-Load an optional overlay from `/data/hsvai-event-catalog.json`, or
+Load an optional overlay from `/data/hsvai-event-catalog.jsonl`, or
 `HSVAI_EVENT_CATALOG_PATH` when set. Overlay records replace baseline records by
 source ID, but apply only when their source hash matches the normalized event.
 Malformed catalog data fails loudly; stale records produce pending event
@@ -465,7 +465,7 @@ Load local environment configuration from `.env` or the process environment, opt
 | `HSVAI_DGRAPH_SYNC_USER` / `HSVAI_DGRAPH_SYNC_PASSWORD` | Yes | None | Public-corpus schema and ingestion account with `dgraph.all=7`. |
 | `HSVAI_DGRAPH_QUERY_USER` / `HSVAI_DGRAPH_QUERY_PASSWORD` | Yes | None | Public-corpus query account with `dgraph.all=4`. The query and sync usernames must differ. |
 | `HSVAI_DGRAPH_NAMESPACE` | No | `1` | Positive namespace ID containing the public HSVAI corpus. |
-| `HSVAI_EVENT_CATALOG_PATH` | No | `/data/hsvai-event-catalog.json` | Durable event-catalog overlay read at startup and written by the operator refresh task. |
+| `HSVAI_EVENT_CATALOG_PATH` | No | `/data/hsvai-event-catalog.jsonl` | Durable event-catalog overlay read at startup and written by the operator refresh task. |
 | `MEMORY_INJECT` | No | `false` | Strict boolean enabling one bounded, byte-stable memory snapshot per durable PI session. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
 | `LOG_LEVEL` | No | `info` | Minimum routine level: `debug`, `info`, `warn`, or `error`. |

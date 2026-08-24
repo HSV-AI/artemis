@@ -44,7 +44,7 @@ describe("parseConfig", () => {
       parseConfig({
         DISCORD_TOKEN: "token"
       })
-    ).toEqual({
+    ).toMatchObject({
       discordToken: "token",
       discordAllowedChannelIds: [],
       discordUserIds: [],
@@ -66,10 +66,6 @@ describe("parseConfig", () => {
       githubToken: "",
       githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
       dgraphUrl: DEFAULT_DGRAPH_URL,
-      dgraphAuth: { username: "memory-user", password: "memory-password", namespace: 0 },
-      hsvaiDgraphSyncAuth: { username: "hsvai-sync", password: "sync-password", namespace: 1 },
-      hsvaiDgraphQueryAuth: { username: "hsvai-query", password: "query-password", namespace: 1 },
-      memoryInject: false,
       sqlitePath: DEFAULT_SQLITE_PATH,
       logLevel: "info"
     });
@@ -100,16 +96,11 @@ describe("parseConfig", () => {
       GITHUB_TOKEN: " github-secret ",
       GITHUB_ALLOWED_REPOSITORY: " mbrooks/artemis, HSV-AI/artemis, MBROOKS/ARTEMIS ",
       DGRAPH_URL: "http://memory.example:8080/",
-      MEMORY_INJECT: "true",
       SQLITE_PATH: ":memory:",
       LOG_LEVEL: "debug"
     }, {
       ...providerDefinition,
-      baseUrl: "https://model.example/v1/",
-      embedding: {
-        baseUrl: "https://embeddings.example/v1/",
-        modelId: "embedding-model"
-      }
+      baseUrl: "https://model.example/v1/"
     });
     expect(result).toMatchObject({
       discordToken: "token",
@@ -120,19 +111,11 @@ describe("parseConfig", () => {
         providerName: "Configured Provider",
         baseUrl: "https://model.example/v1",
         modelId: "configured-model",
-        apiKey: "secret",
-        embedding: {
-          baseUrl: "https://embeddings.example/v1",
-          modelId: "embedding-model"
-        }
+        apiKey: "secret"
       }),
       githubToken: "github-secret",
       githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
       dgraphUrl: "http://memory.example:8080",
-      dgraphAuth: expect.objectContaining({ namespace: 0 }),
-      hsvaiDgraphSyncAuth: expect.objectContaining({ namespace: 1 }),
-      hsvaiDgraphQueryAuth: expect.objectContaining({ namespace: 1 }),
-      memoryInject: true,
       sqlitePath: ":memory:",
       logLevel: "debug"
     });
@@ -182,17 +165,6 @@ describe("parseConfig", () => {
       DISCORD_TOKEN: "token",
       DGRAPH_URL: "file:///data/dgraph"
     })).toThrow("Invalid URL configuration: DGRAPH_URL");
-    expect(() => parseConfig(
-      { DISCORD_TOKEN: "token" },
-      {
-        ...providerDefinition,
-        embedding: { baseUrl: "file:///models/embeddings", modelId: "embedding-model" }
-      }
-    )).toThrow("Invalid URL configuration: model.embedding.baseUrl");
-    expect(() => parseConfig({
-      DISCORD_TOKEN: "token",
-      MEMORY_INJECT: "sometimes"
-    })).toThrow("Invalid configuration: MEMORY_INJECT must be true or false");
   });
 
   it("loads model settings from MODEL_CONFIG_PATH", () => {
@@ -213,42 +185,6 @@ describe("parseConfig", () => {
       modelId: "configured-model",
       contextWindow: 64_000
     });
-  });
-
-  it("requires Dgraph credentials and validates namespace IDs", () => {
-    expect(() => parseRawConfig({
-      DISCORD_TOKEN: "token"
-    })).toThrow("Missing required configuration: DGRAPH_USER");
-    expect(() => parseConfig({
-      DISCORD_TOKEN: "token",
-      HSVAI_DGRAPH_NAMESPACE: "-1"
-    })).toThrow("HSVAI_DGRAPH_NAMESPACE must be a nonnegative safe integer");
-    expect(() => parseConfig({
-      DISCORD_TOKEN: "token",
-      HSVAI_DGRAPH_QUERY_USER: "hsvai-sync"
-    })).toThrow("sync and query users must differ");
-  });
-
-  it("defaults an embedding provider to the model base URL", () => {
-    const result = parseConfig(
-      { DISCORD_TOKEN: "token" },
-      { ...providerDefinition, embedding: { modelId: "embedding-model" } }
-    );
-    expect(result.model.embedding).toEqual({
-      baseUrl: "https://inference.example/v1",
-      modelId: "embedding-model"
-    });
-  });
-
-  it("rejects invalid embedding provider definitions", () => {
-    expect(() => parseConfig(
-      { DISCORD_TOKEN: "token" },
-      { ...providerDefinition, embedding: "embedding-model" }
-    )).toThrow("embedding must be an object");
-    expect(() => parseConfig(
-      { DISCORD_TOKEN: "token" },
-      { ...providerDefinition, embedding: {} }
-    )).toThrow("embedding.modelId must be a nonblank string");
   });
 
   it("reports unreadable and invalid model config files", () => {

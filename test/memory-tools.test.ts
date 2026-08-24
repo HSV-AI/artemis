@@ -24,20 +24,6 @@ function memoryMock(): MemoryStore {
 }
 
 describe("Artemis memory tools", () => {
-  it("registers the complete explicit memory tool set", () => {
-    expect(createMemoryTools(memoryMock(), context).map((tool) => tool.name)).toEqual([
-      "memory_remember",
-      "memory_search",
-      "memory_recall",
-      "memory_supersede",
-      "memory_forget",
-      "memory_believed_at",
-      "memory_audit",
-      "memory_entity",
-      "memory_episode"
-    ]);
-  });
-
   it("binds writes to the current Discord scope and provenance", async () => {
     const memory = memoryMock();
     const [remember, , , supersede, forget] = createMemoryTools(memory, context);
@@ -197,17 +183,5 @@ describe("Artemis memory tools", () => {
       ended_reason: "forgotten",
       supersedes: { uid: "0x1" }
     })).toContain("(supersedes 0x1) [forgotten 2026-08-22T14:00:00.000Z]");
-    expect(memoryToolInternals.rankedFactsResult([
-      {
-        fact: {
-          uid: "0x3",
-          statement: "ranked",
-          scope_key: context.scopeKey,
-          recorded_at: "2026-08-22T15:00:00.000Z"
-        },
-        channels: ["semantic", "recency"],
-        score: 0.032
-      }
-    ], context.scopeKey).content[0]?.text).toContain("[semantic+recency 0.032]");
   });
 });

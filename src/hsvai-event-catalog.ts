@@ -42,9 +42,9 @@ export type HsvaiEventExtractionModel = (
 ) => Promise<Map<string, Pick<HsvaiEventCatalogEntry, "theme" | "speakers">>>;
 
 const BASELINE_CATALOG_PATH = fileURLToPath(
-  new URL("../data/hsvai-event-catalog.json", import.meta.url)
+  new URL("../data/hsvai-event-catalog.jsonl", import.meta.url)
 );
-const RUNTIME_CATALOG_PATH = "/data/hsvai-event-catalog.json";
+const RUNTIME_CATALOG_PATH = "/data/hsvai-event-catalog.jsonl";
 const EXTRACTION_BATCH_CHARS = 30_000;
 const PERSON_NAME = String.raw`[A-Z][A-Za-z.'’\-]+(?:\s+[A-Z][A-Za-z.'’\-]+){1,3}`;
 
@@ -161,13 +161,26 @@ function parseCatalog(value: unknown, path: string): HsvaiEventCatalog {
   };
 }
 
+function parseCatalogJsonl(content: string, path: string): HsvaiEventCatalog {
+  const events = content.split(/\r?\n/u).flatMap((line, index) => {
+    if (!line.trim()) return [];
+    try {
+      return [JSON.parse(line) as unknown];
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid HSVAI event catalog JSONL at ${path}:${index + 1}: ${message}`);
+    }
+  });
+  return parseCatalog({ version: 1, events }, path);
+}
+
 export function loadHsvaiEventCatalog(
   baselinePath = BASELINE_CATALOG_PATH,
   runtimePath = process.env.HSVAI_EVENT_CATALOG_PATH ?? RUNTIME_CATALOG_PATH
 ): HsvaiEventCatalog {
-  const baseline = parseCatalog(JSON.parse(readFileSync(baselinePath, "utf8")), baselinePath);
+  const baseline = parseCatalogJsonl(readFileSync(baselinePath, "utf8"), baselinePath);
   if (!existsSync(runtimePath)) return baseline;
-  const runtime = parseCatalog(JSON.parse(readFileSync(runtimePath, "utf8")), runtimePath);
+  const runtime = parseCatalogJsonl(readFileSync(runtimePath, "utf8"), runtimePath);
   return mergeHsvaiEventCatalog(baseline, runtime);
 }
 

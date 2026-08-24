@@ -33,12 +33,12 @@ refresh changed events with `npm run catalog:hsvai-events`.
 
 ### Catalog Format
 
-`data/hsvai-event-catalog.json` is the reviewed bootstrap catalog shipped in the
-application image. `/data/hsvai-event-catalog.json` is the writable runtime
+`data/hsvai-event-catalog.jsonl` is the reviewed bootstrap catalog shipped in the
+application image. `/data/hsvai-event-catalog.jsonl` is the writable runtime
 overlay on the existing Artemis data volume. `HSVAI_EVENT_CATALOG_PATH` may
 select a different overlay path.
 
-Both files contain version `1` and one record per event. Each record retains the
+Both files use JSON Lines with one event object per line. Each record retains the
 source ID, title, URL, modification time, SHA-256 source hash, one theme, and a
 speaker array. Themes are exactly `research`, `building`, or `community`.
 Discussion facilitators use the same speaker representation. Legacy version-1
@@ -90,7 +90,7 @@ replacement and rebuilds the process-local BM25 snapshot before service resumes.
 
 By default the task updates the durable overlay. A maintainer working from source
 may run `npm run build` first, then
-`npm run catalog:hsvai-events -- data/hsvai-event-catalog.json` to regenerate the
+`npm run catalog:hsvai-events -- data/hsvai-event-catalog.jsonl` to regenerate the
 checked-in baseline through the same configured model without changing code.
 That generated baseline must be reviewed before commit.
 
@@ -109,7 +109,7 @@ schema metadata and orphaned UID edges from earlier versions do not survive.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `HSVAI_EVENT_CATALOG_PATH` | `/data/hsvai-event-catalog.json` | Writable runtime overlay loaded after the checked-in baseline. |
+| `HSVAI_EVENT_CATALOG_PATH` | `/data/hsvai-event-catalog.jsonl` | Writable runtime overlay loaded after the checked-in baseline. |
 | Configured model provider | Existing Artemis model configuration | OpenAI-compatible endpoint, model, credentials, and optional embeddings used by the operator task. |
 
 ## Persistence

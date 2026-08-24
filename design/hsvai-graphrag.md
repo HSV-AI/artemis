@@ -167,7 +167,7 @@ inference.
 | `HSVAI_DGRAPH_NAMESPACE` | `1` | Namespace containing only the public corpus. |
 | `HSVAI_DGRAPH_SYNC_USER` / `HSVAI_DGRAPH_SYNC_PASSWORD` | Required | Write and schema credentials used only for synchronization. |
 | `HSVAI_DGRAPH_QUERY_USER` / `HSVAI_DGRAPH_QUERY_PASSWORD` | Required | Read-only credentials used by both HSVAI tools. |
-| `HSVAI_EVENT_CATALOG_PATH` | `/data/hsvai-event-catalog.json` | Durable runtime catalog overlay read by startup and written by the operator task. |
+| `HSVAI_EVENT_CATALOG_PATH` | `/data/hsvai-event-catalog.jsonl` | Durable runtime catalog overlay read by startup and written by the operator task. |
 
 Embedding requests are batched by 64 inputs. The embedding model ID participates
 in the corpus revision, so changing models causes a complete re-embedding on the

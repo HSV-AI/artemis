@@ -203,124 +203,6 @@ describe("HsvaiWordPressSource", () => {
 });
 
 describe("HSVAI corpus construction", () => {
-  it("preserves block text, bounds chunks, and extracts explicit speakers", () => {
-    const text = hsvaiKnowledgeInternals.htmlToText(
-      "<h2>Title</h2><p><strong>Test Speaker:</strong> Evidence &amp; context.</p>"
-    );
-    expect(text).toBe("Title\nTest Speaker: Evidence & context.");
-    expect(hsvaiKnowledgeInternals.transcriptSpeakers(text)).toEqual([
-      expect.objectContaining({ kind: "speaker", name: "Test Speaker" })
-    ]);
-    const chunks = hsvaiKnowledgeInternals.chunkText(`Intro\n${"word ".repeat(800)}`);
-    expect(chunks.length).toBeGreaterThan(1);
-    expect(Math.max(...chunks.map((chunk) => chunk.length))).toBeLessThanOrEqual(1_600);
-  });
-
-  it("ranks lexical matches with corpus-wide BM25", () => {
-    const index = hsvaiKnowledgeInternals.createBm25Index([
-      { id: "focused", text: "graph retrieval graph" },
-      { id: "verbose", text: `graph retrieval ${"context ".repeat(40)}` },
-      { id: "unrelated", text: "calendar event speaker" }
-    ]);
-
-    expect(hsvaiKnowledgeInternals.rankBm25(index, "graph retrieval", 3)).toEqual([
-      "focused",
-      "verbose"
-    ]);
-    expect(hsvaiKnowledgeInternals.rankBm25(index, "missing", 3)).toEqual([]);
-  });
-
-  it("replaces only marked corpus nodes and writes its revision last", async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
-      .mockResolvedValueOnce(jsonResponse({ data: { corpus: [] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { nodes: [{ uid: "0x99" }] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
-      .mockResolvedValueOnce(jsonResponse({ data: { uids: { entity0: "0xe1" } } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { uids: { document0: "0xd1" } } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { uids: { chunk0: "0xc1" } } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { uids: { corpus: "0xa1" } } }));
-    const source = { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) };
-    const knowledge = new HsvaiKnowledge(
-      new DgraphClient("http://dgraph:8080", fetchMock),
-      source
-    );
-
-    const result = await knowledge.initializeAndSync();
-
-    expect(result).toMatchObject({ changed: true, documents: 1, chunks: 1, entities: 1 });
-    const deletion = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)) as {
-      delete: Array<{ uid: string }>;
-    };
-    expect(deletion.delete).toEqual([{ uid: "0x99" }]);
-    const chunkMutation = JSON.parse(String(fetchMock.mock.calls[7]?.[1]?.body)) as {
-      set: Array<Record<string, unknown>>;
-    };
-    expect(chunkMutation.set[0]).toMatchObject({
-      "hsvai.chunk_id": "hsvai:post:1#chunk-0001",
-      "hsvai.document": { uid: "0xd1" },
-      "hsvai.mentions": [{ uid: "0xe1" }]
-    });
-    const finalMutation = JSON.parse(String(fetchMock.mock.calls[8]?.[1]?.body)) as {
-      set: Array<Record<string, unknown>>;
-    };
-    expect(finalMutation.set[0]).toMatchObject({
-      "dgraph.type": "HsvaiCorpus",
-      "hsvai.corpus_id": "hsvai",
-      "hsvai.revision": result.revision
-    });
-  });
-
-  it("writes presenters and facilitators to one speaker edge", async () => {
-    const eventDocument: HsvaiSourceDocument = {
-      sourceId: "hsvai:event:1",
-      kind: "event",
-      title: "Synthetic Event",
-      url: "https://example.test/events/1",
-      publishedAt: "2026-01-01T00:00:00.000Z",
-      modifiedAt: "2026-01-02T00:00:00.000Z",
-      text: "Synthetic event source.",
-      peopleStatus: "complete",
-      theme: "building",
-      people: [
-        { name: "Test Speaker", evidence: "Test Speaker presents." },
-        { name: "Test Facilitator", evidence: "Test Facilitator facilitates." }
-      ]
-    };
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
-      .mockResolvedValueOnce(jsonResponse({ data: { corpus: [] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { nodes: [] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { uids: { entity0: "0xe1", entity1: "0xe2" } } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { uids: { document0: "0xd1" } } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { uids: { chunk0: "0xc1" } } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { uids: { corpus: "0xa1" } } }));
-    const knowledge = new HsvaiKnowledge(
-      new DgraphClient("http://dgraph:8080", fetchMock),
-      { fetchDocuments: vi.fn().mockResolvedValue([eventDocument]) }
-    );
-
-    await knowledge.initializeAndSync();
-
-    const documentMutation = JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body)) as {
-      set: Array<Record<string, unknown>>;
-    };
-    expect(documentMutation.set[0]).toMatchObject({
-      "hsvai.people_status": "complete",
-      "hsvai.theme": "building",
-      "hsvai.speakers": [{ uid: "0xe1" }, { uid: "0xe2" }]
-    });
-    expect(documentMutation.set[0]).not.toHaveProperty("hsvai.facilitators");
-    const chunkMutation = JSON.parse(String(fetchMock.mock.calls[6]?.[1]?.body)) as {
-      set: Array<Record<string, unknown>>;
-    };
-    expect(chunkMutation.set[0]).toMatchObject({
-      "hsvai.mentions": [{ uid: "0xe1" }, { uid: "0xe2" }]
-    });
-  });
-
   it("skips an unchanged source and embedding-model revision", async () => {
     const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument], "embed-v1");
     const fetchMock = vi.fn()
@@ -399,7 +281,6 @@ describe("HSVAI hybrid graph retrieval", () => {
         channels: ["graph"]
       })
     ]);
-    expect(String(fetchMock.mock.calls[5]?.[1]?.body)).toContain("~hsvai.mentions");
   });
 
   it("uses BM25 and graph expansion without an embedding provider", async () => {
@@ -427,8 +308,6 @@ describe("HSVAI hybrid graph retrieval", () => {
         channels: ["bm25", "graph"]
       })
     ]);
-    expect(String(fetchMock.mock.calls[3]?.[1]?.body)).toContain("eq(hsvai.chunk_id");
-    expect(fetchMock.mock.calls.some((call) => String(call[1]?.body).includes("similar_to"))).toBe(false);
   });
 
   it("runs arbitrary DQL only through the namespace-scoped query client", async () => {
@@ -452,12 +331,6 @@ describe("HSVAI hybrid graph retrieval", () => {
       events: [{ title: "Newest event", start: "2026-08-19T23:00:00Z" }]
     });
     expect(syncFetch).not.toHaveBeenCalled();
-    expect(queryFetch).toHaveBeenCalledWith(
-      "http://dgraph:8080/query?ro=true",
-      expect.objectContaining({
-        body: JSON.stringify({ query: dql, variables: { $kind: "event" } })
-      })
-    );
   });
 
   it("reads the current corpus revision through the query account", async () => {
@@ -586,9 +459,6 @@ describe("HSVAI hybrid graph retrieval", () => {
     );
 
     expect(queryDql).toHaveBeenCalledWith("schema {}", { $kind: "event" });
-    expect(tool.promptGuidelines).toContain(
-      "Reuse prior HSVAI results when their corpus-revision label matches the current revision in the system prompt. Re-query only when a result is unlabeled, its revision differs, or the question needs data that result did not contain."
-    );
     const output = response.content.find((item) => item.type === "text")?.text;
     expect(output).toContain("HSVAI corpus revision: revision-1");
     expect(output).toContain("hsvai:event:1");

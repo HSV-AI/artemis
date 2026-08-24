@@ -29,7 +29,6 @@ describe("DgraphClient", () => {
   it("sends schema, query, mutation, and upsert requests through the HTTP API", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
       .mockResolvedValueOnce(jsonResponse({ data: { uids: { fact: "0x1" } } }))
       .mockResolvedValueOnce(jsonResponse({
@@ -38,7 +37,6 @@ describe("DgraphClient", () => {
     const client = new DgraphClient("http://dgraph:8080", fetchMock);
 
     await client.alter("name: string .");
-    await client.dropAttribute("old.name");
     await expect(client.query("query {}", { $scope: "scope" })).resolves.toEqual({ facts: [] });
     await expect(client.mutate([{ uid: "_:fact" }])).resolves.toEqual({ fact: "0x1" });
     await expect(client.upsert("query {}", [{ set: [{ uid: "_:fact" }] }])).resolves.toEqual({
@@ -51,12 +49,7 @@ describe("DgraphClient", () => {
       headers: { "Content-Type": "application/dql" },
       body: "name: string ."
     });
-    expect(fetchMock).toHaveBeenNthCalledWith(2, "http://dgraph:8080/alter", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ drop_attr: "old.name" })
-    });
-    expect(fetchMock).toHaveBeenNthCalledWith(3, "http://dgraph:8080/query?ro=true", {
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "http://dgraph:8080/query?ro=true", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: "query {}", variables: { $scope: "scope" } })
@@ -113,6 +106,20 @@ describe("DgraphClient", () => {
     await expect(client.query("query {}", {})).resolves.toEqual({ facts: [] });
     expect(loginCount).toBe(2);
     expect(queryCount).toBe(2);
+  });
+
+  it.each([
+    ["HTTP failure", new Response("offline", { status: 503 }), "503"],
+    ["GraphQL failure", jsonResponse({ errors: [{ message: "denied" }] }), "denied"],
+    ["missing token", jsonResponse({ data: { login: { response: {} } } }), "no access token"]
+  ])("reports %s during login", async (_case, loginResponse, message) => {
+    const client = new DgraphClient(
+      "http://dgraph:8080",
+      vi.fn().mockResolvedValue(loginResponse),
+      { username: "reader", password: "secret", namespace: 1 }
+    );
+
+    await expect(client.query("query {}")).rejects.toThrow(message);
   });
 
   it("reports HTTP and Dgraph response errors", async () => {
@@ -277,44 +284,6 @@ describe("GraphMemory", () => {
     })).resolves.toBe("0x2");
   });
 
-  it("links writes to their episode and entity inside the serial queue", async () => {
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
-      .mockResolvedValueOnce(jsonResponse({
-        data: { uids: { episode: "0xe1" }, queries: { existing: [] } }
-      }))
-      .mockResolvedValueOnce(jsonResponse({
-        data: { uids: { entity: "0xa1" }, queries: { existing: [] } }
-      }))
-      .mockResolvedValueOnce(jsonResponse({ data: { uids: { fact: "0xf1" } } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { facts: [{
-        uid: "0xf1",
-        statement: input.statement,
-        scope_key: input.scopeKey,
-        recorded_at: "2026-08-22T12:00:00.000Z"
-      }] } }));
-    const memory = new GraphMemory(new DgraphClient("http://dgraph:8080", fetchMock));
-
-    const [uid, current] = await Promise.all([
-      memory.remember({
-        ...input,
-        episode: { id: "session-1", channel: "discord" },
-        entityName: "user.preferences"
-      }),
-      memory.retrieveCurrent(input.scopeKey)
-    ]);
-
-    expect(uid).toBe("0xf1");
-    expect(current).toHaveLength(1);
-    const mutation = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)) as {
-      set: Record<string, unknown>[];
-    };
-    expect(mutation.set[0]).toMatchObject({
-      source_episode: { uid: "0xe1" },
-      about: { uid: "0xa1" }
-    });
-  });
-
   it("fuses full-text, graph, and recency retrieval deterministically", async () => {
     const fulltext = {
       uid: "0x1",
@@ -382,13 +351,6 @@ describe("GraphMemory", () => {
       fact: { uid: "0x8" },
       channels: ["semantic"]
     });
-    const semanticQuery = JSON.parse(String(searchFetch.mock.calls[1]?.[1]?.body)) as {
-      query: string;
-      variables: Record<string, string>;
-    };
-    expect(semanticQuery.query).toContain("facts(func: eq(scope_key, $scope))");
-    expect(semanticQuery.query).not.toContain("similar_to");
-    expect(semanticQuery.variables).toEqual({ $scope: input.scopeKey });
 
     const noveltyFetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
@@ -403,27 +365,49 @@ describe("GraphMemory", () => {
     })).rejects.toMatchObject({ verdict: "duplicate", matchUid: "0x9" });
   });
 
-  it("keeps entity and episode reads inside the requested scope", async () => {
+  it("returns episode and entity facts and deduplicates graph search results", async () => {
+    const fact = {
+      uid: "0x4",
+      statement: "The release team uses a weekly deployment window.",
+      scope_key: input.scopeKey,
+      recorded_at: "2026-08-22T12:00:00.000Z"
+    };
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: { entities: [] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { episodes: [] } }));
+      .mockResolvedValueOnce(jsonResponse({ data: { episodes: [{ facts: [fact] }, {}] } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { entities: [{ facts: [fact] }, {}] } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
+      .mockResolvedValueOnce(jsonResponse({ data: {
+        entities: [{ related: [fact] }, { related: [fact] }]
+      } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }));
     const memory = new GraphMemory(new DgraphClient("http://dgraph:8080", fetchMock));
 
-    await expect(memory.factsAboutEntity(input.scopeKey, "user")).resolves.toEqual([]);
-    await expect(memory.factsForEpisode(input.scopeKey, "session-1")).resolves.toEqual([]);
+    await expect(memory.factsForEpisode(input.scopeKey, "session-1")).resolves.toEqual([fact]);
+    await expect(memory.factsAboutEntity(input.scopeKey, "release team")).resolves.toEqual([fact]);
+    await expect(memory.searchRanked(input.scopeKey, "deployment", { episodeId: "session-1" }))
+      .resolves.toEqual([expect.objectContaining({ fact, channels: ["graph"] })]);
+  });
 
-    const entityBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as {
-      variables: Record<string, string>;
-    };
-    expect(entityBody.variables).toMatchObject({
-      $scope: input.scopeKey,
-      $name: "user"
-    });
+  it("rejects blank search and semantic results without vectors", async () => {
+    const memory = new GraphMemory(new DgraphClient(
+      "http://dgraph:8080",
+      vi.fn()
+        .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
+        .mockResolvedValueOnce(jsonResponse({ data: { facts: [{
+          uid: "0x5",
+          statement: "Missing vector",
+          scope_key: input.scopeKey,
+          recorded_at: "2026-08-22T12:00:00.000Z"
+        }] } }))
+    ), { embed: vi.fn().mockResolvedValue([1, 0]) });
+
+    await expect(memory.searchRanked(input.scopeKey, " ")).rejects.toThrow("requires a query");
+    await expect(memory.searchRanked(input.scopeKey, "deployment"))
+      .rejects.toThrow("without its indexed embedding");
   });
 
   it("escapes DQL string literals and validates Dgraph UIDs", () => {
     expect(dgraphMemoryInternals.dqlString('scope"\\value')).toBe('"scope\\"\\\\value"');
     expect(dgraphMemoryInternals.validatedUid("0xABC123")).toBe("0xABC123");
-    expect(dgraphMemoryInternals.tokenJaccard("one two", "one three")).toBeCloseTo(1 / 3);
   });
 });

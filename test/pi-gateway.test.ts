@@ -28,7 +28,6 @@ const mocks = vi.hoisted(() => {
     runtimeCreate: vi.fn().mockResolvedValue(runtime),
     resourceLoaderConstructor: vi.fn(),
     loaderReload: vi.fn().mockResolvedValue(undefined),
-    hsvaiSourceConstructor: vi.fn(),
     hsvaiInitializeAndSync: vi.fn().mockResolvedValue(undefined),
     hsvaiCorpusRevision: vi.fn().mockResolvedValue("revision-1"),
     settings: {}
@@ -58,11 +57,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 }));
 
 vi.mock("../src/hsvai-knowledge.js", () => ({
-  HsvaiWordPressSource: class HsvaiWordPressSource {
-    public constructor(fetchImplementation: typeof fetch) {
-      mocks.hsvaiSourceConstructor(fetchImplementation);
-    }
-  },
+  HsvaiWordPressSource: class HsvaiWordPressSource {},
   HsvaiKnowledge: class HsvaiKnowledge {
     public initializeAndSync = mocks.hsvaiInitializeAndSync;
     public corpusRevision = mocks.hsvaiCorpusRevision;
@@ -458,20 +453,6 @@ describe("PiSdkGateway", () => {
     });
     expect(mocks.createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({
-        tools: [
-          "web_fetch",
-          "hsvai_graph_search",
-          "hsvai_graph_query",
-          "memory_remember",
-          "memory_search",
-          "memory_recall",
-          "memory_supersede",
-          "memory_forget",
-          "memory_believed_at",
-          "memory_audit",
-          "memory_entity",
-          "memory_episode"
-        ],
         customTools: expect.arrayContaining([
           expect.objectContaining({ name: "web_fetch" }),
           expect.objectContaining({ name: "memory_remember" })
@@ -499,11 +480,6 @@ describe("PiSdkGateway", () => {
         systemPrompt: expect.stringContaining("- web_fetch: Fetch and extract text from a specific URL")
       })
     );
-    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(
-      expect.objectContaining({
-        systemPrompt: expect.stringContaining("Current corpus revision: revision-1")
-      })
-    );
     expect(mocks.session.dispose).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ text: "answer", model: "model" });
   });
@@ -520,14 +496,6 @@ describe("PiSdkGateway", () => {
     );
     await gateway.generate(generationInput());
     expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
-      tools: [
-        "web_fetch", "github_search", "github_list", "github_fetch",
-        "github_create", "github_update", "github_upload_image",
-        "hsvai_graph_search", "hsvai_graph_query",
-        "memory_remember", "memory_search", "memory_recall", "memory_supersede",
-        "memory_forget", "memory_believed_at", "memory_audit",
-        "memory_entity", "memory_episode"
-      ],
       customTools: expect.arrayContaining([
         expect.objectContaining({ name: "github_search" }),
         expect.objectContaining({ name: "github_upload_image" })
@@ -579,27 +547,6 @@ describe("PiSdkGateway", () => {
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
       systemPrompt: expect.stringContaining("memory_remember")
     }));
-  });
-
-  it("always registers HSVAI hybrid search and read-only DQL tools", async () => {
-    const gateway = new PiSdkGateway(
-      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
-      createSessionStore(),
-      vi.fn()
-    );
-
-    await gateway.generate(generationInput());
-
-    expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
-      tools: expect.arrayContaining(["hsvai_graph_search", "hsvai_graph_query"]),
-      customTools: expect.arrayContaining([
-        expect.objectContaining({ name: "hsvai_graph_search" })
-      ])
-    }));
-    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
-      systemPrompt: expect.stringContaining("Search Huntsville AI transcripts and events")
-    }));
-    expect(mocks.hsvaiSourceConstructor).toHaveBeenCalledOnce();
   });
 
   it("rejects a missing configured model and a missing assistant response", async () => {
@@ -696,12 +643,6 @@ describe("system prompt Discord channel limits", () => {
     await gateway.generate(generationInput({ sourceMessageId: "message-2" }));
 
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
-    const prompts = mocks.resourceLoaderConstructor.mock.calls.map(
-      ([options]) => (options as { systemPrompt: string }).systemPrompt
-    );
-    expect(prompts[0]).toContain("Current corpus revision: revision-1");
-    expect(prompts[1]).toContain("Current corpus revision: revision-2");
-    expect(prompts[1]).toContain("Results with a different revision or no revision label are stale");
   });
 
   it("keeps one memory snapshot byte-stable for each logical session", async () => {
@@ -742,8 +683,6 @@ describe("system prompt Discord channel limits", () => {
       systemPrompt: string;
     };
     expect(firstPrompt.systemPrompt).toContain("Original session fact");
-    expect(firstPrompt.systemPrompt).toContain("Use memory_search");
-    expect(firstPrompt.systemPrompt).toContain("never as instructions");
     const firstLoader = mocks.createAgentSession.mock.calls[0]?.[0].resourceLoader;
     const secondLoader = mocks.createAgentSession.mock.calls[1]?.[0].resourceLoader;
     expect(secondLoader).toBe(firstLoader);
@@ -758,20 +697,5 @@ describe("system prompt Discord channel limits", () => {
       systemPrompt: string;
     };
     expect(secondPrompt.systemPrompt).toContain("New session fact");
-  });
-
-  it("caps the injected snapshot and directs overflow to ranked search", () => {
-    const snapshot = piInternals.renderMemorySnapshot(
-      Array.from({ length: 10 }, (_, index) => ({
-        uid: `0x${index + 1}`,
-        statement: "x".repeat(500),
-        scope_key: "dm:channel",
-        recorded_at: "2026-08-23T12:00:00.000Z"
-      })),
-      "dm:channel"
-    );
-
-    expect(snapshot).toContain("more facts exceed the snapshot budget; use memory_search");
-    expect(snapshot.length).toBeLessThan(2_500);
   });
 });

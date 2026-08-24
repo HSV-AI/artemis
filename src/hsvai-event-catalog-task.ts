@@ -24,7 +24,11 @@ const catalog = await enrichHsvaiEventCatalog(events, existing, extractor.extrac
 
 mkdirSync(dirname(outputPath), { recursive: true });
 const temporaryPath = `${outputPath}.tmp`;
-writeFileSync(temporaryPath, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
+writeFileSync(
+  temporaryPath,
+  `${catalog.events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+  "utf8"
+);
 renameSync(temporaryPath, outputPath);
 
 const authorizationHeaders = config.model.apiKey &&
