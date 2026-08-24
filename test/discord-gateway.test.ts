@@ -20,6 +20,15 @@ class FakeClient extends EventEmitter {
   public readonly application = { commands: { set: vi.fn().mockResolvedValue(new Collection()) } };
 }
 
+class FakeReadyClient extends EventEmitter {
+  public readonly login = vi.fn().mockResolvedValue("token");
+  public readonly destroy = vi.fn();
+  public readonly application = { commands: { set: vi.fn().mockResolvedValue(new Collection()) } };
+  public constructor(public readonly user: { id: string; username: string; globalName: string | null }) {
+    super();
+  }
+}
+
 function fakeMessage(overrides: Record<string, unknown> = {}): Message {
   const channel = {
     id: "channel",
@@ -728,6 +737,65 @@ describe("DiscordGateway", () => {
     );
     gateway.stop();
     expect(client.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("resolves the bot display name from Discord on ready and reports it", async () => {
+    const onBotIdentity = vi.fn();
+    const client = new FakeReadyClient({ id: "kipp-user", username: "kipp_bot", globalName: "KIPP" });
+    const logger = createLoggerMock();
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["group-one"], userIds: ["user"], onBotIdentity },
+      { handleMessage: vi.fn().mockResolvedValue(null) } as unknown as ConversationService,
+      logger,
+      client as unknown as Client
+    );
+    await gateway.start();
+    client.emit(Events.ClientReady, client);
+    await Promise.resolve();
+
+    expect(onBotIdentity).toHaveBeenCalledWith("KIPP");
+    expect(logger.info).toHaveBeenCalledWith(
+      "discord_ready",
+      expect.objectContaining({ botUserId: "kipp-user", botDisplayName: "KIPP" })
+    );
+  });
+
+  it("falls back to the Discord username when no global display name is set", async () => {
+    const onBotIdentity = vi.fn();
+    const client = new FakeReadyClient({ id: "kipp-user", username: "kipp_bot", globalName: null });
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["group-one"], userIds: ["user"], onBotIdentity },
+      { handleMessage: vi.fn().mockResolvedValue(null) } as unknown as ConversationService,
+      createLoggerMock(),
+      client as unknown as Client
+    );
+    await gateway.start();
+    client.emit(Events.ClientReady, client);
+    await Promise.resolve();
+
+    expect(onBotIdentity).toHaveBeenCalledWith("kipp_bot");
+  });
+
+  it("does not report a display name when the Discord user is unavailable", async () => {
+    const onBotIdentity = vi.fn();
+    const client = new EventEmitter();
+    Object.assign(client, {
+      login: vi.fn().mockResolvedValue("token"),
+      destroy: vi.fn(),
+      user: null,
+      application: { commands: { set: vi.fn().mockResolvedValue(new Collection()) } }
+    });
+    const gateway = new DiscordGateway(
+      { token: "token", channelIds: ["group-one"], userIds: ["user"], onBotIdentity },
+      { handleMessage: vi.fn().mockResolvedValue(null) } as unknown as ConversationService,
+      createLoggerMock(),
+      client as unknown as Client
+    );
+    await gateway.start();
+    client.emit(Events.ClientReady, client);
+    await Promise.resolve();
+
+    expect(onBotIdentity).not.toHaveBeenCalled();
   });
 });
 

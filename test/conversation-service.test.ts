@@ -442,6 +442,7 @@ describe("ConversationService", () => {
     });
     const pi: PiGateway = {
       checkHealth: vi.fn().mockResolvedValue(undefined),
+      setBotDisplayName: vi.fn(),
       generate: vi
         .fn()
         .mockImplementationOnce(() => firstResult)

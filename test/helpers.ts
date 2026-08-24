@@ -19,7 +19,8 @@ export function createPiMock(result?: Partial<PiGenerationResult>): PiGateway {
       text: "assistant response",
       model: "test-model",
       ...result
-    })
+    }),
+    setBotDisplayName: vi.fn()
   };
 }
 
