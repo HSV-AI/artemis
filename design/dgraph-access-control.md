@@ -18,7 +18,7 @@ authorization, conversation scopes, ingestion semantics, or SQLite.
 ## Observable behavior
 
 Startup requires authenticated Dgraph and exposes arbitrary read-only HSVAI DQL
-alongside existing memory and hybrid search. Authentication or bootstrap failure
+alongside existing memory and graph search. Authentication or bootstrap failure
 prevents Discord login; there is no unauthenticated fallback.
 
 ## Contracts and data flow

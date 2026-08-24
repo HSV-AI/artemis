@@ -317,54 +317,6 @@ describe("GraphMemory", () => {
     });
   });
 
-  it("uses semantic retrieval and novelty when embeddings are configured", async () => {
-    const vector = [1, 0];
-    const semanticFact = {
-      uid: "0x9",
-      statement: "The analytics warehouse lives in ClickHouse.",
-      statement_embedding: vector,
-      scope_key: input.scopeKey,
-      recorded_at: "2026-08-22T12:00:00.000Z"
-    };
-    const lessRelevantFact = {
-      ...semanticFact,
-      uid: "0x8",
-      statement: "The design archive lives in object storage.",
-      statement_embedding: [0, 1]
-    };
-    const searchFetch = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { facts: [lessRelevantFact, semanticFact] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { facts: [semanticFact] } }));
-    const embed = vi.fn().mockResolvedValue(vector);
-    const memory = new GraphMemory(
-      new DgraphClient("http://dgraph:8080", searchFetch),
-      { embed }
-    );
-
-    const ranked = await memory.searchRanked(input.scopeKey, "Where are metrics stored?");
-    expect(ranked[0]).toMatchObject({
-      fact: { uid: "0x9" },
-      channels: ["semantic", "recency"]
-    });
-    expect(ranked[1]).toMatchObject({
-      fact: { uid: "0x8" },
-      channels: ["semantic"]
-    });
-
-    const noveltyFetch = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { facts: [semanticFact] } }));
-    const noveltyMemory = new GraphMemory(
-      new DgraphClient("http://dgraph:8080", noveltyFetch),
-      { embed }
-    );
-    await expect(noveltyMemory.remember({
-      ...input,
-      statement: "Metrics are kept in the analytics data store."
-    })).rejects.toMatchObject({ verdict: "duplicate", matchUid: "0x9" });
-  });
-
   it("returns episode and entity facts and deduplicates graph search results", async () => {
     const fact = {
       uid: "0x4",
@@ -388,22 +340,12 @@ describe("GraphMemory", () => {
       .resolves.toEqual([expect.objectContaining({ fact, channels: ["graph"] })]);
   });
 
-  it("rejects blank search and semantic results without vectors", async () => {
-    const memory = new GraphMemory(new DgraphClient(
-      "http://dgraph:8080",
-      vi.fn()
-        .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
-        .mockResolvedValueOnce(jsonResponse({ data: { facts: [{
-          uid: "0x5",
-          statement: "Missing vector",
-          scope_key: input.scopeKey,
-          recorded_at: "2026-08-22T12:00:00.000Z"
-        }] } }))
-    ), { embed: vi.fn().mockResolvedValue([1, 0]) });
+  it("rejects blank searches", async () => {
+    const memory = new GraphMemory(
+      new DgraphClient("http://dgraph:8080", vi.fn())
+    );
 
     await expect(memory.searchRanked(input.scopeKey, " ")).rejects.toThrow("requires a query");
-    await expect(memory.searchRanked(input.scopeKey, "deployment"))
-      .rejects.toThrow("without its indexed embedding");
   });
 
   it("escapes DQL string literals and validates Dgraph UIDs", () => {

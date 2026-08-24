@@ -2,7 +2,6 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { DgraphClient } from "./dgraph-memory.js";
-import { EmbeddingClient } from "./embedding-client.js";
 import {
   enrichHsvaiEventCatalog,
   hsvaiEventCatalogPaths,
@@ -31,30 +30,12 @@ writeFileSync(
 );
 renameSync(temporaryPath, outputPath);
 
-const authorizationHeaders = config.model.apiKey &&
-  !(config.model.providerId === "ollama" && config.model.apiKey === "ollama")
-  ? { Authorization: `Bearer ${config.model.apiKey}` }
-  : {};
-const embedding = config.model.embedding
-  ? new EmbeddingClient(
-      config.model.embedding.baseUrl,
-      config.model.embedding.modelId,
-      authorizationHeaders
-    )
-  : undefined;
 const syncClient = new DgraphClient(config.dgraphUrl, fetch, config.hsvaiDgraphSyncAuth);
 const queryClient = new DgraphClient(config.dgraphUrl, fetch, config.hsvaiDgraphQueryAuth);
 const knowledge = new HsvaiKnowledge(
   syncClient,
   new HsvaiWordPressSource(fetch, catalog),
-  embedding
-    ? {
-        embed: embedding.embed,
-        embedMany: embedding.embedMany,
-        embeddingVersion: () => embedding.embeddingModel(),
-        queryClient
-      }
-    : { queryClient }
+  { queryClient }
 );
 const result = await knowledge.initializeAndSync();
 const speakers = catalog.events.reduce((count, event) => count + event.speakers.length, 0);

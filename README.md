@@ -108,10 +108,6 @@ OpenAI-compatible provider. The file must define `providerId`, `providerName`,
 `supportsDeveloperRole`. Keep bearer credentials in `MODEL_API_KEY`, not the
 JSON file.
 
-An alternate provider may define an `embedding` object with a required `modelId`
-and optional `baseUrl`. Its presence enables semantic retrieval for memory and
-HSVAI GraphRAG; see [Configurable model provider](design/model-provider.md).
-
 Providers that support configurable reasoning effort may also define
 `reasoningEffort` as `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
 Its presence enables PI reasoning-effort compatibility and passes the selected

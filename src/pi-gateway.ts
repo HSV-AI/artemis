@@ -16,7 +16,6 @@ import type {
   PiSessionStore
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
-import { EmbeddingClient } from "./embedding-client.js";
 import { loadHsvaiEventCatalog } from "./hsvai-event-catalog.js";
 import {
   createHsvaiGraphQueryTool,
@@ -197,14 +196,6 @@ export class PiSdkGateway implements PiGateway {
     private readonly sessionStore: PiSessionStore,
     private readonly fetchImplementation: typeof fetch = fetch
   ) {
-    const embeddingClient = config.model.embedding
-      ? new EmbeddingClient(
-          config.model.embedding.baseUrl,
-          config.model.embedding.modelId,
-          this.authorizationHeaders(),
-          fetchImplementation
-        )
-      : undefined;
     const dgraph = new DgraphClient(
       config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
       fetchImplementation,
@@ -220,21 +211,11 @@ export class PiSdkGateway implements PiGateway {
       fetchImplementation,
       config.hsvaiDgraphQueryAuth
     );
-    this.memory = new GraphMemory(
-      dgraph,
-      embeddingClient ? { embed: embeddingClient.embed } : {}
-    );
+    this.memory = new GraphMemory(dgraph);
     this.knowledge = new HsvaiKnowledge(
       hsvaiSync,
       new HsvaiWordPressSource(fetchImplementation, loadHsvaiEventCatalog()),
-      embeddingClient
-        ? {
-            embed: embeddingClient.embed,
-            embedMany: embeddingClient.embedMany,
-            embeddingVersion: () => embeddingClient.embeddingModel(),
-            queryClient: hsvaiQuery
-          }
-        : { queryClient: hsvaiQuery }
+      { queryClient: hsvaiQuery }
     );
   }
 

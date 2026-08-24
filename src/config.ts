@@ -31,10 +31,6 @@ export interface ModelProviderConfig {
   contextWindow: number;
   maxTokens: number;
   supportsDeveloperRole: boolean;
-  embedding?: {
-    baseUrl: string;
-    modelId: string;
-  };
 }
 
 export interface DgraphAuthConfig {
@@ -173,21 +169,6 @@ export function parseModelConfig(
   const config = input;
   const reasoningEffort = configuredReasoningEffort(config);
   const baseUrl = parseUrl(configuredString(config, "baseUrl"), "model.baseUrl");
-  let embedding: ModelProviderConfig["embedding"];
-  if (config.embedding !== undefined) {
-    if (!isRecord(config.embedding)) {
-      throw new Error("Invalid model configuration: embedding must be an object");
-    }
-    embedding = {
-      baseUrl: config.embedding.baseUrl === undefined
-        ? baseUrl
-        : parseUrl(
-            configuredString(config.embedding, "baseUrl", "embedding.baseUrl"),
-            "model.embedding.baseUrl"
-          ),
-      modelId: configuredString(config.embedding, "modelId", "embedding.modelId")
-    };
-  }
   return {
     providerId: configuredString(config, "providerId"),
     providerName: configuredString(config, "providerName"),
@@ -198,8 +179,7 @@ export function parseModelConfig(
     ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     contextWindow: configuredPositiveInteger(config, "contextWindow"),
     maxTokens: configuredPositiveInteger(config, "maxTokens"),
-    supportsDeveloperRole: configuredBoolean(config, "supportsDeveloperRole"),
-    ...(embedding ? { embedding } : {})
+    supportsDeveloperRole: configuredBoolean(config, "supportsDeveloperRole")
   };
 }
 

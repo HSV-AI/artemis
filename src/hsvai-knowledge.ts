@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { EmbedBatchFunction, EmbedFunction } from "./embedding-client.js";
 import type { DgraphClient } from "./dgraph-memory.js";
 import {
   catalogEntryForEvent,
@@ -15,7 +14,6 @@ const POST_PAGE_SIZE = 100;
 const EVENT_PAGE_SIZE = 50;
 const CHUNK_TARGET_CHARS = 1_200;
 const CHUNK_MAX_CHARS = 1_600;
-const EMBEDDING_BATCH_SIZE = 64;
 const MUTATION_BATCH_SIZE = 100;
 const RRF_K = 60;
 const MAX_DQL_LENGTH = 20_000;
@@ -46,7 +44,6 @@ hsvai.speakers: [uid] @reverse .
 hsvai.chunk_id: string @index(exact) .
 hsvai.chunk_index: int @index(int) .
 hsvai.text: string @index(fulltext) .
-hsvai.embedding: float32vector @index(hnsw(metric:"cosine")) .
 hsvai.document: uid @reverse .
 hsvai.mentions: [uid] @reverse .
 hsvai.entity_id: string @index(exact) .
@@ -82,7 +79,6 @@ type HsvaiChunk {
   hsvai.chunk_id
   hsvai.chunk_index
   hsvai.text
-  hsvai.embedding
   hsvai.document
   hsvai.mentions
 }
@@ -157,7 +153,6 @@ interface KnowledgeChunk {
   id: string;
   index: number;
   text: string;
-  embedding?: number[];
   document: KnowledgeDocument;
   entities?: KnowledgeEntity[];
   siblings?: KnowledgeChunk[];
@@ -195,9 +190,6 @@ export interface HsvaiKnowledgeSource {
 
 export interface HsvaiKnowledgeOptions {
   queryClient: DgraphClient;
-  embed?: EmbedFunction;
-  embedMany?: EmbedBatchFunction;
-  embeddingVersion?: () => Promise<string>;
 }
 
 interface WordPressPost {
@@ -376,9 +368,9 @@ function documentChunks(document: HsvaiSourceDocument): CorpusChunk[] {
   }));
 }
 
-function sourceRevision(documents: HsvaiSourceDocument[], embeddingVersion: string): string {
+function sourceRevision(documents: HsvaiSourceDocument[]): string {
   return createHash("sha256")
-    .update(JSON.stringify({ embeddingVersion, documents }))
+    .update(JSON.stringify(documents))
     .digest("hex");
 }
 
@@ -601,9 +593,6 @@ const CHUNK_FIELDS = `
 `;
 
 export class HsvaiKnowledge {
-  private readonly embed: EmbedFunction | undefined;
-  private readonly embedMany: EmbedBatchFunction | undefined;
-  private readonly embeddingVersion: () => Promise<string>;
   private readonly queryClient: DgraphClient;
   private lexicalSnapshot: Bm25Snapshot | undefined;
 
@@ -612,9 +601,6 @@ export class HsvaiKnowledge {
     private readonly source: HsvaiKnowledgeSource,
     options: HsvaiKnowledgeOptions
   ) {
-    this.embed = options.embed;
-    this.embedMany = options.embedMany;
-    this.embeddingVersion = options.embeddingVersion ?? (() => Promise.resolve("none"));
     this.queryClient = options.queryClient;
   }
 
@@ -629,7 +615,7 @@ export class HsvaiKnowledge {
         entities.set(entity.id, entity);
       }
     }
-    const revision = sourceRevision(documents, await this.embeddingVersion());
+    const revision = sourceRevision(documents);
     const lexicalSnapshot = { revision, index: createBm25Index(chunks) };
     const existing = await this.client.query<{ corpus?: { revision?: string }[] }>(
       `query { corpus(func: eq(hsvai.corpus_id, "hsvai")) @filter(type(HsvaiCorpus)) {
@@ -665,20 +651,13 @@ export class HsvaiKnowledge {
     }
     const boundedLimit = Math.max(1, Math.min(limit, 10));
     const lexical = await this.searchBm25(terms, 20);
-    const semantic = this.embed
-      ? await this.searchSemantic(await this.embed(terms), 20)
-      : [];
-    const seeds = this.fuse([
-      ["bm25", lexical],
-      ["semantic", semantic]
-    ], 6);
-    const seedUids = seeds.map((result) => result.chunk.uid);
+    const seeds = lexical.slice(0, 6);
+    const seedUids = seeds.map((chunk) => chunk.uid);
     const graph = seedUids.length
-      ? [...seeds.map((result) => result.chunk), ...await this.expandGraph(seedUids)]
+      ? [...seeds, ...await this.expandGraph(seedUids)]
       : [];
     return this.fuse([
       ["bm25", lexical],
-      ["semantic", semantic],
       ["graph", graph]
     ], boundedLimit).map((result) => this.toResult(result));
   }
@@ -789,7 +768,6 @@ export class HsvaiKnowledge {
 
     for (let offset = 0; offset < chunks.length; offset += MUTATION_BATCH_SIZE) {
       const batch = chunks.slice(offset, offset + MUTATION_BATCH_SIZE);
-      const vectors = this.embedMany ? await this.embedManyInBatches(batch.map((chunk) => chunk.text)) : [];
       await this.client.mutate(batch.map((chunk, index) => {
         const documentUid = documentUids.get(chunk.documentId);
         if (!documentUid) throw new Error(`Missing Dgraph document uid for ${chunk.documentId}`);
@@ -805,8 +783,7 @@ export class HsvaiKnowledge {
             const uid = entityUids.get(entity.id);
             if (!uid) throw new Error(`Missing Dgraph entity uid for ${entity.id}`);
             return { uid };
-          }),
-          ...(vectors[index] ? { "hsvai.embedding": JSON.stringify(vectors[index]) } : {})
+          })
         };
       }));
     }
@@ -818,15 +795,6 @@ export class HsvaiKnowledge {
       "hsvai.corpus_id": "hsvai",
       "hsvai.revision": revision
     }]);
-  }
-
-  private async embedManyInBatches(texts: string[]): Promise<number[][]> {
-    if (!this.embedMany) return [];
-    const vectors: number[][] = [];
-    for (let offset = 0; offset < texts.length; offset += EMBEDDING_BATCH_SIZE) {
-      vectors.push(...await this.embedMany(texts.slice(offset, offset + EMBEDDING_BATCH_SIZE)));
-    }
-    return vectors;
   }
 
   private async searchBm25(query: string, limit: number): Promise<KnowledgeChunk[]> {
@@ -851,19 +819,6 @@ export class HsvaiKnowledge {
       throw new Error("HSVAI BM25 index is unavailable");
     }
     return this.lexicalSnapshot;
-  }
-
-  private async searchSemantic(vector: number[], limit: number): Promise<KnowledgeChunk[]> {
-    const data = await this.queryClient.query<{ chunks?: KnowledgeChunk[] }>(
-      `query semantic($vector: string) {
-        chunks(func: similar_to(hsvai.embedding, ${limit}, $vector)) @filter(type(HsvaiChunk)) {
-          ${CHUNK_FIELDS}
-          embedding: hsvai.embedding
-        }
-      }`,
-      { $vector: JSON.stringify(vector) }
-    );
-    return data.chunks ?? [];
   }
 
   private async expandGraph(seedUids: string[]): Promise<KnowledgeChunk[]> {
@@ -970,7 +925,7 @@ export function createHsvaiKnowledgeTool(
   return defineTool({
     name: "hsvai_graph_search",
     label: "Search HSVAI Knowledge",
-    description: "Search source-grounded Huntsville AI transcripts and calendar events with hybrid graph retrieval.",
+    description: "Search source-grounded Huntsville AI transcripts and calendar events with BM25 graph retrieval.",
     promptSnippet: "Search Huntsville AI transcripts and events through their connected source graph",
     promptGuidelines: [
       "Use for questions about Huntsville AI talks, events, speakers, venues, and technical topics.",

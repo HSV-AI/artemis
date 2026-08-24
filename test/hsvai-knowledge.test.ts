@@ -203,8 +203,8 @@ describe("HsvaiWordPressSource", () => {
 });
 
 describe("HSVAI corpus construction", () => {
-  it("skips an unchanged source and embedding-model revision", async () => {
-    const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument], "embed-v1");
+  it("skips an unchanged source revision", async () => {
+    const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument]);
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
@@ -212,10 +212,7 @@ describe("HSVAI corpus construction", () => {
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", fetchMock),
       { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) },
-      {
-        embeddingVersion: vi.fn().mockResolvedValue("embed-v1"),
-        queryClient: new DgraphClient("http://dgraph:8080", fetchMock)
-      }
+      { queryClient: new DgraphClient("http://dgraph:8080", fetchMock) }
     );
 
     await expect(knowledge.initializeAndSync()).resolves.toMatchObject({ changed: false, revision });
@@ -223,14 +220,14 @@ describe("HSVAI corpus construction", () => {
   });
 });
 
-describe("HSVAI hybrid graph retrieval", () => {
-  it("fuses lexical, semantic, and connected-neighborhood evidence", async () => {
+describe("HSVAI graph retrieval", () => {
+  it("fuses BM25 and connected-neighborhood evidence", async () => {
     const lexical = knowledgeChunk(
       "0x1",
       "hsvai:post:1#chunk-0001",
       "Graph evidence connects retrieval to sources."
     );
-    const semantic = knowledgeChunk(
+    const neighbor = knowledgeChunk(
       "0x2",
       "hsvai:post:2#chunk-0001",
       "Neighborhood traversal follows speaker relationships."
@@ -241,35 +238,32 @@ describe("HSVAI hybrid graph retrieval", () => {
       "A related talk by the same speaker.",
       "Related Talk"
     );
-    const semanticSource: HsvaiSourceDocument = {
+    const neighborSource: HsvaiSourceDocument = {
       ...sourceDocument,
       sourceId: "hsvai:post:2",
       title: "Neighborhood Talk",
       url: "https://hsv.ai/neighborhood-talk/",
       text: "Neighborhood traversal follows speaker relationships."
     };
-    const documents = [sourceDocument, semanticSource];
-    const revision = hsvaiKnowledgeInternals.sourceRevision(documents, "none");
+    const documents = [sourceDocument, neighborSource];
+    const revision = hsvaiKnowledgeInternals.sourceRevision(documents);
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { corpus: [{ revision }] } }))
       .mockResolvedValueOnce(jsonResponse({ data: { chunks: [lexical] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { chunks: [semantic] } }))
       .mockResolvedValueOnce(jsonResponse({ data: {
-        seeds: [{ entities: [{ related: [lexical, related] }], document: { siblings: [] } }]
+        seeds: [{ entities: [{ related: [lexical, neighbor, related] }], document: { siblings: [] } }]
       } }));
-    const embed = vi.fn().mockResolvedValue([1, 0]);
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", fetchMock),
       { fetchDocuments: vi.fn().mockResolvedValue(documents) },
-      { embed, queryClient: new DgraphClient("http://dgraph:8080", fetchMock) }
+      { queryClient: new DgraphClient("http://dgraph:8080", fetchMock) }
     );
 
     await knowledge.initializeAndSync();
     const results = await knowledge.search("graph source", 3);
 
-    expect(embed).toHaveBeenCalledWith("graph source");
     expect(results).toEqual([
       expect.objectContaining({
         evidenceId: "hsvai:post:1#chunk-0001",
@@ -277,39 +271,11 @@ describe("HSVAI hybrid graph retrieval", () => {
       }),
       expect.objectContaining({
         evidenceId: "hsvai:post:2#chunk-0001",
-        channels: ["semantic", "graph"]
+        channels: ["graph"]
       }),
       expect.objectContaining({
         evidenceId: "hsvai:post:3#chunk-0001",
         channels: ["graph"]
-      })
-    ]);
-  });
-
-  it("uses BM25 and graph expansion without an embedding provider", async () => {
-    const lexical = knowledgeChunk(
-      "0x1",
-      "hsvai:post:1#chunk-0001",
-      "Graph evidence connects retrieval to sources."
-    );
-    const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument], "none");
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
-      .mockResolvedValueOnce(jsonResponse({ data: { corpus: [{ revision }] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { chunks: [lexical] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { seeds: [] } }));
-    const knowledge = new HsvaiKnowledge(
-      new DgraphClient("http://dgraph:8080", fetchMock),
-      { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) },
-      { queryClient: new DgraphClient("http://dgraph:8080", fetchMock) }
-    );
-
-    await knowledge.initializeAndSync();
-    await expect(knowledge.search("graph retrieval", 1)).resolves.toEqual([
-      expect.objectContaining({
-        evidenceId: "hsvai:post:1#chunk-0001",
-        channels: ["bm25", "graph"]
       })
     ]);
   });
@@ -338,7 +304,7 @@ describe("HSVAI hybrid graph retrieval", () => {
   });
 
   it("reads the current corpus revision through the query account", async () => {
-    const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument], "none");
+    const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument]);
     const syncFetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
@@ -361,7 +327,7 @@ describe("HSVAI hybrid graph retrieval", () => {
   });
 
   it("rejects a corpus revision that does not match the BM25 snapshot", async () => {
-    const indexedRevision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument], "none");
+    const indexedRevision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument]);
     const currentRevision = "b".repeat(64);
     const syncFetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
@@ -399,7 +365,7 @@ describe("HSVAI hybrid graph retrieval", () => {
   });
 
   it("rejects blank queries and returns no evidence for no matches", async () => {
-    const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument], "none");
+    const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument]);
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: {} }))

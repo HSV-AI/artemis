@@ -112,7 +112,7 @@ export function createMemoryTools(memory: MemoryStore, context: MemoryToolContex
       name: "memory_search",
       label: "Search Memory",
       description:
-        "Rank current memories by full-text, semantic, session-graph, and recency signals.",
+        "Rank current memories by full-text, session-graph, and recency signals.",
       promptSnippet: "Search this conversation's memory for relevant current facts",
       promptGuidelines: readGuidelines,
       parameters: Type.Object({

@@ -1,5 +1,3 @@
-import { cosineSimilarity, type EmbedFunction } from "./embedding-client.js";
-
 export class DgraphHttpError extends Error {
   public constructor(
     public readonly operation: string,
@@ -197,11 +195,9 @@ occurred_at: dateTime .
 channel: string .
 entity_name: string @index(exact) .
 about: uid @reverse .
-statement_embedding: float32vector .
 
 type Fact {
   statement
-  statement_embedding
   scope_key
   subject
   author
@@ -243,7 +239,6 @@ export interface MemoryFact {
   supersedes?: { uid: string };
   source_episode?: { uid: string; episode_id?: string };
   about?: { uid: string; entity_name?: string };
-  statement_embedding?: number[];
 }
 
 export interface EpisodeReference {
@@ -287,13 +282,10 @@ export interface MemoryStore {
 
 export interface GraphMemoryOptions {
   clock?: () => Date;
-  embed?: EmbedFunction;
 }
 
 const DUPLICATE_TOKEN_JACCARD = 0.85;
 const SIMILAR_TOKEN_JACCARD = 0.6;
-const DUPLICATE_COSINE = 0.95;
-const SIMILAR_COSINE = 0.88;
 const RRF_K = 60;
 
 const FACT_FIELDS = `
@@ -367,7 +359,6 @@ function tokenJaccard(left: string, right: string): number {
 
 export class GraphMemory implements MemoryStore {
   private readonly clock: () => Date;
-  private readonly embed: EmbedFunction | undefined;
   private queue: Promise<unknown> = Promise.resolve();
 
   public constructor(
@@ -376,7 +367,6 @@ export class GraphMemory implements MemoryStore {
   ) {
     const normalized = typeof options === "function" ? { clock: options } : options;
     this.clock = normalized.clock ?? (() => new Date());
-    this.embed = normalized.embed;
   }
 
   public async initialize(): Promise<void> {
@@ -386,12 +376,8 @@ export class GraphMemory implements MemoryStore {
   public remember(input: RememberInput): Promise<string> {
     return this.enqueue(async () => {
       this.validateRememberInput(input);
-      const vector = this.embed ? await this.embed(input.statement) : undefined;
-      await this.assertNovelNow(input, vector);
+      await this.assertNovelNow(input);
       const node = await this.factNode(input, this.clock());
-      if (vector) {
-        node.statement_embedding = JSON.stringify(vector);
-      }
       const uids = await this.client.mutate([{ ...node, uid: "_:fact" }]);
       const uid = uids.fact;
       if (!uid) {
@@ -411,7 +397,6 @@ export class GraphMemory implements MemoryStore {
         throw new Error(`Replacement scope ${replacement.scopeKey} does not match ${scopeKey}`);
       }
       const uid = validatedUid(oldFactUid);
-      const vector = this.embed ? await this.embed(replacement.statement) : undefined;
       const now = this.clock();
       const query = `
         query {
@@ -419,9 +404,6 @@ export class GraphMemory implements MemoryStore {
           found(func: uid(target)) { uid }
         }`;
       const node = await this.factNode(replacement, now);
-      if (vector) {
-        node.statement_embedding = JSON.stringify(vector);
-      }
       const result = await this.client.upsert(query, [
         {
           cond: "@if(eq(len(target), 1))",
@@ -490,10 +472,6 @@ export class GraphMemory implements MemoryStore {
       const channels: [string, MemoryFact[]][] = [
         ["fulltext", await this.searchNow(scopeKey, query)]
       ];
-      if (this.embed) {
-        const vector = await this.embed(query);
-        channels.push(["semantic", await this.searchSemanticNow(scopeKey, vector, 20)]);
-      }
       if (options.episodeId) {
         channels.push([
           "graph",
@@ -619,33 +597,6 @@ export class GraphMemory implements MemoryStore {
     return data.facts ?? [];
   }
 
-  private async searchSemanticNow(
-    scopeKey: string,
-    vector: number[],
-    topK: number
-  ): Promise<MemoryFact[]> {
-    const data = await this.client.query<{ facts?: MemoryFact[] }>(
-      `query semantic($scope: string) {
-        facts(func: eq(scope_key, $scope))
-          @filter(type(Fact) AND NOT has(expired_at) AND has(statement_embedding)) {
-          ${FACT_FIELDS}
-          statement_embedding
-        }
-      }`,
-      { $scope: scopeKey }
-    );
-    return (data.facts ?? [])
-      .map((fact) => {
-        if (!fact.statement_embedding) {
-          throw new Error(`Dgraph returned fact ${fact.uid} without its indexed embedding`);
-        }
-        return { fact, score: cosineSimilarity(vector, fact.statement_embedding) };
-      })
-      .sort((left, right) => right.score - left.score || left.fact.uid.localeCompare(right.fact.uid))
-      .slice(0, topK)
-      .map(({ fact }) => fact);
-  }
-
   private async relatedToEpisodeNow(
     scopeKey: string,
     episodeId: string
@@ -677,18 +628,10 @@ export class GraphMemory implements MemoryStore {
     });
   }
 
-  private async assertNovelNow(
-    input: RememberInput,
-    vector: number[] | undefined
-  ): Promise<void> {
+  private async assertNovelNow(input: RememberInput): Promise<void> {
     const candidates = new Map<string, MemoryFact>();
     for (const fact of await this.searchNow(input.scopeKey, input.statement)) {
       candidates.set(fact.uid, fact);
-    }
-    if (vector) {
-      for (const fact of await this.searchSemanticNow(input.scopeKey, vector, 8)) {
-        candidates.set(fact.uid, fact);
-      }
     }
 
     let best: {
@@ -699,14 +642,10 @@ export class GraphMemory implements MemoryStore {
     } | undefined;
     for (const candidate of candidates.values()) {
       const jaccard = tokenJaccard(input.statement, candidate.statement);
-      const cosine = vector && candidate.statement_embedding
-        ? cosineSimilarity(vector, candidate.statement_embedding)
-        : 0;
-      const similarity = Math.max(jaccard, cosine);
       let verdict: "duplicate" | "similar" | undefined;
-      if (jaccard >= DUPLICATE_TOKEN_JACCARD || cosine >= DUPLICATE_COSINE) {
+      if (jaccard >= DUPLICATE_TOKEN_JACCARD) {
         verdict = "duplicate";
-      } else if (jaccard >= SIMILAR_TOKEN_JACCARD || cosine >= SIMILAR_COSINE) {
+      } else if (jaccard >= SIMILAR_TOKEN_JACCARD) {
         verdict = "similar";
       }
       if (!verdict) {
@@ -714,13 +653,13 @@ export class GraphMemory implements MemoryStore {
       }
       if (
         !best ||
-        similarity > best.similarity ||
+        jaccard > best.similarity ||
         (verdict === "duplicate" && best.verdict === "similar")
       ) {
         best = {
           uid: candidate.uid,
           statement: candidate.statement,
-          similarity,
+          similarity: jaccard,
           verdict
         };
       }

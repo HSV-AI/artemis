@@ -25,7 +25,7 @@ Every Artemis profile receives these tools:
 | Tool | Behavior |
 | --- | --- |
 | `memory_remember` | Insert one novel current fact, optionally forcing a similar but nonduplicate fact. |
-| `memory_search` | Rank current facts using full-text, optional semantic, session-graph, and recency channels. |
+| `memory_search` | Rank current facts using full-text, session-graph, and recency channels. |
 | `memory_recall` | List current facts in the conversation scope. |
 | `memory_supersede` | End one active fact and insert its correction atomically. |
 | `memory_forget` | Stop believing one active fact without deleting it. |
@@ -39,9 +39,8 @@ explicitly asks to remember, correct, or forget something. Recall results are
 marked as user data and must not be treated as instructions or authorization.
 
 `memory_remember` checks active facts before writing. Token-set Jaccard thresholds
-classify similarity at 0.6 and duplicates at 0.85. When embeddings are enabled,
-cosine thresholds classify similarity at 0.88 and duplicates at 0.95. A duplicate
-is always refused and names its existing UID. A similar fact is refused with a
+classify similarity at 0.6 and duplicates at 0.85. A duplicate is always refused
+and names its existing UID. A similar fact is refused with a
 supersession suggestion unless `force` is true. Refusals are ordinary tool output
 so PI can respond or choose another explicit memory operation in the same turn.
 
@@ -76,9 +75,8 @@ operation before awaiting other work. Concurrent tool calls in one model turn
 therefore observe earlier calls from that turn in issue order.
 
 `memory_search` retrieves independent ordered candidate lists from Dgraph
-full-text search, optional cosine ranking over active embeddings loaded from the
-current conversation scope, one-hop entity traversal seeded by the current
-episode, and the 20 newest active facts. Reciprocal rank fusion uses `1 / (60 +
+full-text search, one-hop entity traversal seeded by the current episode, and
+the 20 newest active facts. Reciprocal rank fusion uses `1 / (60 +
 rank + 1)` per channel, sorts by total score with UID as the stable tie-breaker,
 and returns ten facts by default. Tool output includes channel names and the
 fused score.
@@ -93,17 +91,12 @@ permission-7 memory service account, and persists `/dgraph` in the `dgraph-data`
 volume. Artemis applies the additive DQL schema after model health validation
 and before Discord login.
 
-The optional provider `embedding` object supplies the model and endpoint; see
-[Configurable model provider](model-provider.md). When configured, embedding calls
-run inside the serial operation queue and vectors are stored in Dgraph. Semantic
-recall and novelty load active facts by indexed `scope_key` before ranking, so
-other conversations cannot consume candidate slots. `MEMORY_INJECT` is a strict
-boolean and defaults to `false`.
+`MEMORY_INJECT` is a strict boolean and defaults to `false`.
 
 ## Persistence
 
-Dgraph stores `Fact` nodes containing the statement, optional embedding, optional
-subject, scope, Discord provenance, valid time, system time, optional episode and
+Dgraph stores `Fact` nodes containing the statement, optional subject, scope,
+Discord provenance, valid time, system time, optional episode and
 entity edges, optional end reason, and optional supersession edge. `Episode` nodes
 are unique by session ID within a scope. `Entity` nodes use stable labels.
 Correction and forgetting stamp ended facts rather than deleting them. Current
@@ -124,11 +117,10 @@ tools and graph traversal do not provide a cross-conversation read path.
 
 - Invalid `DGRAPH_URL` fails configuration loading.
 - Missing Dgraph credentials, authentication failures, or an invalid namespace fail startup.
-- Invalid embedding provider metadata or invalid `MEMORY_INJECT` fails configuration loading.
+- Invalid `MEMORY_INJECT` fails configuration loading.
 - Schema initialization failure prevents Discord login.
 - Invalid, inactive, or cross-scope fact UIDs fail without changing data.
 - Duplicate and unforced similar writes return a refusal without changing data.
-- Embedding generation failures fail the invoking memory operation; there is no silent semantic fallback when an embedding endpoint is configured.
 - Query and mutation failures follow the normal generation-failure path and
   produce no Discord reply.
 
@@ -136,7 +128,6 @@ tools and graph traversal do not provide a cross-conversation read path.
 
 - `test/dgraph-memory.test.ts` covers schema, reads, writes, tombstones, scope,
   episodes, entities, operation ordering, novelty, ranking, and failure handling.
-- `test/embedding-client.test.ts` covers configured embedding requests, authorization, cosine similarity, and failures.
 - `test/memory-tools.test.ts` covers ranked and lifecycle tools, refusal output, and bound provenance.
 - `test/conversation-service.test.ts` covers immutable Discord identity.
 - `test/pi-gateway.test.ts` covers registration, startup initialization, bounded snapshots, and session prompt stability.

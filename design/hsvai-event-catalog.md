@@ -81,7 +81,7 @@ drops the retired `hsvai.facilitators` predicate before synchronization.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `HSVAI_EVENT_CATALOG_PATH` | `/data/hsvai-event-catalog.jsonl` | Writable runtime overlay loaded after the checked-in baseline. |
-| Configured model provider | Existing Artemis model configuration | OpenAI-compatible endpoint, model, credentials, and optional embeddings used by the operator task. |
+| Configured model provider | Existing Artemis model configuration | OpenAI-compatible endpoint, model, and credentials used by the operator task. |
 
 ## Persistence
 
@@ -95,7 +95,7 @@ file plus atomic rename. Dgraph is the queryable, source-canonicalized projectio
   the baseline.
 - Source changes invalidate only the affected catalog record and expose that
   event as pending until an operator refresh succeeds.
-- Source, model, catalog-write, embedding, or Dgraph failures fail the operator
+- Source, model, catalog-write, or Dgraph failures fail the operator
   task. No partial overlay rename occurs.
 - The overlay is written before Dgraph synchronization. If synchronization
   fails, the valid overlay remains available for the next startup or task retry.

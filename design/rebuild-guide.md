@@ -474,9 +474,7 @@ Load local environment configuration from `.env` or the process environment, opt
 
 The received-message audit ignores `LOG_LEVEL`; all other logs obey it.
 
-The `embedding` and Dgraph ACL contracts are defined by [Configurable model
-provider](model-provider.md) and [Dgraph access control](dgraph-access-control.md).
-The table above lists their runtime settings.
+The Dgraph ACL contract is defined by [Dgraph access control](dgraph-access-control.md).
 
 ## Clean-room implementation sequence
 
@@ -534,7 +532,7 @@ Each stage should finish with tests before the next begins.
 - Connect the harness's native session manager to ordered SQLite storage and complete the atomic one-time PI cutover before Discord login.
 - Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, and fixed-source HSVAI graph search; disable every built-in tool and build the system instruction from conversation kind, registered-tool metadata, and an optional per-session memory snapshot, including the Capability Gap Protocol.
 - Load the reviewed HSVAI event baseline and runtime overlay before source synchronization. Merge legacy facilitators into speakers, then project source-matched themes, speaker edges, and complete/pending status without model calls during startup.
-- Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, optional semantic, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
+- Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
 - Add configured provider health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
 
