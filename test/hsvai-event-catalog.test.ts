@@ -23,13 +23,39 @@ function source(sourceId: string, text: string, title = "Synthetic Event"): Hsva
 }
 
 describe("HSVAI event catalog", () => {
-  it("represents reviewed speakerless events with an empty speaker list", () => {
+  it("preserves reviewed speaker and speakerless classifications", () => {
     const catalog = loadHsvaiEventCatalog(
       hsvaiEventCatalogPaths.baseline,
       `${hsvaiEventCatalogPaths.baseline}.missing`
     );
+    const events = new Map(catalog.events.map((event) => [event.sourceId, event]));
+    const speakerlessSourceIds = [
+      "hsvai:event:1550",
+      "hsvai:event:1649",
+      "hsvai:event:1760",
+      "hsvai:event:1812",
+      "hsvai:event:1820",
+      "hsvai:event:1866",
+      "hsvai:event:1944",
+      "hsvai:event:1958",
+      "hsvai:event:1961",
+      "hsvai:event:2035",
+      "hsvai:event:2049",
+      "hsvai:event:2090",
+      "hsvai:event:2150",
+      "hsvai:event:2171",
+      "hsvai:event:2247"
+    ];
 
-    expect(catalog.events.some((event) => event.speakers.length === 0)).toBe(true);
+    expect(events.get("hsvai:event:1921")?.speakers).toEqual([
+      expect.objectContaining({ name: "J. Langley", provenance: "operator" })
+    ]);
+    expect(events.get("hsvai:event:2074")?.speakers).toEqual([
+      expect.objectContaining({ name: "J. Langley", provenance: "operator" })
+    ]);
+    for (const sourceId of speakerlessSourceIds) {
+      expect(events.get(sourceId)?.speakers, sourceId).toEqual([]);
+    }
     expect(catalog.events.flatMap((event) => event.speakers).map((person) => person.name))
       .not.toContain("No Speaker");
   });

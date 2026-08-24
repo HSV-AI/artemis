@@ -625,7 +625,12 @@
       "modifiedAt": "2025-04-19T14:03:39.000Z",
       "sourceHash": "5eee89c6098d346c375b7052825e70945507c7eb53de3ee335b9d48fb8bdbb85",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
@@ -982,7 +987,12 @@
       "modifiedAt": "2025-12-15T21:16:22.000Z",
       "sourceHash": "82fa076445e91a31a2126d58390b78b013544f7bc03b3a59227ad3659ea583a0",
       "theme": "community",
-      "speakers": [],
+      "speakers": [
+        {
+          "name": "J. Langley",
+          "provenance": "operator"
+        }
+      ],
       "facilitators": []
     },
     {
