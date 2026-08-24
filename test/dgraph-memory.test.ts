@@ -357,9 +357,15 @@ describe("GraphMemory", () => {
       scope_key: input.scopeKey,
       recorded_at: "2026-08-22T12:00:00.000Z"
     };
+    const lessRelevantFact = {
+      ...semanticFact,
+      uid: "0x8",
+      statement: "The design archive lives in object storage.",
+      statement_embedding: [0, 1]
+    };
     const searchFetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { facts: [semanticFact] } }))
+      .mockResolvedValueOnce(jsonResponse({ data: { facts: [lessRelevantFact, semanticFact] } }))
       .mockResolvedValueOnce(jsonResponse({ data: { facts: [semanticFact] } }));
     const embed = vi.fn().mockResolvedValue(vector);
     const memory = new GraphMemory(
@@ -372,6 +378,17 @@ describe("GraphMemory", () => {
       fact: { uid: "0x9" },
       channels: ["semantic", "recency"]
     });
+    expect(ranked[1]).toMatchObject({
+      fact: { uid: "0x8" },
+      channels: ["semantic"]
+    });
+    const semanticQuery = JSON.parse(String(searchFetch.mock.calls[1]?.[1]?.body)) as {
+      query: string;
+      variables: Record<string, string>;
+    };
+    expect(semanticQuery.query).toContain("facts(func: eq(scope_key, $scope))");
+    expect(semanticQuery.query).not.toContain("similar_to");
+    expect(semanticQuery.variables).toEqual({ $scope: input.scopeKey });
 
     const noveltyFetch = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))

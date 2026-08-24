@@ -55,7 +55,8 @@ older overlay. A record is applied only when its source hash matches the current
 normalized event. New or changed events without a matching record are synchronized with
 `hsvai.people_status = pending`, no people edges, and no theme. Matching records
 use `complete` and populate `hsvai.theme` and `hsvai.speakers`. Reviewed events
-with no designated speaker may use the explicit `No Speaker` sentinel entity.
+with no designated speaker use `complete` with an empty speaker array, so absence
+does not create a shared person entity or graph relationship.
 
 ## Extraction And Refresh
 
@@ -82,10 +83,10 @@ forbids resolving first-person references. The task uses the same provider,
 model, API key, and optional embedding configuration as Artemis. It has no
 Ollama-specific alternate path.
 
-Operators choose the cadence outside the application. The task can consume
-model and Dgraph capacity and may replace the public corpus, so it must be run in
-an approved maintenance window rather than while interactive service capacity is
-needed.
+Operators choose the cadence outside the application. Stop the serving Artemis
+process before running the task, then restart it after synchronization succeeds.
+This prevents interactive queries from observing the multi-mutation corpus
+replacement and rebuilds the process-local BM25 snapshot before service resumes.
 
 By default the task updates the durable overlay. A maintainer working from source
 may run `npm run build` first, then

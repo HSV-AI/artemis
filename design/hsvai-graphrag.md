@@ -100,8 +100,10 @@ startup rather than exposing a partial corpus to Discord.
 
 Catalog enrichment is not part of startup. The operator-only
 `npm run catalog:hsvai-events` task updates the durable overlay and invokes this
-same synchronization lifecycle. Its extraction, validation, and failure
-contract is authoritative in [HSVAI event catalog](hsvai-event-catalog.md).
+same synchronization lifecycle while the serving Artemis process is stopped.
+Restarting Artemis after the task succeeds rebuilds the matching BM25 snapshot.
+Its extraction, validation, and failure contract is authoritative in [HSVAI
+event catalog](hsvai-event-catalog.md).
 
 ## Retrieval And Tool Contract
 

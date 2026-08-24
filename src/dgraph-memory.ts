@@ -625,16 +625,25 @@ export class GraphMemory implements MemoryStore {
     topK: number
   ): Promise<MemoryFact[]> {
     const data = await this.client.query<{ facts?: MemoryFact[] }>(
-      `query semantic($scope: string, $vector: string) {
-        facts(func: similar_to(statement_embedding, ${topK}, $vector))
-          @filter(type(Fact) AND eq(scope_key, $scope) AND NOT has(expired_at)) {
+      `query semantic($scope: string) {
+        facts(func: eq(scope_key, $scope))
+          @filter(type(Fact) AND NOT has(expired_at) AND has(statement_embedding)) {
           ${FACT_FIELDS}
           statement_embedding
         }
       }`,
-      { $scope: scopeKey, $vector: JSON.stringify(vector) }
+      { $scope: scopeKey }
     );
-    return data.facts ?? [];
+    return (data.facts ?? [])
+      .map((fact) => {
+        if (!fact.statement_embedding) {
+          throw new Error(`Dgraph returned fact ${fact.uid} without its indexed embedding`);
+        }
+        return { fact, score: cosineSimilarity(vector, fact.statement_embedding) };
+      })
+      .sort((left, right) => right.score - left.score || left.fact.uid.localeCompare(right.fact.uid))
+      .slice(0, topK)
+      .map(({ fact }) => fact);
   }
 
   private async relatedToEpisodeNow(

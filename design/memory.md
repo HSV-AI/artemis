@@ -75,11 +75,12 @@ operation before awaiting other work. Concurrent tool calls in one model turn
 therefore observe earlier calls from that turn in issue order.
 
 `memory_search` retrieves independent ordered candidate lists from Dgraph
-full-text search, optional HNSW cosine search, one-hop entity traversal seeded by
-the current episode, and the 20 newest active facts. Reciprocal rank fusion uses
-`1 / (60 + rank + 1)` per channel, sorts by total score with UID as the stable
-tie-breaker, and returns ten facts by default. Tool output includes channel names
-and the fused score.
+full-text search, optional cosine ranking over active embeddings loaded from the
+current conversation scope, one-hop entity traversal seeded by the current
+episode, and the 20 newest active facts. Reciprocal rank fusion uses `1 / (60 +
+rank + 1)` per channel, sorts by total score with UID as the stable tie-breaker,
+and returns ten facts by default. Tool output includes channel names and the
+fused score.
 
 ## Configuration
 
@@ -98,6 +99,10 @@ separate embedding worker set its base URL in the provider definition. Omitting
 the object disables embeddings while retaining full-text, graph, and recency
 retrieval plus token-overlap novelty checks. When configured, the client calls
 `/embeddings` with the provider API key and stores vectors in Dgraph.
+Semantic recall and novelty load only active facts selected by the conversation's
+indexed `scope_key`, compute cosine similarity in process, and then take the
+requested result count. Facts from another conversation therefore cannot consume
+candidate slots before scope filtering.
 Embedding calls run inside the serial operation queue. `MEMORY_INJECT` is a strict
 boolean and defaults to `false`.
 

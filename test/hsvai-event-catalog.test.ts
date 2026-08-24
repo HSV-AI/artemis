@@ -4,6 +4,8 @@ import {
   enrichHsvaiEventCatalog,
   eventCatalogSourceHash,
   extractDeterministicEventMetadata,
+  hsvaiEventCatalogPaths,
+  loadHsvaiEventCatalog,
   mergeHsvaiEventCatalog,
   OpenAiEventExtractionModel,
   type HsvaiEventCatalogSource
@@ -21,6 +23,17 @@ function source(sourceId: string, text: string, title = "Synthetic Event"): Hsva
 }
 
 describe("HSVAI event catalog", () => {
+  it("represents reviewed speakerless events with an empty speaker list", () => {
+    const catalog = loadHsvaiEventCatalog(
+      hsvaiEventCatalogPaths.baseline,
+      `${hsvaiEventCatalogPaths.baseline}.missing`
+    );
+
+    expect(catalog.events.some((event) => event.speakers.length === 0)).toBe(true);
+    expect(catalog.events.flatMap((event) => event.speakers).map((person) => person.name))
+      .not.toContain("No Speaker");
+  });
+
   it("extracts synthetic presenters and facilitators as speakers", () => {
     const metadata = extractDeterministicEventMetadata(source(
       "event:1",

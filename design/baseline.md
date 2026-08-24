@@ -235,9 +235,9 @@ Base Docker Compose contains `ollama`, the one-shot `ollama-model` pull job, ACL
 If configuration, migration, or required model setup fails, startup exits with a clear error instead of connecting in a partially working state.
 
 Startup never calls the model to enrich HSVAI events. New or changed source events
-without a matching catalog hash are synchronized as pending. An operator runs
-`npm run catalog:hsvai-events` during a maintenance window to refresh the durable
-overlay with the configured model and resynchronize Dgraph.
+without a matching catalog hash are synchronized as pending. An operator stops
+Artemis, runs `npm run catalog:hsvai-events` to refresh the durable overlay and
+resynchronize Dgraph, then restarts Artemis to rebuild its BM25 snapshot.
 
 ### `/ping`
 
