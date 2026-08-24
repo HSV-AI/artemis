@@ -473,8 +473,10 @@ Load local environment configuration from `.env` or the process environment, opt
 The received-message audit ignores `LOG_LEVEL`; all other logs obey it.
 
 The optional provider JSON `embedding` object requires `modelId`; its optional
-`baseUrl` defaults to the provider base URL. It reuses `MODEL_API_KEY`. Omission
-disables semantic vectors while preserving lexical and graph retrieval. HSVAI
+`baseUrl` defaults to the provider base URL. Its presence is the sole embedding
+enablement switch, and it reuses `MODEL_API_KEY`. Omission disables semantic
+vectors while preserving HSVAI BM25 and graph retrieval plus memory lexical,
+graph, and recency retrieval. HSVAI
 GraphRAG always synchronizes from the fixed `https://hsv.ai` source and always
 registers `hsvai_graph_search` and `hsvai_graph_query`. Dgraph ACL must be enabled
 with an ignored 32-byte `dgraph-acl-secret`; bootstrap must finish before Artemis
@@ -590,7 +592,7 @@ At minimum, prove all of the following:
 - `web_fetch` rejects non-HTTP(S) targets, fetches directly without model credentials, bounds content, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and publish the explicit-mutation guideline in the model's tool registry.
 - Memory tools are present for every profile; every operation uses the immutable conversation scope, writes retain Discord provenance, corrections and forgetting create tombstones, and scope isolation survives PI session clearing.
-- HSVAI startup synchronization follows source pagination, replaces only marked corpus nodes, skips an unchanged source/model revision, and returns cited lexical, semantic, and connected-neighborhood evidence through a read-only tool.
+- HSVAI startup synchronization follows source pagination, builds a corpus-wide BM25 index, replaces only marked corpus nodes, skips an unchanged source/model revision, and returns cited BM25, optional semantic, and connected-neighborhood evidence through a read-only tool. Omitting `model.embedding` makes no embedding requests and leaves BM25 plus graph retrieval active.
 - HSVAI catalog loading merges the baseline and overlay by source ID, rejects malformed data, applies only source-hash matches, exposes stale events as pending, and projects themes plus role-specific person edges. Its model boundary is covered only with synthetic records and mocked HTTP.
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.

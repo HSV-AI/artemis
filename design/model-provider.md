@@ -63,13 +63,14 @@ reasoning-effort parameter. Artemis passes a selected effort when creating every
 PI session and registers the selected extended `xhigh` or `max` level for custom
 models. The legacy Ollama workflow explicitly selects `medium`.
 The definition may also contain `embedding.modelId` and
-`embedding.baseUrl`. The embedding model is explicit because a shared
+`embedding.baseUrl`. Presence of the `embedding` object is the sole explicit
+enablement switch; there is no separate environment flag. The embedding model is explicit because a shared
 OpenAI-compatible `/models` endpoint may list chat and embedding models together.
 When `embedding.baseUrl` is omitted, it defaults to the provider `baseUrl`, which
 matches Ollama's same-origin `/v1/embeddings` contract. Providers with a separate
 embedding worker set its base URL in the same provider definition. Omitting the
-`embedding` object disables semantic vectors without disabling lexical, graph,
-or recency retrieval.
+`embedding` object disables semantic vectors without disabling HSVAI BM25 and
+graph retrieval or memory lexical, graph, and recency retrieval.
 
 `MODEL_API_KEY` remains outside the JSON file and is attached to model discovery,
 completion, and configured embedding requests. An empty API key sends no

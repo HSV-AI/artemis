@@ -109,11 +109,13 @@ OpenAI-compatible provider. The file must define `providerId`, `providerName`,
 JSON file.
 
 An alternate provider may also define an `embedding` object with a required
-`modelId` and optional `baseUrl`. Omitting `baseUrl` reuses the provider base,
-as Ollama does; a deployment whose embedding worker has a separate origin must
-set that origin explicitly. Embedding requests reuse `MODEL_API_KEY`. Omitting
-`embedding` disables semantic vectors while retaining lexical, graph, and
-recency retrieval.
+`modelId` and optional `baseUrl`. That object's presence is the explicit
+embedding enablement switch; there is no second environment flag. Omitting
+`baseUrl` reuses the provider base, as Ollama does; a deployment whose embedding
+worker has a separate origin must set that origin explicitly. Embedding requests
+reuse `MODEL_API_KEY`. Omitting `embedding` disables semantic vectors while
+retaining BM25 and graph retrieval for HSVAI plus lexical, graph, and recency
+retrieval for memory.
 
 Providers that support configurable reasoning effort may also define
 `reasoningEffort` as `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.

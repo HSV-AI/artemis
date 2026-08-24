@@ -14,7 +14,7 @@ references.
 ## Scope
 
 This feature owns synchronization from the Huntsville AI WordPress
-site, corpus normalization and chunking, Dgraph persistence, hybrid retrieval,
+site, corpus normalization and chunking, an in-process BM25 index, Dgraph persistence, hybrid retrieval,
 graph-neighborhood expansion, and the read-only `hsvai_graph_search` and
 `hsvai_graph_query` PI tools. It
 does not change conversation memory, Discord authorization, source content, or
@@ -74,7 +74,8 @@ HSVAI namespace inside the existing Dgraph volume. Dgraph ACL prevents that
 namespace from reading namespace-0 memory facts. It is independent of SQLite sessions.
 The reviewed event-catalog baseline is a checked-in artifact, and its optional
 runtime overlay persists in the Artemis data volume. Neither stores embeddings
-or Dgraph UIDs.
+or Dgraph UIDs. The BM25 index is rebuilt in process from the normalized chunks
+on every startup and is not a separate persisted artifact.
 
 ### Synchronization
 
@@ -84,8 +85,8 @@ Startup performs these steps before Discord connects:
 2. Load and validate the event-catalog baseline and optional runtime overlay.
 3. Fetch every transcript post and event page from the JSON APIs, applying only
    catalog records whose source hash matches.
-4. Normalize and chunk the corpus, then compute a SHA-256 revision over the
-   normalized documents and selected embedding model.
+4. Normalize and chunk the corpus, build the BM25 index, then compute a SHA-256
+   revision over the normalized documents and selected embedding model.
 5. Stop when the stored revision already matches.
 6. Otherwise delete only nodes carrying the `hsvai.node_kind` marker, rebuild
    entities and documents, write chunks in bounded batches, and write the corpus
@@ -105,12 +106,16 @@ contract is authoritative in [HSVAI event catalog](hsvai-event-catalog.md).
 `hsvai_graph_search` accepts a nonblank query and an optional result limit from
 1 through 10, defaulting to 6. It runs:
 
-- Dgraph full-text search over evidence chunks.
+- Corpus-wide BM25 ranking over normalized evidence chunks, using `k1 = 1.2`,
+  `b = 0.75`, Unicode word tokens, and stable evidence-ID tie breaking.
 - HNSW cosine search when the model-provider definition includes `embedding`.
 - One connected-neighborhood expansion from the six fused seed chunks through
   their source document, speakers, and venue.
 
-Reciprocal rank fusion uses `1 / (60 + rank + 1)` per channel. Results sort by
+The BM25 path is always available after successful corpus synchronization and
+is labeled `bm25` in tool results. The `embedding` object's presence is the sole
+semantic-retrieval enablement switch; omitting it makes no embedding requests
+and stores no vectors. Reciprocal rank fusion uses `1 / (60 + rank + 1)` per channel. Results sort by
 descending fused score and then stable evidence ID. The tool returns the
 evidence ID, source title and URL, publication or event metadata, connected
 entity labels, retrieval channels, score, and source excerpt.
@@ -151,7 +156,7 @@ inference.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Source | `https://hsv.ai` | Fixed public WordPress source; not operator-configurable. |
-| `model.embedding` | Omitted | Provider-owned model and optional base URL shared by GraphRAG and graph memory. Omission keeps lexical and graph retrieval. |
+| `model.embedding` | Omitted | Sole explicit switch for semantic retrieval. When present, supplies the provider-owned model and optional base URL shared by GraphRAG and graph memory. Omission keeps BM25 and graph retrieval without making embedding requests. |
 | `DGRAPH_URL` | `http://dgraph:8080` | Shared Dgraph Alpha HTTP endpoint. |
 | `HSVAI_DGRAPH_NAMESPACE` | `1` | Namespace containing only the public corpus. |
 | `HSVAI_DGRAPH_SYNC_USER` / `HSVAI_DGRAPH_SYNC_PASSWORD` | Required | Write and schema credentials used only for synchronization. |
@@ -173,7 +178,8 @@ Corpus replacement uses the sync account and deletes only nodes marked with
 
 ## Failure Handling
 
-- Invalid embedding provider metadata fails configuration loading.
+- Invalid embedding provider metadata fails configuration loading. Omitting the
+  object is valid and leaves BM25 plus graph retrieval active.
 - Invalid baseline or runtime event-catalog data fails loading; a stale event
   record is ignored and the event is marked pending rather than applied.
 - Non-success source responses, malformed pagination payloads, empty source
@@ -188,8 +194,9 @@ Corpus replacement uses the sync account and deletes only nodes marked with
 ## Verification
 
 - `test/hsvai-knowledge.test.ts` covers source pagination, HTML normalization,
-  chunking, stable graph construction, revision skips, hybrid neighborhood
-  retrieval, evidence formatting, and failures with HTTP mocked.
+  chunking, stable graph construction, revision skips, corpus-wide BM25 ranking,
+  embedding-disabled and hybrid neighborhood retrieval, evidence formatting,
+  and failures with HTTP mocked.
 - `test/embedding-client.test.ts` covers ordered embedding batches.
 - `test/pi-gateway.test.ts` covers unconditional tool registration and startup
   synchronization, prompt revision signaling, unchanged-revision loader reuse,

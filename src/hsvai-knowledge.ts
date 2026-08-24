@@ -21,6 +21,8 @@ const RRF_K = 60;
 const MAX_DQL_LENGTH = 20_000;
 const MAX_DQL_RESULT_CHARS = 200_000;
 const CORPUS_REVISION_PATTERN = /^[a-f0-9]{64}$/u;
+const BM25_K1 = 1.2;
+const BM25_B = 0.75;
 export const HSVAI_SOURCE_URL = "https://hsv.ai";
 
 const HSVAI_SCHEMA = `
@@ -234,6 +236,18 @@ interface RankedChunk {
   channels: string[];
 }
 
+interface Bm25Document {
+  id: string;
+  length: number;
+  termFrequency: Map<string, number>;
+}
+
+interface Bm25Index {
+  documents: Bm25Document[];
+  documentFrequency: Map<string, number>;
+  averageDocumentLength: number;
+}
+
 function decodeHtmlEntities(value: string): string {
   const named: Record<string, string> = {
     amp: "&",
@@ -361,6 +375,56 @@ function sourceRevision(documents: HsvaiSourceDocument[], embeddingVersion: stri
   return createHash("sha256")
     .update(JSON.stringify({ embeddingVersion, documents }))
     .digest("hex");
+}
+
+function tokenize(text: string): string[] {
+  return text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+
+function createBm25Index(chunks: Array<Pick<CorpusChunk, "id" | "text">>): Bm25Index {
+  const documentFrequency = new Map<string, number>();
+  const documents = chunks.map((chunk) => {
+    const terms = tokenize(chunk.text);
+    const termFrequency = new Map<string, number>();
+    for (const term of terms) {
+      termFrequency.set(term, (termFrequency.get(term) ?? 0) + 1);
+    }
+    for (const term of termFrequency.keys()) {
+      documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
+    }
+    return { id: chunk.id, length: terms.length, termFrequency };
+  });
+  const totalLength = documents.reduce((sum, document) => sum + document.length, 0);
+  return {
+    documents,
+    documentFrequency,
+    averageDocumentLength: documents.length ? totalLength / documents.length : 1
+  };
+}
+
+function rankBm25(index: Bm25Index, query: string, limit: number): string[] {
+  const terms = [...new Set(tokenize(query))];
+  const documentCount = index.documents.length;
+  if (!terms.length || !documentCount) return [];
+
+  return index.documents.map((document) => {
+    const lengthRatio = document.length / index.averageDocumentLength;
+    const score = terms.reduce((sum, term) => {
+      const frequency = document.termFrequency.get(term) ?? 0;
+      if (!frequency) return sum;
+      const matchingDocuments = index.documentFrequency.get(term) ?? 0;
+      const inverseDocumentFrequency = Math.log(
+        1 + (documentCount - matchingDocuments + 0.5) / (matchingDocuments + 0.5)
+      );
+      const saturation = frequency + BM25_K1 * (1 - BM25_B + BM25_B * lengthRatio);
+      return sum + inverseDocumentFrequency * frequency * (BM25_K1 + 1) / saturation;
+    }, 0);
+    return { id: document.id, score };
+  })
+    .filter((result) => result.score > 0)
+    .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id))
+    .slice(0, limit)
+    .map((result) => result.id);
 }
 
 function validUid(uid: string): string {
@@ -536,6 +600,7 @@ export class HsvaiKnowledge {
   private readonly embedMany: EmbedBatchFunction | undefined;
   private readonly embeddingVersion: () => Promise<string>;
   private readonly queryClient: DgraphClient;
+  private lexicalIndex = createBm25Index([]);
 
   public constructor(
     private readonly client: DgraphClient,
@@ -553,6 +618,7 @@ export class HsvaiKnowledge {
     await this.client.dropAttribute("hsvai.facilitators");
     const documents = await this.source.fetchDocuments();
     const chunks = documents.flatMap(documentChunks);
+    this.lexicalIndex = createBm25Index(chunks);
     const entities = new Map<string, CorpusEntity>();
     for (const chunk of chunks) {
       for (const entity of chunk.entities) {
@@ -591,12 +657,12 @@ export class HsvaiKnowledge {
       throw new Error("HSVAI graph search requires a query");
     }
     const boundedLimit = Math.max(1, Math.min(limit, 10));
-    const fulltext = await this.searchFulltext(terms, 20);
+    const lexical = await this.searchBm25(terms, 20);
     const semantic = this.embed
       ? await this.searchSemantic(await this.embed(terms), 20)
       : [];
     const seeds = this.fuse([
-      ["fulltext", fulltext],
+      ["bm25", lexical],
       ["semantic", semantic]
     ], 6);
     const seedUids = seeds.map((result) => result.chunk.uid);
@@ -604,7 +670,7 @@ export class HsvaiKnowledge {
       ? [...seeds.map((result) => result.chunk), ...await this.expandGraph(seedUids)]
       : [];
     return this.fuse([
-      ["fulltext", fulltext],
+      ["bm25", lexical],
       ["semantic", semantic],
       ["graph", graph]
     ], boundedLimit).map((result) => this.toResult(result));
@@ -750,18 +816,21 @@ export class HsvaiKnowledge {
     return vectors;
   }
 
-  private async searchFulltext(query: string, limit: number): Promise<KnowledgeChunk[]> {
+  private async searchBm25(query: string, limit: number): Promise<KnowledgeChunk[]> {
+    const rankedIds = rankBm25(this.lexicalIndex, query, limit);
+    if (!rankedIds.length) return [];
     const data = await this.queryClient.query<{ chunks?: KnowledgeChunk[] }>(
-      `query search($terms: string) {
-        chunks(func: anyoftext(hsvai.text, $terms), first: ${limit}) @filter(type(HsvaiChunk)) {
+      `query {
+        chunks(func: eq(hsvai.chunk_id, ${JSON.stringify(rankedIds)})) @filter(type(HsvaiChunk)) {
           ${CHUNK_FIELDS}
         }
-      }`,
-      { $terms: query }
+      }`
     );
-    return (data.chunks ?? []).sort((left, right) =>
-      this.termScore(right.text, query) - this.termScore(left.text, query) || left.id.localeCompare(right.id)
-    );
+    const chunksById = new Map((data.chunks ?? []).map((chunk) => [chunk.id, chunk]));
+    return rankedIds.flatMap((id) => {
+      const chunk = chunksById.get(id);
+      return chunk ? [chunk] : [];
+    });
   }
 
   private async searchSemantic(vector: number[], limit: number): Promise<KnowledgeChunk[]> {
@@ -826,12 +895,6 @@ export class HsvaiKnowledge {
     return [...ranked.values()]
       .sort((left, right) => right.score - left.score || left.chunk.id.localeCompare(right.chunk.id))
       .slice(0, limit);
-  }
-
-  private termScore(text: string, query: string): number {
-    const haystack = text.toLowerCase();
-    return [...new Set(query.toLowerCase().split(/[^a-z0-9]+/u).filter(Boolean))]
-      .reduce((score, term) => score + (haystack.includes(term) ? 1 : 0), 0);
   }
 
   private toResult(result: RankedChunk): HsvaiKnowledgeResult {
@@ -950,10 +1013,12 @@ export function createHsvaiGraphQueryTool(
 }
 
 export const hsvaiKnowledgeInternals = {
+  createBm25Index,
   chunkText,
   documentChunks,
   formatKnowledgeResults,
   htmlToText,
+  rankBm25,
   sourceRevision,
   transcriptSpeakers
 };
