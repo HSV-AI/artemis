@@ -17,7 +17,7 @@ import type {
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
 import { createMemoryTools } from "./memory-tools.js";
-import type { PersonaProfile } from "./persona-profiles.js";
+import { DEFAULT_BOT_DISPLAY_NAME, type PersonaProfile } from "./persona-profiles.js";
 import {
   asPiSessionManager,
   migrateExistingPiSessions,
@@ -75,10 +75,13 @@ export interface ToolRegistryEntry {
  * see limit messaging. The Capability Gap Protocol and Available Tools sections
  * are always included so the model knows its real boundaries.
  *
- * The bot's display name is resolved from Discord at startup (see
- * `PiSdkGateway.setBotDisplayName`) and is authoritative for self-introduction.
- * When no Discord name has been provided, the persona profile's bundled `name`
- * acts as the sensible fallback default.
+ * Name resolution: a named persona profile (e.g. `artemis`, `wartermis`) owns
+ * its identity and its `name` is used for self-introduction regardless of the
+ * Discord display name. The default `generic` profile defines no name, so the
+ * bot's display name resolved from Discord at startup (see
+ * `PiSdkGateway.setBotDisplayName`) is used instead. When neither a persona
+ * name nor a Discord display name is available, {@link DEFAULT_BOT_DISPLAY_NAME}
+ * is the sensible fallback so the bot can still introduce itself.
  */
 export function buildSystemPrompt(
   kind: ConversationKind,
@@ -86,7 +89,9 @@ export function buildSystemPrompt(
   botDisplayName: string | undefined = undefined,
   tools: readonly ToolRegistryEntry[] = []
 ): string {
-  const resolvedName = botDisplayName?.trim() ? botDisplayName.trim() : persona.name;
+  const personaName = persona.name.trim();
+  const discordName = botDisplayName?.trim();
+  const resolvedName = personaName || discordName || DEFAULT_BOT_DISPLAY_NAME;
   const identityBlock = `Your name is ${resolvedName}. When someone asks your name, introduce yourself as ${resolvedName}.`;
   const channelLimits = kind === "guild" ? CHANNEL_LIMITS_PROMPT_BLOCK : "";
   const registry = tools.length === 0
@@ -159,10 +164,12 @@ export class PiSdkGateway implements PiGateway {
 
   /**
    * Set the bot's Discord display name, resolved from the connected Discord
-   * client at startup. The name is injected into every system prompt so the
-   * model introduces itself with the name Discord users actually see, rather
-   * than a name hardcoded in a persona profile. Clears the cached resource
-   * loaders so the next generation rebuilds the prompt with the new name.
+   * client at startup. The name is injected into every system prompt built for
+   * a persona that does not own its own name (the default `generic` profile), so
+   * the model introduces itself with the name Discord users actually see. A
+   * named persona profile (e.g. `artemis`, `wartermis`) keeps its own name and is
+   * unaffected. Clears the cached resource loaders so the next generation
+   * rebuilds the prompt with the new name.
    */
   public setBotDisplayName(name: string): void {
     const trimmed = name.trim();

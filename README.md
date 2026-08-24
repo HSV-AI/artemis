@@ -59,7 +59,7 @@ cp .env.example .env
 | `OLLAMA_API_KEY` | No | `ollama` | Existing Ollama placeholder or bearer credential. |
 | `MODEL_CONFIG_PATH` | No | Empty | Runtime path to an optional JSON provider definition. When absent, Artemis uses the existing `OLLAMA_*` settings. |
 | `MODEL_API_KEY` | No | `local` | Bearer value used only with `MODEL_CONFIG_PATH`. A blank value sends no authorization header. |
-| `PERSONA_PROFILE` | No | `artemis` | Named profile: `artemis` or `wartermis`. |
+| `PERSONA_PROFILE` | No | `generic` | Named profile: `generic`, `artemis`, or `wartermis`. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token. A blank value disables every GitHub tool. Grant only the repository permissions needed for the desired read or write operations. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `HSV-AI/artemis` | Comma-separated `owner/repository` allowlist. A blank list disables every GitHub tool. Matching is case-insensitive. |
 | `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint used by the memory tools. |
@@ -102,23 +102,28 @@ Compose override or another runtime secret/configuration mechanism.
 
 ## Persona profiles
 
-`PERSONA_PROFILE` selects a named profile. `artemis` preserves the default identity;
-`wartermis` selects the bundled Wartermis Works profile. Each complete profile
-lives in its own file under `src/personas/`, so identity changes are isolated and
-visible in review.
+`PERSONA_PROFILE` selects a named profile. The default `generic` profile defines no
+fixed identity; the bot's display name is read from the connected Discord client
+at startup and used for self-introduction, so asking the bot its name returns the
+Discord-configured name (for example KIPP). `artemis` restores the original
+Artemis identity and introduces itself as Artemis regardless of the Discord
+display name. `wartermis` selects the bundled Wartermis Works profile. Each
+complete profile lives in its own file under `src/personas/`, so identity changes
+are isolated and visible in review.
 
 ```dotenv
 PERSONA_PROFILE=wartermis
 ```
 
 The selected profile supplies the conversational style instructions. Fixed Discord,
-tool, and capability rules are composed after it and remain application-owned.
-The bot's display name is read from the connected Discord client at startup
-(global display name when set, otherwise username) and injected into the system
-prompt, so asking the bot its name returns the Discord-configured name rather
-than a name hardcoded in the profile. The profile's bundled `name` is the
-fallback default when Discord has not reported a name. Changing a profile
-requires rebuilding and restarting Artemis.
+tool, and capability rules are composed after it and remain application-owned. A
+named profile (`artemis`, `wartermis`) owns its name and uses it for
+self-introduction regardless of the Discord display name. The `generic` profile
+defines no name, so the Discord-resolved display name (global display name when
+set, otherwise username) is injected into the system prompt instead. When neither
+a profile name nor a Discord display name is available, `DEFAULT_BOT_DISPLAY_NAME`
+(`Artemis`) is the sensible fallback. Changing a profile requires rebuilding and
+restarting Artemis.
 
 ## Run locally with Compose
 
