@@ -355,11 +355,13 @@ The minimal logical schema is:
 - Conversation foreign key.
 - Configured model.
 - Status: `active` or `closed`.
+- Optional rendered memory snapshot, written once on the session's first
+  memory-injected turn.
 - Created and updated timestamps.
 - At most one active session per conversation.
 - Optional harness session reference or serialized state when the selected harness requires it.
 
-The current implementation uses the logical session ID as the native PI session ID. `/clear-session` changes the active row to `closed`; the next accepted message creates a new active row for the same conversation.
+The current implementation uses the logical session ID as the native PI session ID. `/clear-session` changes the active row to `closed`; the next accepted message creates a new active row for the same conversation. Migration 6 adds the memory-snapshot column so loader rebuilds and process restarts preserve the original prompt bytes.
 
 ### `pi_sessions`
 

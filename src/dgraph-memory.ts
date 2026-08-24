@@ -197,7 +197,7 @@ occurred_at: dateTime .
 channel: string .
 entity_name: string @index(exact) .
 about: uid @reverse .
-statement_embedding: float32vector @index(hnsw(metric:"cosine")) .
+statement_embedding: float32vector .
 
 type Fact {
   statement

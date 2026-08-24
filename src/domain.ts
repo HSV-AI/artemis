@@ -105,6 +105,8 @@ export interface PiSessionMigration {
 }
 
 export interface PiSessionStore {
+  loadMemorySnapshot(sessionId: string): string | undefined;
+  saveMemorySnapshot(sessionId: string, snapshot: string): string;
   loadPiSession(sessionId: string): PersistedPiSession | undefined;
   createPiSession(sessionId: string, entries: PiSessionEntryRecord[]): void;
   appendPiSessionEntry(sessionId: string, entry: PiSessionEntryRecord): void;

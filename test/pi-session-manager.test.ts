@@ -134,6 +134,8 @@ describe("SqlitePiSessionManager", () => {
 
   it("does not advance in-memory state when a SQLite append fails", () => {
     const store: PiSessionStore = {
+      loadMemorySnapshot: vi.fn(() => undefined),
+      saveMemorySnapshot: vi.fn((_sessionId, snapshot) => snapshot),
       loadPiSession: vi.fn(() => undefined),
       createPiSession: vi.fn(),
       appendPiSessionEntry: vi.fn(() => {
@@ -403,7 +405,7 @@ describe("PI session cutover migration", () => {
       .get() as { logical_sessions: number; pi_sessions: number };
     migrated.close();
 
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(columns.map((column) => column.name)).toEqual([
       "session_id",
       "next_ordinal",

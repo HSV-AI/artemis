@@ -194,10 +194,10 @@ export interface HsvaiKnowledgeSource {
 }
 
 export interface HsvaiKnowledgeOptions {
+  queryClient: DgraphClient;
   embed?: EmbedFunction;
   embedMany?: EmbedBatchFunction;
   embeddingVersion?: () => Promise<string>;
-  queryClient?: DgraphClient;
 }
 
 interface WordPressPost {
@@ -610,12 +610,12 @@ export class HsvaiKnowledge {
   public constructor(
     private readonly client: DgraphClient,
     private readonly source: HsvaiKnowledgeSource,
-    options: HsvaiKnowledgeOptions = {}
+    options: HsvaiKnowledgeOptions
   ) {
     this.embed = options.embed;
     this.embedMany = options.embedMany;
     this.embeddingVersion = options.embeddingVersion ?? (() => Promise.resolve("none"));
-    this.queryClient = options.queryClient ?? client;
+    this.queryClient = options.queryClient;
   }
 
   public async initializeAndSync(): Promise<HsvaiKnowledgeSyncResult> {

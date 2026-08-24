@@ -212,7 +212,10 @@ describe("HSVAI corpus construction", () => {
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", fetchMock),
       { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) },
-      { embeddingVersion: vi.fn().mockResolvedValue("embed-v1") }
+      {
+        embeddingVersion: vi.fn().mockResolvedValue("embed-v1"),
+        queryClient: new DgraphClient("http://dgraph:8080", fetchMock)
+      }
     );
 
     await expect(knowledge.initializeAndSync()).resolves.toMatchObject({ changed: false, revision });
@@ -260,7 +263,7 @@ describe("HSVAI hybrid graph retrieval", () => {
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", fetchMock),
       { fetchDocuments: vi.fn().mockResolvedValue(documents) },
-      { embed }
+      { embed, queryClient: new DgraphClient("http://dgraph:8080", fetchMock) }
     );
 
     await knowledge.initializeAndSync();
@@ -298,7 +301,8 @@ describe("HSVAI hybrid graph retrieval", () => {
       .mockResolvedValueOnce(jsonResponse({ data: { seeds: [] } }));
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", fetchMock),
-      { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) }
+      { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) },
+      { queryClient: new DgraphClient("http://dgraph:8080", fetchMock) }
     );
 
     await knowledge.initializeAndSync();
@@ -402,7 +406,8 @@ describe("HSVAI hybrid graph retrieval", () => {
       .mockResolvedValueOnce(jsonResponse({ data: { corpus: [{ revision }] } }));
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", fetchMock),
-      { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) }
+      { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) },
+      { queryClient: new DgraphClient("http://dgraph:8080", fetchMock) }
     );
     await knowledge.initializeAndSync();
     await expect(knowledge.search(" ")).rejects.toThrow("requires a query");

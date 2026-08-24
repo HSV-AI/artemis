@@ -46,11 +46,12 @@ supersession suggestion unless `force` is true. Refusals are ordinary tool outpu
 so PI can respond or choose another explicit memory operation in the same turn.
 
 When `MEMORY_INJECT=true`, Artemis renders at most 2,000 characters of current
-facts into the system prompt on the first turn of each durable PI session. The
-same resource loader and prompt bytes are reused for every later turn in that
-session. The snapshot identifies itself as user data, remains unchanged after
-writes, and directs PI to `memory_search` for newer or omitted facts. A new PI
-session takes a new snapshot.
+facts into the system prompt on the first turn of each durable PI session.
+SQLite stores the rendered snapshot on the logical session row. Every later
+loader for that session reuses those snapshot bytes, including after process
+restarts and corpus-revision loader rebuilds. The snapshot identifies itself as
+user data, remains unchanged after writes, and directs PI to `memory_search` for
+newer or omitted facts. A new PI session takes a new snapshot.
 
 ## Contracts and data flow
 

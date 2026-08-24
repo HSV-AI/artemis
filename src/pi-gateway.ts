@@ -389,12 +389,17 @@ export class PiSdkGateway implements PiGateway {
     if (existing?.hsvaiCorpusRevision === hsvaiCorpusRevision) {
       return existing.loader;
     }
-    const memorySnapshot = this.config.memoryInject
-      ? renderMemorySnapshot(
+    let memorySnapshot = "";
+    if (this.config.memoryInject) {
+      const persisted = this.sessionStore.loadMemorySnapshot(input.logicalSessionId);
+      memorySnapshot = persisted ?? this.sessionStore.saveMemorySnapshot(
+        input.logicalSessionId,
+        renderMemorySnapshot(
           await this.memory.retrieveCurrent(input.conversationKey),
           input.conversationKey
         )
-      : "";
+      );
+    }
     const resourceLoader = new DefaultResourceLoader({
       cwd: process.cwd(),
       agentDir: process.cwd(),
