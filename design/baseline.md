@@ -55,7 +55,7 @@ Detailed protocols and major features live in focused subdocuments so this basel
 | Channel-aware response limits | Group/channel (guild) responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (3) self-contained Discord messages per turn; DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind. |
 | Isolated, persistent context | Associate each conversation key with one active logical session, store its native PI entries in SQLite, and restore those entries directly for later turns without replaying the normalized transcript. |
 | Long-term memory | Bind each memory tool call to the immutable Discord conversation key, author ID, source message ID, and durable PI-session episode; persist facts, embeddings, entity links, and tombstones in Dgraph across PI sessions; optionally inject one byte-stable bounded snapshot per session. |
-| Huntsville AI knowledge | Synchronize public transcript posts and calendar events before Discord login, apply source-hash-matched event themes and people from the reviewed baseline plus durable runtime overlay, build a corpus-revision-bound BM25 index, isolate the source graph from memory with a Dgraph namespace, and expose both cited BM25/optional-semantic graph retrieval and arbitrary read-only DQL. Publish the current corpus revision to each model turn and stamp tool results so unchanged evidence can be reused while stale session evidence is re-queried. |
+| Huntsville AI knowledge | Synchronize public HSVAI transcripts and events into a separate Dgraph namespace before Discord login and expose cited hybrid search and read-only DQL through shared tools. |
 | Configurable model and runtime | Read provider metadata from an optional local JSON file and credentials plus other runtime settings from environment variables loaded through `.env`. |
 | Reconnection | Use the Discord client's reconnect and resume behavior, and log connection lifecycle events. |
 | Debuggable operation | Emit structured application logs and persist sessions, chat messages, model metadata, and available reasoning or diagnostics. |
@@ -133,7 +133,7 @@ Configuration is loaded once at startup, parsed into a typed runtime object, and
 - A named persona profile, defaulting to `artemis`, selected from complete source-controlled profiles under `src/personas/`.
 - Optional GitHub API token and a comma-separated repository allowlist. When the variable is absent, the application fallback is `mbrooks/artemis,HSV-AI/artemis`; the supplied `.env.example` explicitly selects only `HSV-AI/artemis`. A blank token or an explicitly blank repository allowlist disables all GitHub tools.
 - A Dgraph HTTP endpoint, authenticated memory credentials for namespace `0`, and separate HSVAI synchronization and read-only query credentials for the public namespace.
-- An optional provider-owned OpenAI-compatible embedding model and endpoint plus a boolean memory session-snapshot switch, both disabled by default. Presence of `model.embedding` explicitly enables semantic retrieval; omission retains HSVAI BM25 and graph retrieval without embedding calls. HSVAI synchronization uses the fixed public `https://hsv.ai` source and loads the checked-in event catalog plus an optional runtime overlay path.
+- An optional provider-owned embedding model and endpoint plus a boolean memory session-snapshot switch, both disabled by default. See [Configurable model provider](model-provider.md) and [HSVAI GraphRAG](hsvai-graphrag.md).
 - SQLite database path.
 - Log level and other non-secret runtime controls.
 
@@ -180,7 +180,7 @@ An authorized `/clear-session` closes the active session for the same conversati
 
 PI is the base conversational harness and owns interaction with the configured OpenAI-compatible model endpoint. Application code supplies the isolated conversation session and user message, then consumes the assistant response plus any available reasoning or diagnostic metadata. [Configurable model provider](model-provider.md) defines the provider file and startup contract.
 
-Only explicitly registered custom tools are enabled. `web_fetch` accepts an HTTP or HTTPS URL, fetches it directly as a PI custom tool, bounds and extracts its content, and sanitizes the returned page independently of the model provider. When `GITHUB_TOKEN` is nonblank and `GITHUB_ALLOWED_REPOSITORY` contains at least one entry, Artemis also registers the six documented GitHub tools behind their repository allowlist, sanitizes read results as untrusted content, and publishes the explicit-mutation guideline in the tool descriptions. Artemis registers nine Dgraph-backed [memory tools](memory.md) bound to the current conversation key, Discord author, source message, and durable PI-session episode. It also registers shared, read-only `hsvai_graph_search` and `hsvai_graph_query` tools backed by the fixed `https://hsv.ai` source defined in [HSVAI GraphRAG](hsvai-graphrag.md). The latter accepts arbitrary DQL but uses only Dgraph's read-only query endpoint and an ACL account bound to the public namespace. PI's built-in read, write, edit, shell, and filesystem search tools remain disabled. Novelty refusals are returned as tool data; other tool failures follow the normal generation-failure path and produce no Discord response.
+Only explicitly registered custom tools are enabled. `web_fetch` and allowlisted GitHub tools sanitize external reads; nine conversation-scoped [memory tools](memory.md) and the shared, read-only tools defined by [HSVAI GraphRAG](hsvai-graphrag.md) use Dgraph. PI's built-in coding tools remain disabled. Novelty refusals are tool data; other tool failures follow the normal generation-failure path and produce no Discord response.
 
 The system prompt is built from the conversation kind, the selected persona profile, the tools that were actually registered, and the current HSVAI corpus revision. Each profile supplies its complete identity from a dedicated file under `src/personas/`; prompt construction does not special-case the default profile. Discord speaker handling, conversation-kind limits, corpus-result freshness, and capability rules remain application-owned. The Capability Gap Protocol tells Artemis to acknowledge an unavailable capability, avoid source exploration or improvised code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when that tool is available. Its Available Tools section is generated from the live custom-tool registry so the prompt does not advertise unregistered tools. A resource loader is reused while its corpus revision remains current and replaced when the revision changes.
 
@@ -234,10 +234,8 @@ Base Docker Compose contains `ollama`, the one-shot `ollama-model` pull job, ACL
 
 If configuration, migration, or required model setup fails, startup exits with a clear error instead of connecting in a partially working state.
 
-Startup never calls the model to enrich HSVAI events. New or changed source events
-without a matching catalog hash are synchronized as pending. An operator stops
-Artemis, runs `npm run catalog:hsvai-events` to refresh the durable overlay and
-resynchronize Dgraph, then restarts Artemis to rebuild its BM25 snapshot.
+Startup never calls the model to enrich HSVAI events; that is an explicit
+operator task defined by [HSVAI event catalog](hsvai-event-catalog.md).
 
 ### `/ping`
 

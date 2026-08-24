@@ -6,28 +6,21 @@ Implemented.
 
 ## Problem
 
-The public HSVAI event API provides event prose but does not expose a stable,
-structured theme or speaker list. Inferring those properties
-during each conversation is slow, inconsistent, and difficult to traverse with
-DQL.
+The HSVAI event API has prose but no stable theme or speaker list. Inferring
+those properties per conversation is inconsistent and not traversable with DQL.
 
 ## Scope
 
-The event catalog owns source-grounded extraction of one primary theme and
-explicitly named presenters or discussion facilitators for HSVAI calendar events. Both
-are represented as speakers. It owns the
-checked-in seed, durable runtime overlay, source-change detection, configured
-model extraction protocol, and operator refresh command. The WordPress APIs
-remain authoritative for event identity, title, URL, dates, venue, and source
-text.
+The catalog owns one source-grounded theme, named presenters and facilitators as
+speakers, its checked-in seed, runtime overlay, invalidation, model extraction,
+and refresh command. WordPress remains authoritative for event identity, title,
+URL, dates, venue, and source text.
 
 ## Observable Behavior
 
-Artemis exposes catalog-matched event themes and speakers through
-hybrid retrieval and direct DQL. Events whose source has changed remain
-queryable, but their catalog status is pending and stale enrichment is omitted.
-Normal startup performs no event-enrichment model calls. Operators explicitly
-refresh changed events with `npm run catalog:hsvai-events`.
+Hybrid retrieval and DQL expose source-matched themes and speakers. Changed events
+remain queryable as pending without stale enrichment. Only the explicit
+`npm run catalog:hsvai-events` operator task calls the model.
 
 ## Contracts And Data Flow
 
@@ -38,25 +31,17 @@ application image. `/data/hsvai-event-catalog.jsonl` is the writable runtime
 overlay on the existing Artemis data volume. `HSVAI_EVENT_CATALOG_PATH` may
 select a different overlay path.
 
-Both files use JSON Lines with one event object per line. Each record retains the
-source ID, title, URL, modification time, SHA-256 source hash, one theme, and a
-speaker array. Themes are exactly `research`, `building`, or `community`.
-Discussion facilitators use the same speaker representation. Legacy version-1
-`facilitators` arrays remain readable and are merged into speakers when loaded,
-but new catalog output does not write them. Each person includes their canonical
-graph name. Model and deterministic entries also retain source evidence.
-Reviewed corrections use `provenance: operator` and do not require placeholder
-evidence text when the event page omits the presenter.
+Each JSONL record contains source identity, modification time, SHA-256 source
+hash, one `research`, `building`, or `community` theme, and speakers. Legacy
+version-1 `facilitators` load as speakers but are not written. People retain a
+canonical graph name and source evidence; reviewed corrections use
+`provenance: operator` and need no placeholder evidence.
 
-Runtime records add new events and replace stale baseline records when their
-source hash differs. A reviewed baseline record wins over generated runtime data
-for the same source ID and hash, so operator corrections are not hidden by an
-older overlay. A record is applied only when its source hash matches the current
-normalized event. New or changed events without a matching record are synchronized with
-`hsvai.people_status = pending`, no people edges, and no theme. Matching records
-use `complete` and populate `hsvai.theme` and `hsvai.speakers`. Reviewed events
-with no designated speaker use `complete` with an empty speaker array, so absence
-does not create a shared person entity or graph relationship.
+Runtime records add or replace events by source ID and hash; an equal-hash
+reviewed baseline wins over generated data. Only current hashes apply. Missing or
+stale records project `pending` without theme or people; matches project `complete`,
+`hsvai.theme`, and `hsvai.speakers`. A reviewed speakerless event is complete with
+an empty array and creates no person entity.
 
 ## Extraction And Refresh
 
@@ -66,44 +51,30 @@ Artemis environment. The task:
 
 1. Fetches and normalizes all current HSVAI events.
 2. Retains entries whose source hash still matches.
-3. Applies deterministic theme and explicit-person patterns to new or changed
-   events.
-4. Sends the pending source records to the deployment's configured
-   OpenAI-compatible model for ambiguous classification and people extraction.
-5. Rejects missing, duplicate, unexpected, malformed, or source-unsupported
-   model output. Every model-produced name must occur verbatim in that event's
-   source text; evidence is copied from the source rather than accepted from the
-   model.
+3. Applies deterministic theme and person patterns to changed events.
+4. Sends ambiguous records to the configured model.
+5. Rejects incomplete, duplicate, malformed, unexpected, or source-unsupported
+   output; names must occur verbatim and evidence is copied from source text.
 6. Atomically replaces the runtime overlay.
 7. Runs the normal HSVAI synchronization so Dgraph receives the reviewed result.
 
-The model prompt treats event records as untrusted data, permits only the three
-themes, excludes paper authors, attendees, and merely mentioned people, and
-forbids resolving first-person references. The task uses the same provider,
-model, API key, and optional embedding configuration as Artemis. It has no
-Ollama-specific alternate path.
+The prompt treats records as untrusted, permits only the three themes, excludes
+authors, attendees, and mentions, and does not resolve first-person references.
+The task uses Artemis's provider configuration without an Ollama-specific path.
 
-Operators choose the cadence outside the application. Stop the serving Artemis
-process before running the task, then restart it after synchronization succeeds.
-This prevents interactive queries from observing the multi-mutation corpus
-replacement and rebuilds the process-local BM25 snapshot before service resumes.
+Operators choose the cadence, stop Artemis before the task, and restart after
+success so queries cannot observe replacement and BM25 is rebuilt before service.
 
-By default the task updates the durable overlay. A maintainer working from source
-may run `npm run build` first, then
-`npm run catalog:hsvai-events -- data/hsvai-event-catalog.jsonl` to regenerate the
-checked-in baseline through the same configured model without changing code.
-That generated baseline must be reviewed before commit.
+The task updates the overlay by default. After `npm run build`, maintainers may
+target `data/hsvai-event-catalog.jsonl` to regenerate the checked-in baseline;
+generated changes require review before commit.
 
 ## Dgraph Projection
 
-Event documents store indexed `hsvai.theme` and `hsvai.people_status`
-predicates. `hsvai.speakers` is a first-class UID edge
-to the same stable person entities used by graph retrieval. Event chunks mention
-those entities so hybrid neighborhood expansion can connect events and
-transcripts through a person. Direct DQL can traverse the event edge without
-parsing source prose. The former `hsvai.facilitators` edge is no
-longer written. Startup drops that retired predicate before synchronizing so
-schema metadata and orphaned UID edges from earlier versions do not survive.
+Event documents index `hsvai.theme` and `hsvai.people_status`; `hsvai.speakers`
+links the stable person entities mentioned by event chunks. Graph expansion and
+DQL can therefore connect events and transcripts without parsing prose. Startup
+drops the retired `hsvai.facilitators` predicate before synchronization.
 
 ## Configuration
 
@@ -114,10 +85,8 @@ schema metadata and orphaned UID edges from earlier versions do not survive.
 
 ## Persistence
 
-The baseline is immutable image content. The runtime overlay persists on the
-existing Artemis data volume and is replaced through a temporary file plus an
-atomic rename. Dgraph remains the queryable projection and contains no catalog
-credentials or model output that was not canonicalized against source text.
+The baseline is immutable image content. The data-volume overlay uses temporary
+file plus atomic rename. Dgraph is the queryable, source-canonicalized projection.
 
 ## Failure Handling
 
@@ -133,19 +102,15 @@ credentials or model output that was not canonicalized against source text.
 
 ## Security And Privacy
 
-The catalog contains public event metadata and source evidence, not Discord
-conversation data. Model credentials come from normal runtime configuration and
-are never persisted in the catalog. Source records are untrusted model input,
-and model names are constrained to verbatim source text. Only the authenticated
-HSVAI sync account mutates the public Dgraph namespace.
+The catalog contains public evidence, not Discord data. It never persists model
+credentials; records are untrusted model input and names must occur in source.
+Only the authenticated HSVAI sync account mutates the public namespace.
 
 ## Verification
 
-- `test/hsvai-event-catalog.test.ts` uses synthetic events to cover deterministic
-  extraction, source hashes, changed-event selection, configured model requests,
-  source canonicalization, and unsupported names.
-- `test/hsvai-knowledge.test.ts` uses synthetic people and venues to cover
-  complete and pending projection plus Dgraph role edges.
+- `test/hsvai-event-catalog.test.ts` covers extraction, hashes, changed events,
+  model requests, source canonicalization, and unsupported names.
+- `test/hsvai-knowledge.test.ts` covers complete and pending graph projection.
 - `test/pi-gateway.test.ts` covers baseline loading during gateway construction.
 - `npm run guardrail` remains the completion gate.
 

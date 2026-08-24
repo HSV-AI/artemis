@@ -108,14 +108,9 @@ OpenAI-compatible provider. The file must define `providerId`, `providerName`,
 `supportsDeveloperRole`. Keep bearer credentials in `MODEL_API_KEY`, not the
 JSON file.
 
-An alternate provider may also define an `embedding` object with a required
-`modelId` and optional `baseUrl`. That object's presence is the explicit
-embedding enablement switch; there is no second environment flag. Omitting
-`baseUrl` reuses the provider base, as Ollama does; a deployment whose embedding
-worker has a separate origin must set that origin explicitly. Embedding requests
-reuse `MODEL_API_KEY`. Omitting `embedding` disables semantic vectors while
-retaining BM25 and graph retrieval for HSVAI plus lexical, graph, and recency
-retrieval for memory.
+An alternate provider may define an `embedding` object with a required `modelId`
+and optional `baseUrl`. Its presence enables semantic retrieval for memory and
+HSVAI GraphRAG; see [Configurable model provider](design/model-provider.md).
 
 Providers that support configurable reasoning effort may also define
 `reasoningEffort` as `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
@@ -152,12 +147,9 @@ docker compose up --build
 
 The base Compose file starts `ollama`, the `ollama-model` pull job, Dgraph, and
 `artemis`. Deployments using another provider should layer their own Compose
-override over this file. Artemis checks the selected provider's `/models`
-endpoint, initializes Dgraph, and synchronizes the fixed-source HSVAI corpus before connecting to Discord. The
-[graph memory protocol](design/memory.md) defines ranked retrieval, stable
-session snapshots, novelty control, and retention.
-The [HSVAI GraphRAG protocol](design/hsvai-graphrag.md) defines public-source
-synchronization, graph construction, hybrid retrieval, and citation behavior.
+override over this file. Before connecting to Discord, Artemis validates the
+model, initializes Dgraph, and synchronizes HSVAI. See [Graph memory](design/memory.md)
+and [HSVAI GraphRAG](design/hsvai-graphrag.md) for their runtime contracts.
 
 View operator logs with:
 

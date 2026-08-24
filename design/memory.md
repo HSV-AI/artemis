@@ -92,18 +92,11 @@ permission-7 memory service account, and persists `/dgraph` in the `dgraph-data`
 volume. Artemis applies the additive DQL schema after model health validation
 and before Discord login.
 
-The optional model-provider `embedding` object supplies an explicit embedding
-model and OpenAI-compatible API base URL. Its base URL defaults to the model
-provider base, supporting Ollama's same-origin endpoint; deployments with a
-separate embedding worker set its base URL in the provider definition. Omitting
-the object disables embeddings while retaining full-text, graph, and recency
-retrieval plus token-overlap novelty checks. When configured, the client calls
-`/embeddings` with the provider API key and stores vectors in Dgraph.
-Semantic recall and novelty load only active facts selected by the conversation's
-indexed `scope_key`, compute cosine similarity in process, and then take the
-requested result count. Facts from another conversation therefore cannot consume
-candidate slots before scope filtering.
-Embedding calls run inside the serial operation queue. `MEMORY_INJECT` is a strict
+The optional provider `embedding` object supplies the model and endpoint; see
+[Configurable model provider](model-provider.md). When configured, embedding calls
+run inside the serial operation queue and vectors are stored in Dgraph. Semantic
+recall and novelty load active facts by indexed `scope_key` before ranking, so
+other conversations cannot consume candidate slots. `MEMORY_INJECT` is a strict
 boolean and defaults to `false`.
 
 ## Persistence

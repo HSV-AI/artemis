@@ -98,12 +98,8 @@ Writing the revision last makes an interrupted rebuild visibly incomplete. A
 later startup rebuilds it again. Source, Dgraph, or embedding failures abort
 startup rather than exposing a partial corpus to Discord.
 
-Catalog enrichment is not part of startup. The operator-only
-`npm run catalog:hsvai-events` task updates the durable overlay and invokes this
-same synchronization lifecycle while the serving Artemis process is stopped.
-Restarting Artemis after the task succeeds rebuilds the matching BM25 snapshot.
-Its extraction, validation, and failure contract is authoritative in [HSVAI
-event catalog](hsvai-event-catalog.md).
+Catalog enrichment is not part of startup. The operator-only task and its
+stop/run/restart contract are defined by [HSVAI event catalog](hsvai-event-catalog.md).
 
 ## Retrieval And Tool Contract
 
@@ -116,10 +112,9 @@ event catalog](hsvai-event-catalog.md).
 - One connected-neighborhood expansion from the six fused seed chunks through
   their source document, speakers, and venue.
 
-The BM25 path is always available after successful corpus synchronization and
-is labeled `bm25` in tool results. The `embedding` object's presence is the sole
-semantic-retrieval enablement switch; omitting it makes no embedding requests
-and stores no vectors. Reciprocal rank fusion uses `1 / (60 + rank + 1)` per channel. Results sort by
+The BM25 path is always available after successful synchronization. HNSW runs
+only when the provider defines `embedding`. Reciprocal rank fusion uses
+`1 / (60 + rank + 1)` per channel. Results sort by
 descending fused score and then stable evidence ID. The tool returns the
 evidence ID, source title and URL, publication or event metadata, connected
 entity labels, retrieval channels, score, and source excerpt.
@@ -211,8 +206,7 @@ Corpus replacement uses the sync account and deletes only nodes marked with
   and changed-revision invalidation.
 - `test/hsvai-event-catalog.test.ts` covers source hashes, deterministic and
   model-assisted extraction, and source-grounded person validation.
-- `test/dgraph-bootstrap.test.ts` and `test/dgraph-memory.test.ts` cover namespace
-  authentication and read-only enforcement.
+- `test/dgraph-memory.test.ts` covers authenticated read-only routing.
 - `npm run guardrail` remains the completion gate.
 
 ## References

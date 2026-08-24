@@ -23,11 +23,11 @@ The following behavior is fixed:
 - Every Discord message event is logged to the console and SQLite before filtering, including DMs, bot messages, unauthorized messages, unmentioned messages, and messages from disallowed channels.
 - Accepted conversations retain their history in SQLite across restarts. There is no automatic retention or deletion.
 - Model or harness failures are logged and persisted, but produce no Discord response.
-- The model may use explicitly registered custom tools: `web_fetch`, six GitHub tools when a token is configured, nine conversation-scoped Dgraph memory tools, and the read-only `hsvai_graph_search` and `hsvai_graph_query` tools backed by the fixed Huntsville AI source. Events expose source-matched `research`, `building`, or `community` themes and first-class speaker edges from the reviewed event catalog; presenters and discussion facilitators share that role, while reviewed speakerless events use a complete empty speaker list. Stale events are marked pending. The query tool accepts arbitrary DQL but is bound by a Dgraph JWT to the public namespace and invokes only the read-only query endpoint. Each model turn receives the current corpus revision, and both HSVAI tools label results with that revision. The in-process BM25 index must carry the same revision; if Dgraph advances independently, Artemis must reject generation until the index is rebuilt rather than label stale lexical results as current. Matching historical results remain reusable; unlabeled or mismatched results require a new query. External content is labeled and sanitized as untrusted data before reaching the model. No built-in coding tools are enabled. The system prompt advertises the actual registry and includes the Capability Gap Protocol for unavailable tools.
+- The model may use explicitly registered `web_fetch`, GitHub, conversation-scoped memory, and read-only HSVAI graph tools. The [GraphRAG](hsvai-graphrag.md) and [event catalog](hsvai-event-catalog.md) documents define their retrieval, projection, and revision contracts. External content is sanitized and labeled as untrusted; built-in coding tools remain disabled. The system prompt advertises the actual registry and its Capability Gap Protocol.
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Group/channel (guild) assistant responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) self-contained Discord messages per turn. DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind (`guild` vs `dm`).
 - Base Compose retains Ollama as a separate service, the model-preparation job, persistent ACL-enabled Dgraph, a one-shot namespace bootstrap, and Artemis. An optional provider-specific Compose path may omit Ollama while retaining Dgraph and its bootstrap.
-- Startup loads a checked-in HSVAI event-catalog baseline plus an optional durable runtime overlay but never calls the model for catalog enrichment. Operators stop the serving process before `npm run catalog:hsvai-events`, which enriches new or changed events through the configured provider, atomically writes the overlay, and resynchronizes Dgraph, then restart Artemis to rebuild its BM25 snapshot before serving resumes.
+- Startup loads the HSVAI catalog baseline and optional runtime overlay without model enrichment; see [HSVAI event catalog](hsvai-event-catalog.md).
 
 The following may be replaced:
 
@@ -472,15 +472,9 @@ Load local environment configuration from `.env` or the process environment, opt
 
 The received-message audit ignores `LOG_LEVEL`; all other logs obey it.
 
-The optional provider JSON `embedding` object requires `modelId`; its optional
-`baseUrl` defaults to the provider base URL. Its presence is the sole embedding
-enablement switch, and it reuses `MODEL_API_KEY`. Omission disables semantic
-vectors while preserving HSVAI BM25 and graph retrieval plus memory lexical,
-graph, and recency retrieval. HSVAI
-GraphRAG always synchronizes from the fixed `https://hsv.ai` source and always
-registers `hsvai_graph_search` and `hsvai_graph_query`. Dgraph ACL must be enabled
-with an ignored 32-byte `dgraph-acl-secret`; bootstrap must finish before Artemis
-starts.
+The `embedding` and Dgraph ACL contracts are defined by [Configurable model
+provider](model-provider.md) and [Dgraph access control](dgraph-access-control.md).
+The table above lists their runtime settings.
 
 ## Clean-room implementation sequence
 
@@ -592,8 +586,7 @@ At minimum, prove all of the following:
 - `web_fetch` rejects non-HTTP(S) targets, fetches directly without model credentials, bounds content, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and publish the explicit-mutation guideline in the model's tool registry.
 - Memory tools are present for every profile; every operation uses the immutable conversation scope, writes retain Discord provenance, corrections and forgetting create tombstones, and scope isolation survives PI session clearing.
-- HSVAI startup synchronization follows source pagination, builds a corpus-wide BM25 index, replaces only marked corpus nodes, skips an unchanged source/model revision, and returns cited BM25, optional semantic, and connected-neighborhood evidence through a read-only tool. Omitting `model.embedding` makes no embedding requests and leaves BM25 plus graph retrieval active.
-- HSVAI catalog loading merges the baseline and overlay by source ID, rejects malformed data, applies only source-hash matches, exposes stale events as pending, and projects themes plus role-specific person edges. Its model boundary is covered only with synthetic records and mocked HTTP.
+- HSVAI synchronization, retrieval, and catalog loading satisfy the verification contracts in their feature documents.
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Guild sessions receive the channel-limits system-prompt block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3`, self-contained-thought rule) while DM sessions receive no limit messaging; prompt selection is deterministic from the conversation kind.
@@ -634,10 +627,8 @@ After automated tests pass:
 9. Force a model failure and confirm Discord receives nothing while console and SQLite contain correlated diagnostics.
 10. Inspect the SQLite volume and confirm conversations, sessions, messages, events, application logs, and incoming-message audit rows are durable.
 11. Explicitly remember and recall a non-sensitive fact, clear the PI session, and confirm the fact remains available only in the same DM or parent guild channel.
-12. Stop Artemis, run `npm run catalog:hsvai-events` with the configured provider,
-    restart Artemis after synchronization succeeds, confirm the overlay is
-    atomically updated on the Artemis data volume, and query one event's theme
-    and role-specific person edges through the read-only HSVAI account.
+12. Stop Artemis, run `npm run catalog:hsvai-events`, restart, and query one
+    event's theme and speakers through the read-only HSVAI account.
 
 Use test Discord credentials and non-sensitive content for this check because raw messages and model metadata are retained indefinitely.
 
