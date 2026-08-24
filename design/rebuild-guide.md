@@ -384,7 +384,17 @@ The current implementation uses the logical session ID as the native PI session 
 
 Opening a PI session reads its rows in ordinal order, validates the header ID and complete sequence, applies PI format migrations transactionally when required, and builds native context without appending normalized messages. Native entry appends commit before the in-memory leaf advances.
 
-Migration 4 adds these tables. At startup, after model validation and before Discord login, perform a one-time cutover for every logical session without a `pi_sessions` row, including empty sessions. Preserve every available message's speaker metadata, content, reasoning, diagnostics, model, and timestamp, using zero historical assistant usage because the old schema did not store it. Insert all converted sessions and schema migration 5 in one transaction; roll back and abort startup unless every logical session has native PI state. Once migration 5 exists, do not rescan or replay the normalized transcript and do not retain a compatibility mode, completeness column, or synthetic migration entry.
+### Schema migration and minimum supported database state
+
+Migrations 4 and 5 are historical database facts: migration 4 introduced the `pi_sessions` and `pi_session_entries` tables, and migration 5 marked the one-time native PI session cutover complete. They are not re-runnable incremental steps and no cutover conversion code remains in the application.
+
+At startup, before Discord login:
+
+- A fresh empty database bootstraps to the current schema in one transaction: create every table (`conversations`, `sessions`, `messages`, `events`, `application_logs`, `incoming_messages`, `pi_sessions`, `pi_session_entries`) and record migrations 1 through 5.
+- A verified migration-5 database opens without modification or conversion work.
+- An existing database whose `schema_migrations` table has rows but lacks migration 5 is a pre-cutover database that this build no longer supports. Fail startup with an actionable operator error before Discord connects and write nothing. Do not silently mark it migrated, replay its normalized transcript into native PI entries, or discard its history; the operator must restore from a verified migration-5 backup or start fresh.
+
+No runtime code reads the normalized `messages` table to construct PI context. The normalized transcript remains the Discord deduplication, attribution, audit, and operator-history contract and is never replayed as the model-context authority.
 
 ### `messages`
 
@@ -426,7 +436,7 @@ Migration 4 adds these tables. At startup, after model validation and before Dis
 - Raw content, Discord creation timestamp, and local logging timestamp.
 - Indexes by channel/local ID and Discord creation time/local ID.
 
-Incoming-message and source-message insertion must ignore duplicate Discord message IDs. Conversation and session creation, batch source-message insertion, assistant insertion, native PI session creation/import/append/format replacement, and active-session closing should each be transactional. A failed generation retains newly accepted source messages and records `generation_failed`, but it must not create a normalized assistant message. Native PI entries already committed by the harness remain its model-context authority. A successful generation inserts one assistant record and records `generation_succeeded`. Every clear attempt records `session_cleared`, including whether an active session existed.
+Incoming-message and source-message insertion must ignore duplicate Discord message IDs. Conversation and session creation, batch source-message insertion, assistant insertion, native PI session creation/append/format replacement, and active-session closing should each be transactional. The fresh-database bootstrap is a single transaction that creates every table and records migrations 1 through 5. A failed generation retains newly accepted source messages and records `generation_failed`, but it must not create a normalized assistant message. Native PI entries already committed by the harness remain its model-context authority. A successful generation inserts one assistant record and records `generation_succeeded`. Every clear attempt records `session_cleared`, including whether an active session existed.
 
 No table has time-based expiration. Operators retain all chat content, reasoning, diagnostics, events, and logs until they deliberately delete records or the data volume.
 
@@ -500,8 +510,8 @@ Each stage should finish with tests before the next begins.
 ### 3. Implement SQLite and dual-output logging
 
 - Create the database parent directory before opening the file.
-- Apply versioned migrations and repository constraints.
-- Implement conversation/session lookup, active-session closing, ordered normalized history, native harness session storage, the atomic one-time PI cutover, source and incoming-message deduplication, assistant insertion, events, and application logs.
+- Apply the schema bootstrap or rejection: a fresh empty database creates the current schema (migrations 1 through 5) in one transaction; a verified migration-5 database opens without modification; an existing database missing migration 5 fails startup with an actionable error and no partial writes.
+- Implement conversation/session lookup, active-session closing, ordered normalized history, native harness session storage, source and incoming-message deduplication, assistant insertion, events, and application logs.
 - Write every accepted log to console first, then SQLite.
 - Test restart recovery by closing one repository instance and opening another over the same test database, including exact native usage, tool results, compactions, and parent relationships.
 
@@ -531,7 +541,7 @@ Each stage should finish with tests before the next begins.
 
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
-- Connect the harness's native session manager to ordered SQLite storage and complete the atomic one-time PI cutover before Discord login.
+- Connect the harness's native session manager to ordered SQLite storage. The schema bootstrap runs at repository construction; startup health validates the model provider and Dgraph and performs no cutover.
 - Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, and fixed-source HSVAI graph search; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
 - Load the reviewed HSVAI event catalog and exact raw-source cache before synchronization. Reapply source-matched themes, speaker edges, and structurally exclusive complete/pending status after every cache load without model calls.
 - Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
@@ -580,7 +590,7 @@ At minimum, prove all of the following:
 - A redelivered trigger invokes generation once.
 - Same-conversation turns serialize; different conversations can progress independently.
 - Restarting the application preserves the logical session plus native tool, compaction, tree, model, and exact new-turn usage state without replaying normalized history.
-- Every pre-cutover logical session, including an empty one, receives native PI state in an all-or-nothing migration; available Discord speaker context is retained and migration 5 prevents future conversion scans.
+- No runtime code reads normalized messages to construct PI context. A fresh empty database bootstraps to the current schema (migrations 1 through 5) in one transaction; a verified migration-5 database opens without modification; an existing database missing migration 5 fails startup with actionable guidance and no partial writes, no replay, and no history discard.
 - A successful turn persists one assistant record, reasoning, diagnostics, and actual model.
 - Failed, aborted, missing, or blank generation persists a failure and sends nothing to Discord.
 - Typing appears only for accepted, non-duplicate messages, refreshes until generation ends, and a typing API failure does not cancel generation.

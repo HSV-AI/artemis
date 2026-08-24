@@ -9,8 +9,6 @@ import type {
   PersistedPiSession,
   PiGenerationResult,
   PiSessionEntryRecord,
-  PiSessionMigration,
-  PiSessionMigrationSource,
   SessionRecord,
   SourceMessage,
   StoredMessage
@@ -74,11 +72,6 @@ interface PiSessionRow {
 interface PiSessionEntryRow {
   ordinal: number;
   raw_json: string;
-}
-
-interface PiSessionMigrationSourceRow {
-  id: string;
-  created_at: string;
 }
 
 function now(): string {
@@ -324,61 +317,6 @@ export class ArtemisRepository {
     transaction();
   }
 
-  public listPiSessionMigrationSources(): PiSessionMigrationSource[] {
-    const completed = this.database
-      .prepare("SELECT 1 FROM schema_migrations WHERE version = 5")
-      .get();
-    if (completed) {
-      return [];
-    }
-    const sessions = this.database
-      .prepare(
-        `SELECT s.id, s.created_at
-         FROM sessions s
-         WHERE NOT EXISTS (
-           SELECT 1 FROM pi_sessions p WHERE p.session_id = s.id
-         )
-         ORDER BY s.created_at ASC, s.id ASC`
-      )
-      .all() as PiSessionMigrationSourceRow[];
-    return sessions.map((session) => ({
-      sessionId: session.id,
-      createdAt: session.created_at,
-      messages: this.getHistory(session.id)
-    }));
-  }
-
-  public completePiSessionMigration(migrations: PiSessionMigration[]): number {
-    const transaction = this.database.transaction(() => {
-      const completed = this.database
-        .prepare("SELECT 1 FROM schema_migrations WHERE version = 5")
-        .get();
-      if (completed) {
-        return 0;
-      }
-      for (const migration of migrations) {
-        this.insertPiSession(migration.sessionId, migration.entries);
-      }
-      const missing = this.database
-        .prepare(
-          `SELECT COUNT(*) AS count
-           FROM sessions s
-           WHERE NOT EXISTS (
-             SELECT 1 FROM pi_sessions p WHERE p.session_id = s.id
-           )`
-        )
-        .get() as { count: number };
-      if (missing.count !== 0) {
-        throw new Error(`PI session migration left ${missing.count} session(s) unconverted`);
-      }
-      this.database
-        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (5, ?)")
-        .run(now());
-      return migrations.length;
-    });
-    return transaction();
-  }
-
   public insertSourceMessages(sessionId: string, messages: SourceMessage[]): number {
     const insert = this.database.prepare(
       `INSERT OR IGNORE INTO messages
@@ -506,12 +444,33 @@ export class ArtemisRepository {
         applied_at TEXT NOT NULL
       );
     `);
-    const applied = this.database
-      .prepare("SELECT 1 FROM schema_migrations WHERE version = 1")
-      .get();
-    if (!applied) {
-      const transaction = this.database.transaction(() => {
-        this.database.exec(`
+    const appliedVersions = this.database
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all() as { version: number }[];
+    const applied = new Set(appliedVersions.map((row) => row.version));
+
+    if (applied.size === 0) {
+      this.bootstrapFreshDatabase();
+      return;
+    }
+
+    if (!applied.has(5)) {
+      throw new Error(
+        "Artemis requires a database that has completed migration 5 (the native PI session cutover). " +
+          "This database is missing migration 5 and incremental cutover is no longer supported. " +
+          "Restore it from a backup taken after a verified migration-5 rollout, or start fresh with an empty database. " +
+          "Do not replay or discard this database's history; startup was aborted without partial writes."
+      );
+    }
+
+    // A verified migration-5 database is the steady state. The bootstrap path
+    // creates a fully current empty database; no incremental work runs here.
+  }
+
+  private bootstrapFreshDatabase(): void {
+    const timestamp = now();
+    const transaction = this.database.transaction(() => {
+      this.database.exec(`
         CREATE TABLE conversations (
           id TEXT PRIMARY KEY,
           conversation_key TEXT NOT NULL UNIQUE,
@@ -561,103 +520,69 @@ export class ArtemisRepository {
           created_at TEXT NOT NULL
         );
 
-          INSERT INTO schema_migrations(version, applied_at) VALUES (1, '${now()}');
-        `);
-      });
-      transaction();
-    }
+        CREATE TABLE application_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          level TEXT NOT NULL CHECK (level IN ('debug', 'info', 'warn', 'error')),
+          event TEXT NOT NULL,
+          details_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
 
-    const logsApplied = this.database
-      .prepare("SELECT 1 FROM schema_migrations WHERE version = 2")
-      .get();
-    if (!logsApplied) {
-      const transaction = this.database.transaction(() => {
-        this.database.exec(`
-          CREATE TABLE application_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            level TEXT NOT NULL CHECK (level IN ('debug', 'info', 'warn', 'error')),
-            event TEXT NOT NULL,
-            details_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-          );
+        CREATE INDEX application_logs_by_created_at
+          ON application_logs(created_at, id);
 
-          CREATE INDEX application_logs_by_created_at
-            ON application_logs(created_at, id);
+        CREATE TABLE incoming_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          discord_message_id TEXT NOT NULL UNIQUE,
+          guild_id TEXT,
+          channel_id TEXT NOT NULL,
+          thread_id TEXT,
+          parent_channel_id TEXT,
+          author_id TEXT NOT NULL,
+          author_name TEXT,
+          is_bot INTEGER NOT NULL DEFAULT 0,
+          mentions_bot INTEGER NOT NULL DEFAULT 0,
+          replies_to_bot INTEGER NOT NULL DEFAULT 0,
+          content TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          logged_at TEXT NOT NULL
+        );
 
-          INSERT INTO schema_migrations(version, applied_at) VALUES (2, '${now()}');
-        `);
-      });
-      transaction();
-    }
+        CREATE INDEX incoming_messages_by_channel
+          ON incoming_messages(channel_id, id);
 
-    const incomingApplied = this.database
-      .prepare("SELECT 1 FROM schema_migrations WHERE version = 3")
-      .get();
-    if (!incomingApplied) {
-      const transaction = this.database.transaction(() => {
-        this.database.exec(`
-          CREATE TABLE incoming_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            discord_message_id TEXT NOT NULL UNIQUE,
-            guild_id TEXT,
-            channel_id TEXT NOT NULL,
-            thread_id TEXT,
-            parent_channel_id TEXT,
-            author_id TEXT NOT NULL,
-            author_name TEXT,
-            is_bot INTEGER NOT NULL DEFAULT 0,
-            mentions_bot INTEGER NOT NULL DEFAULT 0,
-            replies_to_bot INTEGER NOT NULL DEFAULT 0,
-            content TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            logged_at TEXT NOT NULL
-          );
+        CREATE INDEX incoming_messages_by_created_at
+          ON incoming_messages(created_at, id);
 
-          CREATE INDEX incoming_messages_by_channel
-            ON incoming_messages(channel_id, id);
+        CREATE TABLE pi_sessions (
+          session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+          next_ordinal INTEGER NOT NULL CHECK (next_ordinal >= 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
 
-          CREATE INDEX incoming_messages_by_created_at
-            ON incoming_messages(created_at, id);
+        CREATE TABLE pi_session_entries (
+          session_id TEXT NOT NULL REFERENCES pi_sessions(session_id) ON DELETE CASCADE,
+          ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+          entry_id TEXT,
+          entry_type TEXT NOT NULL,
+          parent_id TEXT,
+          raw_json TEXT NOT NULL CHECK (json_valid(raw_json)),
+          PRIMARY KEY (session_id, ordinal),
+          UNIQUE (session_id, entry_id)
+        );
 
-          INSERT INTO schema_migrations(version, applied_at) VALUES (3, '${now()}');
-        `);
-      });
-      transaction();
-    }
-
-    const piSessionsApplied = this.database
-      .prepare("SELECT 1 FROM schema_migrations WHERE version = 4")
-      .get();
-    if (!piSessionsApplied) {
-      const transaction = this.database.transaction(() => {
-        this.database.exec(`
-          CREATE TABLE pi_sessions (
-            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
-            next_ordinal INTEGER NOT NULL CHECK (next_ordinal >= 0),
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-          );
-
-          CREATE TABLE pi_session_entries (
-            session_id TEXT NOT NULL REFERENCES pi_sessions(session_id) ON DELETE CASCADE,
-            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-            entry_id TEXT,
-            entry_type TEXT NOT NULL,
-            parent_id TEXT,
-            raw_json TEXT NOT NULL CHECK (json_valid(raw_json)),
-            PRIMARY KEY (session_id, ordinal),
-            UNIQUE (session_id, entry_id)
-          );
-
-          CREATE INDEX pi_session_entries_by_parent
-            ON pi_session_entries(session_id, parent_id);
-
-          INSERT INTO schema_migrations(version, applied_at) VALUES (4, '${now()}');
-        `);
-      });
-      transaction();
-    }
-
+        CREATE INDEX pi_session_entries_by_parent
+          ON pi_session_entries(session_id, parent_id);
+      `);
+      const insert = this.database.prepare(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)"
+      );
+      for (const version of [1, 2, 3, 4, 5]) {
+        insert.run(version, timestamp);
+      }
+    });
+    transaction();
   }
 
   private mapSession(row: SessionRow): SessionRecord {

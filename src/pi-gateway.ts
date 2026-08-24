@@ -29,7 +29,6 @@ import { createMemoryTools } from "./memory-tools.js";
 import { DEFAULT_BOT_DISPLAY_NAME, type PersonaProfile } from "./persona-profiles.js";
 import {
   asPiSessionManager,
-  migrateExistingPiSessions,
   SqlitePiSessionManager
 } from "./pi-session-manager.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
@@ -252,12 +251,6 @@ export class PiSdkGateway implements PiGateway {
     await this.memory.initialize();
     await this.knowledge.initializeAndSync();
     await this.initialize();
-    migrateExistingPiSessions(
-      this.sessionStore,
-      process.cwd(),
-      this.config.model.providerId,
-      this.config.model.modelId
-    );
   }
 
   public async generate(input: PiGenerationInput): Promise<PiGenerationResult> {
