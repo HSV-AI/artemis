@@ -85,6 +85,7 @@ function linkedDesignDocuments(content, sourceFile, designDirectory) {
 export async function checkDesignDocs(rootDirectory = process.cwd()) {
   const designDirectory = path.join(rootDirectory, "design");
   const indexFile = path.join(designDirectory, "README.md");
+  const baselineFile = path.join(designDirectory, "baseline.md");
   const errors = [];
 
   let documents;
@@ -100,11 +101,16 @@ export async function checkDesignDocs(rootDirectory = process.cwd()) {
   }
 
   const indexContent = contents.get("README.md");
+  const baselineContent = contents.get("baseline.md");
   if (indexContent === undefined) errors.push("design/README.md is required");
+  if (baselineContent === undefined) errors.push("design/baseline.md is required");
 
   const indexed = indexContent === undefined
     ? new Set()
     : linkedDesignDocuments(indexContent, indexFile, designDirectory);
+  const baselineLinks = baselineContent === undefined
+    ? new Set()
+    : linkedDesignDocuments(baselineContent, baselineFile, designDirectory);
 
   for (const document of documents) {
     if (document !== "README.md" && !indexed.has(document)) {
@@ -128,6 +134,9 @@ export async function checkDesignDocs(rootDirectory = process.cwd()) {
     }
 
     if (CORE_DOCUMENTS.has(document)) continue;
+    if (!baselineLinks.has(document)) {
+      errors.push(`design/${document} is not linked from design/baseline.md`);
+    }
     const headings = markdownHeadings(content);
     for (const section of REQUIRED_SUBDOCUMENT_SECTIONS) {
       if (!headings.has(section.toLowerCase())) {

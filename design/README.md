@@ -1,11 +1,11 @@
 # Artemis design documents
 
-This directory is the authoritative design record for Artemis. Read the focused protocol or feature documents relevant to the change.
+This directory is the authoritative design record for Artemis. Start with the baseline, then read the focused protocol or feature documents relevant to the change.
 
 ## Core documents
 
-- [Baseline design](baseline.md) — historical record of the original implemented design.
-- [Clean-room rebuild guide](rebuild-guide.md) — historical clean-room contract for reconstructing that original design.
+- [Baseline design](baseline.md) — high-level product behavior, architecture, and current implementation summary.
+- [Clean-room rebuild guide](rebuild-guide.md) — compatibility contract for reproducing Artemis without reading its source.
 
 ## Protocol and feature documents
 
@@ -19,4 +19,4 @@ This directory is the authoritative design record for Artemis. Read the focused 
 - [HSVAI event catalog](hsvai-event-catalog.md) — reviewed seed, durable runtime overlay, source-matched event themes and people, and operator-only model enrichment.
 - [Native PI session persistence](pi-session-persistence.md) — ordered SQLite storage for native PI entries, restart recovery, clear-session lifecycle, and the one-time database cutover.
 
-Every Markdown document in this directory must appear in this index.
+Every Markdown document in this directory must appear in this index. Every protocol or major-feature document must also be summarized and linked from the baseline.
