@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DgraphClient } from "../src/dgraph-memory.js";
 import { eventCatalogSourceHash } from "../src/hsvai-event-catalog.js";
 import {
@@ -8,8 +11,23 @@ import {
   HsvaiKnowledge,
   HsvaiWordPressSource,
   type HsvaiKnowledgeResult,
+  type HsvaiRawEvent,
   type HsvaiSourceDocument
 } from "../src/hsvai-knowledge.js";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  for (const directory of temporaryDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function sourceCachePath(): string {
+  const directory = mkdtempSync(join(tmpdir(), "artemis-hsvai-cache-"));
+  temporaryDirectories.push(directory);
+  return join(directory, "source.json");
+}
 
 function jsonResponse(data: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -137,7 +155,7 @@ describe("HsvaiWordPressSource", () => {
   });
 
   it("applies source-matched offline event people and marks stale events pending", async () => {
-    const normalizedEvent: HsvaiSourceDocument = {
+    const normalizedEvent: HsvaiRawEvent = {
       sourceId: "hsvai:event:1",
       kind: "event",
       title: "AI Event 1",
@@ -203,6 +221,146 @@ describe("HsvaiWordPressSource", () => {
     await expect(stale.fetchDocuments()).resolves.toEqual([
       expect.objectContaining({ peopleStatus: "pending", people: [] })
     ]);
+  });
+
+  it("reuses a fresh durable source cache and reapplies the current event catalog", async () => {
+    const path = sourceCachePath();
+    const now = Date.parse("2026-08-25T12:00:00.000Z");
+    const fetchMock = vi.fn().mockImplementation(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      return url.pathname.includes("/wp/v2/posts")
+        ? jsonResponse([post(1)], { "x-wp-totalpages": "1" })
+        : jsonResponse({ events: [event(1)], total_pages: 1 });
+    });
+    const initial = new HsvaiWordPressSource(fetchMock, undefined, {
+      cachePath: path,
+      now: () => now
+    });
+    const documents = await initial.fetchDocuments();
+    const eventDocument = documents.find((document) => document.kind === "event")!;
+    const reportCache = vi.fn();
+    const offlineFetch = vi.fn().mockRejectedValue(new Error("offline"));
+    const cached = new HsvaiWordPressSource(offlineFetch, {
+      version: 1,
+      events: [{
+        sourceId: eventDocument.sourceId,
+        title: eventDocument.title,
+        sourceUrl: eventDocument.url,
+        modifiedAt: eventDocument.modifiedAt,
+        sourceHash: eventCatalogSourceHash(eventDocument),
+        theme: "research",
+        speakers: [{ name: "Catalog Speaker", evidence: "Catalog Speaker presents." }]
+      }]
+    }, {
+      cachePath: path,
+      now: () => now + 1_000,
+      reportCache
+    });
+
+    await expect(cached.fetchDocuments()).resolves.toContainEqual(expect.objectContaining({
+      sourceId: eventDocument.sourceId,
+      peopleStatus: "complete",
+      theme: "research",
+      people: [expect.objectContaining({ name: "Catalog Speaker" })]
+    }));
+    expect(offlineFetch).not.toHaveBeenCalled();
+    expect(reportCache).toHaveBeenCalledWith(expect.objectContaining({
+      state: "hit",
+      path
+    }));
+  });
+
+  it.each([
+    ["expired", 2_000],
+    ["future-dated", -1_000]
+  ])("does not publish an %s cache when source refresh fails", async (_state, offset) => {
+    const path = sourceCachePath();
+    let now = Date.parse("2026-08-25T12:00:00.000Z");
+    const onlineFetch = vi.fn().mockImplementation(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      return url.pathname.includes("/wp/v2/posts")
+        ? jsonResponse([post(1)], { "x-wp-totalpages": "1" })
+        : jsonResponse({ events: [], total_pages: 1 });
+    });
+    const initial = new HsvaiWordPressSource(onlineFetch, undefined, {
+      cachePath: path,
+      cacheMaxAgeMs: 1_000,
+      now: () => now
+    });
+    await initial.fetchDocuments();
+    now += offset;
+    const reportCache = vi.fn();
+    const expired = new HsvaiWordPressSource(
+      vi.fn().mockImplementation(async () => new Response("offline", { status: 503 })),
+      undefined,
+      { cachePath: path, cacheMaxAgeMs: 1_000, now: () => now, reportCache }
+    );
+
+    await expect(expired.fetchDocuments()).rejects.toThrow("request failed (503)");
+    expect(reportCache).not.toHaveBeenCalled();
+  });
+
+  it("repairs an invalid derived cache from the authoritative source", async () => {
+    const path = sourceCachePath();
+    const now = Date.parse("2026-08-25T12:00:00.000Z");
+    writeFileSync(path, JSON.stringify({
+      version: 1,
+      fetchedAt: new Date(now).toISOString(),
+      documents: [{ ...sourceDocument, unexpected: true }]
+    }));
+    const fetchMock = vi.fn().mockImplementation(async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      return url.pathname.includes("/wp/v2/posts")
+        ? jsonResponse([post(1)], { "x-wp-totalpages": "1" })
+        : jsonResponse({ events: [], total_pages: 1 });
+    });
+    const reportCache = vi.fn();
+    const source = new HsvaiWordPressSource(fetchMock, undefined, {
+      cachePath: path,
+      now: () => now,
+      reportCache
+    });
+
+    await expect(source.fetchDocuments()).resolves.toContainEqual(
+      expect.objectContaining({ sourceId: "hsvai:post:1" })
+    );
+    expect(reportCache).toHaveBeenCalledWith(expect.objectContaining({
+      state: "repaired",
+      path,
+      errorMessage: expect.stringContaining("Invalid HSVAI source cache")
+    }));
+  });
+
+  it("reports both invalid cache and authoritative refresh failures", async () => {
+    const path = sourceCachePath();
+    writeFileSync(path, "not-json");
+    const source = new HsvaiWordPressSource(
+      vi.fn().mockImplementation(async () => new Response("offline", { status: 503 })),
+      undefined,
+      { cachePath: path }
+    );
+
+    const failure = await source.fetchDocuments().catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure).toMatchObject({
+      message: expect.stringContaining("refresh failed after invalid cache"),
+      errors: [
+        expect.objectContaining({ message: expect.stringContaining("Invalid HSVAI source cache JSON") }),
+        expect.objectContaining({ message: expect.stringContaining("request failed (503)") })
+      ]
+    });
+  });
+
+  it("bounds source requests", async () => {
+    const hangingFetch = vi.fn().mockImplementation(
+      async (_input: URL | RequestInfo, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+      })
+    );
+    const source = new HsvaiWordPressSource(hangingFetch, undefined, { requestTimeoutMs: 1 });
+
+    await expect(source.fetchDocuments()).rejects.toThrow("request timed out after 1ms");
   });
 });
 

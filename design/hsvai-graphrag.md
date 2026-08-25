@@ -72,7 +72,9 @@ The normalized source graph and its revision marker persist in the dedicated
 HSVAI namespace inside the existing Dgraph volume. Dgraph ACL prevents that
 namespace from reading namespace-0 memory facts. It is independent of SQLite
 sessions. The reviewed event catalog is a checked-in artifact and stores no
-Dgraph UIDs.
+Dgraph UIDs. A versioned JSON cache beside SQLite stores only the normalized raw
+transcript and event source union, never catalog-derived people, themes, or
+status. The Artemis data volume publishes cache replacements atomically.
 The BM25 index is rebuilt in process from the normalized chunks
 on every startup, bound to the resulting corpus revision, and not persisted as a
 separate artifact.
@@ -83,12 +85,18 @@ Startup performs these steps before Discord connects:
 
 1. Apply the additive HSVAI Dgraph schema.
 2. Load and validate the checked-in event catalog.
-3. Fetch every transcript post and event page from the JSON APIs, applying only
-   catalog records whose source hash matches.
-4. Normalize and chunk the corpus, compute a SHA-256 revision over the normalized
+3. Load the exact versioned raw-source cache. Reuse it without network access
+   only when its fetch time is not in the future and is less than 24 hours old.
+4. For a missing, expired, future-dated, or invalid cache, fetch every transcript
+   post and event page with a 30-second bound per request, then atomically replace
+   the cache. Invalid derived cache data never outranks an available source.
+5. Apply only catalog records whose source hash matches. The projected event
+   union makes pending events speakerless and themeless and requires complete
+   events to carry both a theme and their reviewed people.
+6. Normalize and chunk the corpus, compute a SHA-256 revision over the normalized
    documents, and build a BM25 snapshot carrying that revision.
-5. Stop when the stored revision already matches.
-6. Otherwise delete only nodes carrying the `hsvai.node_kind` marker, rebuild
+7. Stop when the stored revision already matches.
+8. Otherwise delete only nodes carrying the `hsvai.node_kind` marker, rebuild
    entities and documents, write chunks in bounded batches, and write the corpus
    revision last.
 
@@ -168,8 +176,12 @@ Corpus replacement uses the sync account and deletes only nodes marked with
 
 - Invalid baseline or runtime event-catalog data fails loading; a stale event
   record is ignored and the event is marked pending rather than applied.
-- Non-success source responses, malformed pagination payloads, empty source
-  results, invalid dates, and Dgraph failures abort startup.
+- Non-success source responses, request timeouts, malformed pagination payloads,
+  empty source results, invalid dates, and Dgraph failures abort startup when no
+  fresh cache is available.
+- Invalid cache JSON or schema is derived-state damage: Artemis refreshes and
+  replaces it when the source is available. If both cache repair and source
+  refresh fail, startup reports both failures.
 - An interrupted rebuild has no new revision marker and is rebuilt on the next
   startup.
 - A Dgraph revision that does not match the running process's BM25 snapshot fails
@@ -181,10 +193,11 @@ Corpus replacement uses the sync account and deletes only nodes marked with
 
 ## Verification
 
-- `test/hsvai-knowledge.test.ts` covers source pagination, HTML normalization,
-  chunking, stable graph construction, revision skips, corpus-wide BM25 ranking,
-  graph-neighborhood retrieval, evidence formatting, and failures with HTTP
-  mocked.
+- `test/hsvai-knowledge.test.ts` covers exact raw-cache decoding, cache reuse and
+  repair, source request bounds, catalog reprojection, source pagination, HTML
+  normalization, chunking, stable graph construction, revision skips,
+  corpus-wide BM25 ranking, graph-neighborhood retrieval, evidence formatting,
+  and failures with HTTP mocked.
 - `test/pi-gateway.test.ts` covers unconditional tool registration and startup
   synchronization, prompt revision signaling, unchanged-revision loader reuse,
   and changed-revision invalidation.

@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => {
     runtimeCreate: vi.fn().mockResolvedValue(runtime),
     resourceLoaderConstructor: vi.fn(),
     loaderReload: vi.fn().mockResolvedValue(undefined),
+    hsvaiSourceConstructor: vi.fn(),
     hsvaiInitializeAndSync: vi.fn().mockResolvedValue(undefined),
     hsvaiCorpusRevision: vi.fn().mockResolvedValue("revision-1"),
     settings: {}
@@ -57,7 +58,11 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 }));
 
 vi.mock("../src/hsvai-knowledge.js", () => ({
-  HsvaiWordPressSource: class HsvaiWordPressSource {},
+  HsvaiWordPressSource: class HsvaiWordPressSource {
+    public constructor(...args: unknown[]) {
+      mocks.hsvaiSourceConstructor(...args);
+    }
+  },
   HsvaiKnowledge: class HsvaiKnowledge {
     public initializeAndSync = mocks.hsvaiInitializeAndSync;
     public corpusRevision = mocks.hsvaiCorpusRevision;
@@ -281,6 +286,46 @@ describe("PiSdkGateway", () => {
       "test-provider",
       expect.objectContaining({ api: "openai-completions", authHeader: false })
     );
+  });
+
+  it("places the HSVAI source cache beside SQLite and reports cache state", () => {
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    new PiSdkGateway(
+      {
+        ...artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+        sqlitePath: "/data/artemis.sqlite"
+      },
+      createSessionStore(),
+      healthyFetch(),
+      logger
+    );
+    const options = mocks.hsvaiSourceConstructor.mock.calls[0]?.[2] as {
+      cachePath: string;
+      reportCache: (event: {
+        state: "hit" | "repaired";
+        path: string;
+        fetchedAt: string;
+        errorMessage?: string;
+      }) => void;
+    };
+
+    expect(options.cachePath).toBe("/data/hsvai-source-cache.json");
+    options.reportCache({ state: "hit", path: options.cachePath, fetchedAt: "now" });
+    options.reportCache({
+      state: "repaired",
+      path: options.cachePath,
+      fetchedAt: "now",
+      errorMessage: "invalid cache"
+    });
+    expect(logger.info).toHaveBeenCalledWith("hsvai_source_cache_hit", {
+      path: options.cachePath,
+      fetchedAt: "now"
+    });
+    expect(logger.warn).toHaveBeenCalledWith("hsvai_source_cache_repaired", {
+      path: options.cachePath,
+      fetchedAt: "now",
+      errorMessage: "invalid cache"
+    });
   });
 
   it.each([

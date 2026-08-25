@@ -146,6 +146,13 @@ override over this file. Before connecting to Discord, Artemis validates the
 model, initializes Dgraph, and synchronizes HSVAI. See [Graph memory](design/memory.md)
 and [HSVAI GraphRAG](design/hsvai-graphrag.md) for their runtime contracts.
 
+Artemis stores the last normalized HSVAI source snapshot at
+`/data/hsvai-source-cache.json`. Restarts reuse a snapshot fetched within the
+last 24 hours without contacting `hsv.ai`. An expired, future-dated, missing, or
+invalid snapshot triggers a bounded source refresh; invalid cache data is
+replaced atomically after a successful refresh rather than treated as source
+authority.
+
 View operator logs with:
 
 ```sh
@@ -211,6 +218,7 @@ Global statement, branch, function, and line coverage thresholds are all enforce
 - Application logs are written as structured JSON to standard output and duplicated in SQLite's `application_logs` table. Credentials are excluded. The `discord_message_received` event intentionally includes raw message bodies from every Discord message event.
 - Chat content, model reasoning, and diagnostics are stored in SQLite and do not expire automatically.
 - Memory facts and the independent HSVAI source graph are stored in the `dgraph-data` volume. Memory forgetting creates an audit tombstone; HSVAI synchronization replaces only its marked public-corpus nodes when the source revision changes.
+- The normalized HSVAI source cache is stored beside SQLite in the `artemis-data` volume. Cache hits, refreshes, and repairs appear as structured `hsvai_source_cache_*` logs. A missing or expired cache still requires `hsv.ai` to be reachable.
 - If base-Compose model preparation fails, repeat the Ollama sign-in and inspect `docker compose logs ollama ollama-model`.
 - If an optional provider fails validation, inspect its `baseUrl`, `modelId`, `MODEL_API_KEY`, and `/models` response.
 - If messages are ignored, verify the allowed channel and user IDs, Message Content Intent, channel/thread permissions, and that guild messages directly mention the bot.

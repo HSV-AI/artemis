@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -10,6 +11,7 @@ import { DEFAULT_DGRAPH_URL, type ArtemisConfig } from "./config.js";
 import { DgraphClient, GraphMemory } from "./dgraph-memory.js";
 import type {
   ConversationKind,
+  Logger,
   PiGateway,
   PiGenerationInput,
   PiGenerationResult,
@@ -164,9 +166,11 @@ export class PiSdkGateway implements PiGateway {
         | "dgraphAuth"
         | "hsvaiDgraphSyncAuth"
         | "hsvaiDgraphQueryAuth"
+        | "sqlitePath"
       >>,
     private readonly sessionStore: PiSessionStore,
-    private readonly fetchImplementation: typeof fetch = fetch
+    private readonly fetchImplementation: typeof fetch = fetch,
+    logger?: Pick<Logger, "info" | "warn">
   ) {
     const dgraph = new DgraphClient(
       config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
@@ -184,9 +188,19 @@ export class PiSdkGateway implements PiGateway {
       config.hsvaiDgraphQueryAuth
     );
     this.memory = new GraphMemory(dgraph);
+    const sourceCachePath = config.sqlitePath && config.sqlitePath !== ":memory:"
+      ? join(dirname(config.sqlitePath), "hsvai-source-cache.json")
+      : undefined;
     this.knowledge = new HsvaiKnowledge(
       hsvaiSync,
-      new HsvaiWordPressSource(fetchImplementation, loadHsvaiEventCatalog()),
+      new HsvaiWordPressSource(fetchImplementation, loadHsvaiEventCatalog(), {
+        ...(sourceCachePath ? { cachePath: sourceCachePath } : {}),
+        reportCache(event) {
+          const { state, ...fields } = event;
+          if (state === "repaired") logger?.warn("hsvai_source_cache_repaired", fields);
+          else logger?.info(`hsvai_source_cache_${state}`, fields);
+        }
+      }),
       hsvaiQuery
     );
   }

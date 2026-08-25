@@ -204,7 +204,7 @@ Foreign keys and WAL mode are enabled. Conversation keys, source Discord message
 
 The SQLite file lives on a persistent Docker volume and remains available across container restarts and upgrades. Schema migrations run before Discord connects and must be backward-safe for existing local data.
 
-Memory facts, episodes, and entity links are stored in Dgraph namespace `0` under the same stable conversation key. The public HSVAI corpus occupies a separate authenticated namespace in the same `dgraph-data` volume. The reviewed event seed ships in the image and its operator-refreshed overlay persists on the Artemis data volume. The volumes survive restarts and `/clear-session`; memory has no automatic expiration, and correction or forgetting retains ended facts for audit.
+Memory facts, episodes, and entity links are stored in Dgraph namespace `0` under the same stable conversation key. The public HSVAI corpus occupies a separate authenticated namespace in the same `dgraph-data` volume. The reviewed event catalog ships in the image. An exact versioned cache of normalized raw HSVAI source documents persists beside SQLite on the Artemis data volume and is reused for 24 hours; catalog-derived fields are reapplied after each cache load and never serialized into that cache. The volumes survive restarts and `/clear-session`; memory has no automatic expiration, and correction or forgetting retains ended facts for audit.
 
 There is no automatic retention or deletion policy. Chat content, session data, and model reasoning or diagnostics remain in SQLite indefinitely unless an operator deliberately removes records or deletes the local data volume.
 
@@ -228,7 +228,7 @@ Base Docker Compose contains `ollama`, the one-shot `ollama-model` pull job, ACL
 2. Open SQLite, enable foreign keys, and apply migrations.
 3. Load the model provider definition and health-check its OpenAI-compatible `/models` endpoint.
 4. Apply the Dgraph memory schema and fail if Dgraph is unavailable.
-5. Synchronize the fixed-source HSVAI transcript and event corpus and apply its Dgraph schema.
+5. Load a fresh normalized HSVAI source cache or refresh it through bounded requests, then synchronize the transcript and event corpus and apply its Dgraph schema.
 6. Connect the Discord client and register the three global slash commands when Discord reports ready.
 7. Log a successful ready event including the connected bot identity and allowed channel IDs, but no secrets.
 

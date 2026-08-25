@@ -331,6 +331,14 @@ apply only when their source hash matches the normalized event. Malformed data
 fails loudly; stale records produce pending metadata rather than stale graph
 edges.
 
+Persist one exact, versioned union of normalized raw HSVAI transcripts and
+events beside SQLite. Never serialize catalog-derived people, themes, or status
+into this cache. Reuse a snapshot only when its fetch time is not in the future
+and is less than 24 hours old. Otherwise fetch the fixed source with a 30-second
+bound per request and atomically replace the entire cache. Missing and invalid
+cache are rebuildable derived states; invalid cache blocks startup only when the
+authoritative refresh also fails.
+
 The minimal logical schema is:
 
 ### `schema_migrations`
@@ -525,7 +533,7 @@ Each stage should finish with tests before the next begins.
 - Add the selected harness strategy.
 - Connect the harness's native session manager to ordered SQLite storage and complete the atomic one-time PI cutover before Discord login.
 - Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, and fixed-source HSVAI graph search; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
-- Load the reviewed HSVAI event catalog before source synchronization, then project source-matched themes, speaker edges, and complete/pending status without model calls.
+- Load the reviewed HSVAI event catalog and exact raw-source cache before synchronization. Reapply source-matched themes, speaker edges, and structurally exclusive complete/pending status after every cache load without model calls.
 - Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
 - Add configured provider health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
@@ -580,6 +588,7 @@ At minimum, prove all of the following:
 - `web_fetch` rejects non-HTTP(S) targets, fetches directly without model credentials, bounds content, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and publish the explicit-mutation guideline in the model's tool registry.
 - Memory tools are present for every profile; every operation uses the immutable conversation scope, writes retain Discord provenance, corrections and forgetting create tombstones, and scope isolation survives PI session clearing.
+- A fresh raw HSVAI source cache avoids network requests, excludes all catalog-derived fields, and is atomically replaced after expiry. Invalid cache is repaired from the source; future-dated or expired cache is never published as current; every source request is bounded.
 - HSVAI synchronization, retrieval, and catalog loading satisfy the verification contracts in their feature documents.
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.

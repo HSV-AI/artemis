@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
+import { Check } from "typebox/value";
 import type { DgraphClient } from "./dgraph-memory.js";
 import {
   catalogEntryForEvent,
@@ -21,6 +24,9 @@ const MAX_DQL_RESULT_CHARS = 200_000;
 const CORPUS_REVISION_PATTERN = /^[a-f0-9]{64}$/u;
 const BM25_K1 = 1.2;
 const BM25_B = 0.75;
+const SOURCE_CACHE_VERSION = 1;
+const SOURCE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
+const SOURCE_REQUEST_TIMEOUT_MS = 30_000;
 export const HSVAI_SOURCE_URL = "https://hsv.ai";
 
 const HSVAI_SCHEMA = `
@@ -94,23 +100,51 @@ type HsvaiEntity {
 type SourceKind = "transcript" | "event";
 type EntityKind = "speaker" | "venue";
 
-export interface HsvaiSourceDocument {
-  sourceId: string;
-  kind: SourceKind;
-  title: string;
-  url: string;
-  publishedAt: string;
-  modifiedAt: string;
-  text: string;
-  eventStart?: string;
-  eventEnd?: string;
-  timezone?: string;
-  venue?: string;
-  address?: string;
-  people?: HsvaiCatalogPerson[];
-  peopleStatus?: "complete" | "pending";
-  theme?: HsvaiEventTheme;
-}
+const isoTimestamp = Type.String({
+  pattern: String.raw`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$`
+});
+const rawSourceFields = {
+  sourceId: Type.String({ minLength: 1 }),
+  title: Type.String({ minLength: 1 }),
+  url: Type.String({ minLength: 1 }),
+  publishedAt: isoTimestamp,
+  modifiedAt: isoTimestamp,
+  text: Type.String({ minLength: 1 })
+};
+const rawTranscriptSchema = Type.Object({
+  ...rawSourceFields,
+  kind: Type.Literal("transcript")
+}, { additionalProperties: false });
+const rawEventSchema = Type.Object({
+  ...rawSourceFields,
+  kind: Type.Literal("event"),
+  eventStart: isoTimestamp,
+  eventEnd: isoTimestamp,
+  timezone: Type.String({ minLength: 1 }),
+  venue: Type.Optional(Type.String({ minLength: 1 })),
+  address: Type.Optional(Type.String({ minLength: 1 }))
+}, { additionalProperties: false });
+const rawSourceDocumentSchema = Type.Union([rawTranscriptSchema, rawEventSchema]);
+const sourceCacheSchema = Type.Object({
+  version: Type.Literal(SOURCE_CACHE_VERSION),
+  fetchedAt: isoTimestamp,
+  documents: Type.Array(rawSourceDocumentSchema, { minItems: 1 })
+}, { additionalProperties: false });
+
+export type HsvaiRawTranscript = Static<typeof rawTranscriptSchema>;
+export type HsvaiRawEvent = Static<typeof rawEventSchema>;
+export type HsvaiRawSourceDocument = Static<typeof rawSourceDocumentSchema>;
+type PendingHsvaiEvent = HsvaiRawEvent & {
+  peopleStatus: "pending";
+  people: [];
+  theme?: never;
+};
+type CompleteHsvaiEvent = HsvaiRawEvent & {
+  peopleStatus: "complete";
+  people: HsvaiCatalogPerson[];
+  theme: HsvaiEventTheme;
+};
+export type HsvaiSourceDocument = HsvaiRawTranscript | PendingHsvaiEvent | CompleteHsvaiEvent;
 
 interface CorpusEntity {
   id: string;
@@ -187,6 +221,28 @@ export interface HsvaiKnowledgeSyncResult {
 export interface HsvaiKnowledgeSource {
   fetchDocuments(): Promise<HsvaiSourceDocument[]>;
 }
+
+export interface HsvaiSourceCacheEvent {
+  state: "hit" | "refreshed" | "repaired";
+  path: string;
+  fetchedAt: string;
+  errorName?: string;
+  errorMessage?: string;
+}
+
+export interface HsvaiWordPressSourceOptions {
+  cachePath?: string;
+  cacheMaxAgeMs?: number;
+  requestTimeoutMs?: number;
+  now?: () => number;
+  reportCache?: (event: HsvaiSourceCacheEvent) => void;
+}
+
+type HsvaiSourceCache = Static<typeof sourceCacheSchema>;
+type HsvaiSourceCacheLoad =
+  | { state: "missing" }
+  | { state: "valid"; cache: HsvaiSourceCache }
+  | { state: "invalid"; error: Error };
 
 interface WordPressPost {
   id: number;
@@ -347,14 +403,16 @@ function transcriptSpeakers(text: string): CorpusEntity[] {
 }
 
 function documentChunks(document: HsvaiSourceDocument): CorpusChunk[] {
-  const venue = document.venue
+  const venue = document.kind === "event" && document.venue
     ? [{ id: entityId("venue", document.venue), kind: "venue" as const, name: document.venue }]
     : [];
-  const people = (document.people ?? []).map((person) => ({
-    id: entityId("speaker", person.name),
-    kind: "speaker" as const,
-    name: person.name
-  }));
+  const people = document.kind === "event"
+    ? document.people.map((person) => ({
+        id: entityId("speaker", person.name),
+        kind: "speaker" as const,
+        name: person.name
+      }))
+    : [];
   return chunkText(document.text).map((text, index) => ({
     id: `${document.sourceId}#chunk-${String(index + 1).padStart(4, "0")}`,
     index,
@@ -451,15 +509,68 @@ function eventAddress(venue: TribeEvent["venue"]): string | undefined {
   return parts.length ? parts.join(", ") : undefined;
 }
 
+function cacheError(error: unknown): Pick<HsvaiSourceCacheEvent, "errorName" | "errorMessage"> {
+  return error instanceof Error
+    ? { errorName: error.name, errorMessage: error.message }
+    : { errorName: "UnknownError", errorMessage: String(error) };
+}
+
 export class HsvaiWordPressSource implements HsvaiKnowledgeSource {
+  private readonly cacheMaxAgeMs: number;
+  private readonly requestTimeoutMs: number;
+  private readonly now: () => number;
+  private readonly reportCache: (event: HsvaiSourceCacheEvent) => void;
+
   public constructor(
     private readonly fetchImplementation: typeof fetch = fetch,
-    private readonly eventCatalog: HsvaiEventCatalog = { version: 1, events: [] }
-  ) {}
+    private readonly eventCatalog: HsvaiEventCatalog = { version: 1, events: [] },
+    private readonly options: HsvaiWordPressSourceOptions = {}
+  ) {
+    this.cacheMaxAgeMs = options.cacheMaxAgeMs ?? SOURCE_CACHE_MAX_AGE_MS;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? SOURCE_REQUEST_TIMEOUT_MS;
+    this.now = options.now ?? Date.now;
+    this.reportCache = options.reportCache ?? (() => undefined);
+  }
 
   public async fetchDocuments(): Promise<HsvaiSourceDocument[]> {
+    const loaded = await this.loadCache();
+    if (loaded.state === "valid") {
+      const age = this.now() - Date.parse(loaded.cache.fetchedAt);
+      if (age >= 0 && age < this.cacheMaxAgeMs) {
+        this.reportCache({
+          state: "hit",
+          path: this.options.cachePath!,
+          fetchedAt: loaded.cache.fetchedAt
+        });
+        return this.applyEventCatalog(loaded.cache.documents);
+      }
+    }
+    try {
+      const documents = await this.fetchSourceDocuments();
+      const refreshed = await this.saveCache(documents);
+      if (refreshed) {
+        this.reportCache({
+          state: loaded.state === "invalid" ? "repaired" : "refreshed",
+          path: this.options.cachePath!,
+          fetchedAt: refreshed.fetchedAt,
+          ...(loaded.state === "invalid" ? cacheError(loaded.error) : {})
+        });
+      }
+      return this.applyEventCatalog(documents);
+    } catch (sourceError: unknown) {
+      if (loaded.state === "invalid") {
+        throw new AggregateError(
+          [loaded.error, sourceError],
+          `HSVAI source refresh failed after invalid cache at ${this.options.cachePath}`
+        );
+      }
+      throw sourceError;
+    }
+  }
+
+  private async fetchSourceDocuments(): Promise<HsvaiRawSourceDocument[]> {
     const [posts, events] = await Promise.all([this.fetchPosts(), this.fetchEvents()]);
-    const documents = [...posts, ...events].sort((left, right) =>
+    const documents: HsvaiRawSourceDocument[] = [...posts, ...events].sort((left, right) =>
       left.sourceId.localeCompare(right.sourceId)
     );
     if (documents.length === 0) {
@@ -468,8 +579,98 @@ export class HsvaiWordPressSource implements HsvaiKnowledgeSource {
     return documents;
   }
 
-  private async fetchPosts(): Promise<HsvaiSourceDocument[]> {
-    const documents: HsvaiSourceDocument[] = [];
+  private applyEventCatalog(documents: HsvaiRawSourceDocument[]): HsvaiSourceDocument[] {
+    return documents.map((document) => {
+      if (document.kind === "transcript") return document;
+      const catalogEntry = catalogEntryForEvent(document, this.eventCatalog);
+      if (!catalogEntry) {
+        return { ...document, peopleStatus: "pending", people: [] };
+      }
+      return {
+        ...document,
+        peopleStatus: "complete",
+        theme: catalogEntry.theme,
+        people: catalogEntry.speakers
+      };
+    });
+  }
+
+  private async loadCache(): Promise<HsvaiSourceCacheLoad> {
+    const path = this.options.cachePath;
+    if (!path) return { state: "missing" };
+    let content: string;
+    try {
+      content = await readFile(path, "utf8");
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { state: "missing" };
+      return {
+        state: "invalid",
+        error: new Error(`Cannot read HSVAI source cache at ${path}`, { cause: error })
+      };
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(content);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        state: "invalid",
+        error: new Error(`Invalid HSVAI source cache JSON at ${path}: ${message}`)
+      };
+    }
+    if (!Check(sourceCacheSchema, value)) {
+      return {
+        state: "invalid",
+        error: new Error(`Invalid HSVAI source cache at ${path}`)
+      };
+    }
+    return { state: "valid", cache: value };
+  }
+
+  private async saveCache(
+    documents: HsvaiRawSourceDocument[]
+  ): Promise<HsvaiSourceCache | undefined> {
+    const path = this.options.cachePath;
+    if (!path) return undefined;
+    const cache: HsvaiSourceCache = {
+      version: SOURCE_CACHE_VERSION,
+      fetchedAt: new Date(this.now()).toISOString(),
+      documents
+    };
+    await mkdir(dirname(path), { recursive: true });
+    const temporaryPath = `${path}.${process.pid}.tmp`;
+    await writeFile(temporaryPath, `${JSON.stringify(cache)}\n`, "utf8");
+    await rename(temporaryPath, path);
+    return cache;
+  }
+
+  private async requestJson(
+    url: URL,
+    label: string
+  ): Promise<{ value: unknown; headers: Headers }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    try {
+      const response = await this.fetchImplementation(url, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal
+      });
+      return {
+        value: await responseJson(response, label),
+        headers: response.headers
+      };
+    } catch (error: unknown) {
+      if (controller.signal.aborted) {
+        throw new Error(`HSVAI ${label} request timed out after ${this.requestTimeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async fetchPosts(): Promise<HsvaiRawTranscript[]> {
+    const documents: HsvaiRawTranscript[] = [];
     let page = 1;
     let totalPages = 1;
     do {
@@ -478,8 +679,8 @@ export class HsvaiWordPressSource implements HsvaiKnowledgeSource {
       url.searchParams.set("per_page", String(POST_PAGE_SIZE));
       url.searchParams.set("page", String(page));
       url.searchParams.set("_fields", "id,date_gmt,modified_gmt,link,title,content");
-      const response = await this.fetchImplementation(url, { headers: { Accept: "application/json" } });
-      const posts = asArray<WordPressPost>(await responseJson(response, "transcript"), "transcript");
+      const response = await this.requestJson(url, "transcript");
+      const posts = asArray<WordPressPost>(response.value, "transcript");
       totalPages = Number.parseInt(response.headers.get("x-wp-totalpages") ?? "1", 10);
       for (const post of posts) {
         const title = htmlToText(post.title.rendered);
@@ -498,8 +699,8 @@ export class HsvaiWordPressSource implements HsvaiKnowledgeSource {
     return documents;
   }
 
-  private async fetchEvents(): Promise<HsvaiSourceDocument[]> {
-    const documents: HsvaiSourceDocument[] = [];
+  private async fetchEvents(): Promise<HsvaiRawEvent[]> {
+    const documents: HsvaiRawEvent[] = [];
     let page = 1;
     let totalPages = 1;
     do {
@@ -508,8 +709,8 @@ export class HsvaiWordPressSource implements HsvaiKnowledgeSource {
       url.searchParams.set("page", String(page));
       url.searchParams.set("start_date", "2018-01-01");
       url.searchParams.set("end_date", "2100-01-01");
-      const response = await this.fetchImplementation(url, { headers: { Accept: "application/json" } });
-      const payload = await responseJson(response, "event") as {
+      const response = await this.requestJson(url, "event");
+      const payload = response.value as {
         events?: TribeEvent[];
         total_pages?: number;
       };
@@ -528,7 +729,7 @@ export class HsvaiWordPressSource implements HsvaiKnowledgeSource {
           ...(address ? [`Address: ${address}`] : []),
           htmlToText(event.description)
         ].filter(Boolean).join("\n");
-        const document: HsvaiSourceDocument = {
+        const document: HsvaiRawEvent = {
           sourceId: `hsvai:event:${event.id}`,
           kind: "event",
           title,
@@ -542,13 +743,7 @@ export class HsvaiWordPressSource implements HsvaiKnowledgeSource {
           ...(venue ? { venue } : {}),
           ...(address ? { address } : {})
         };
-        const catalogEntry = catalogEntryForEvent(document, this.eventCatalog);
-        documents.push({
-          ...document,
-          peopleStatus: catalogEntry ? "complete" : "pending",
-          ...(catalogEntry ? { theme: catalogEntry.theme } : {}),
-          people: catalogEntry?.speakers ?? []
-        });
+        documents.push(document);
       }
       page += 1;
     } while (page <= totalPages);
@@ -738,19 +933,20 @@ export class HsvaiKnowledge {
       "hsvai.source_url": document.url,
       "hsvai.published_at": document.publishedAt,
       "hsvai.modified_at": document.modifiedAt,
-      ...(document.eventStart ? { "hsvai.event_start": document.eventStart } : {}),
-      ...(document.eventEnd ? { "hsvai.event_end": document.eventEnd } : {}),
-      ...(document.timezone ? { "hsvai.timezone": document.timezone } : {}),
-      ...(document.venue ? { "hsvai.venue": document.venue } : {}),
-      ...(document.address ? { "hsvai.address": document.address } : {}),
-      ...(document.peopleStatus ? { "hsvai.people_status": document.peopleStatus } : {}),
-      ...(document.theme ? { "hsvai.theme": document.theme } : {}),
-      "hsvai.speakers": (document.people ?? [])
-        .map((person) => {
+      ...(document.kind === "event" ? {
+        "hsvai.event_start": document.eventStart,
+        "hsvai.event_end": document.eventEnd,
+        "hsvai.timezone": document.timezone,
+        ...(document.venue ? { "hsvai.venue": document.venue } : {}),
+        ...(document.address ? { "hsvai.address": document.address } : {}),
+        "hsvai.people_status": document.peopleStatus,
+        ...(document.theme ? { "hsvai.theme": document.theme } : {}),
+        "hsvai.speakers": document.people.map((person) => {
           const uid = entityUids.get(entityId("speaker", person.name));
           if (!uid) throw new Error(`Missing Dgraph speaker uid for ${person.name}`);
           return { uid };
         })
+      } : { "hsvai.speakers": [] })
     })));
     documents.forEach((document, index) => {
       const uid = documentResult[`document${index}`];
