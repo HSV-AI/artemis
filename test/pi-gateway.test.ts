@@ -205,7 +205,8 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("## Discord Channel Limits");
     expect(prompt).toContain("## Capability Gap Protocol");
     const artemisPrompt = buildSystemPrompt("dm", ARTEMIS_PROFILE);
-    expect(artemisPrompt).toContain("You are Artemis, a helpful conversational assistant in Discord");
+    expect(artemisPrompt).toContain("You are Artemis, a curious engineer");
+    expect(artemisPrompt).toContain("Wartermis is your younger sibling");
     const genericPrompt = buildSystemPrompt("dm", GENERIC_PROFILE);
     expect(genericPrompt).toContain("a helpful conversational assistant in Discord");
     expect(genericPrompt).not.toContain("You are Artemis,");
