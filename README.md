@@ -80,7 +80,6 @@ before Artemis starts.
 | `HSVAI_DGRAPH_QUERY_USER` | Yes | `artemis-hsvai-query` in `.env.example` | Public-corpus read-only user used by both HSVAI tools. |
 | `HSVAI_DGRAPH_QUERY_PASSWORD` | Yes | None | Public-corpus read-only password. |
 | `HSVAI_DGRAPH_NAMESPACE` | No | `1` | Namespace containing only public HSVAI data. |
-| `MEMORY_INJECT` | No | `false` | When `true`, inject a bounded snapshot of current memories once per PI session. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error`. |
 

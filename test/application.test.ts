@@ -20,7 +20,6 @@ const config: ArtemisConfig = {
   dgraphAuth: { username: "memory", password: "memory-password", namespace: 0 },
   hsvaiDgraphSyncAuth: { username: "hsvai-sync", password: "sync-password", namespace: 1 },
   hsvaiDgraphQueryAuth: { username: "hsvai-query", password: "query-password", namespace: 1 },
-  memoryInject: false,
   sqlitePath: ":memory:",
   logLevel: "info"
 };

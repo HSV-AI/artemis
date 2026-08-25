@@ -199,36 +199,6 @@ export function createMemoryTools(memory: MemoryStore, context: MemoryToolContex
       async execute() {
         return factsResult(await memory.listScope(context.scopeKey), context.scopeKey);
       }
-    }),
-    defineTool({
-      name: "memory_entity",
-      label: "Entity Memory",
-      description: "List current facts linked to an entity in this Discord conversation.",
-      promptSnippet: "Recall current facts linked to an entity in this conversation",
-      promptGuidelines: readGuidelines,
-      parameters: Type.Object({
-        name: Type.String({ description: "Stable entity label" })
-      }),
-      async execute(_toolCallId, params) {
-        return factsResult(
-          await memory.factsAboutEntity(context.scopeKey, params.name),
-          context.scopeKey
-        );
-      }
-    }),
-    defineTool({
-      name: "memory_episode",
-      label: "Session Memory",
-      description: "List facts recorded during the current durable conversation session.",
-      promptSnippet: "Recall facts recorded during this session",
-      promptGuidelines: readGuidelines,
-      parameters: Type.Object({}),
-      async execute() {
-        return factsResult(
-          await memory.factsForEpisode(context.scopeKey, context.episodeId),
-          context.scopeKey
-        );
-      }
     })
   ] as const;
 }

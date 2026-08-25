@@ -17,9 +17,7 @@ function memoryMock(): MemoryStore {
     retrieveCurrent: vi.fn().mockResolvedValue([]),
     searchRanked: vi.fn().mockResolvedValue([]),
     believedAt: vi.fn().mockResolvedValue([]),
-    listScope: vi.fn().mockResolvedValue([]),
-    factsForEpisode: vi.fn().mockResolvedValue([]),
-    factsAboutEntity: vi.fn().mockResolvedValue([])
+    listScope: vi.fn().mockResolvedValue([])
   };
 }
 
@@ -88,7 +86,7 @@ describe("Artemis memory tools", () => {
     };
     const memory = memoryMock();
     vi.mocked(memory.retrieveCurrent).mockResolvedValue([fact]);
-    const [, search, recall, , , believedAt, audit, entity, episode] =
+    const [, search, recall, , , believedAt, audit] =
       createMemoryTools(memory, context);
 
     const recalled = await recall.execute(
@@ -131,22 +129,6 @@ describe("Artemis memory tools", () => {
     );
     expect(memory.listScope).toHaveBeenCalledWith(context.scopeKey);
 
-    await entity.execute(
-      "call",
-      { name: "user" },
-      undefined,
-      undefined,
-      {} as Parameters<typeof entity.execute>[4]
-    );
-    expect(memory.factsAboutEntity).toHaveBeenCalledWith(context.scopeKey, "user");
-
-    await episode.execute(
-      "call", {}, undefined, undefined, {} as Parameters<typeof episode.execute>[4]
-    );
-    expect(memory.factsForEpisode).toHaveBeenCalledWith(
-      context.scopeKey,
-      context.episodeId
-    );
   });
 
   it("returns novelty refusals as tool output", async () => {

@@ -272,8 +272,6 @@ export interface MemoryStore {
   ): Promise<RankedMemoryFact[]>;
   believedAt(scopeKey: string, at: Date): Promise<MemoryFact[]>;
   listScope(scopeKey: string): Promise<MemoryFact[]>;
-  factsForEpisode(scopeKey: string, episodeId: string): Promise<MemoryFact[]>;
-  factsAboutEntity(scopeKey: string, entityName: string): Promise<MemoryFact[]>;
 }
 
 const DUPLICATE_TOKEN_JACCARD = 0.85;
@@ -512,39 +510,6 @@ export class GraphMemory implements MemoryStore {
         { $scope: scopeKey }
       );
       return data.facts ?? [];
-    });
-  }
-
-  public factsForEpisode(scopeKey: string, episodeId: string): Promise<MemoryFact[]> {
-    return this.enqueue(async () => {
-      const data = await this.client.query<{ episodes?: { facts?: MemoryFact[] }[] }>(
-        `query byEpisode($scope: string, $episode: string) {
-          episodes(func: eq(episode_id, $episode)) @filter(type(Episode) AND eq(scope_key, $scope)) {
-            facts: ~source_episode(orderasc: recorded_at) @filter(type(Fact)) {
-              ${FACT_FIELDS}
-            }
-          }
-        }`,
-        { $scope: scopeKey, $episode: episodeId }
-      );
-      return (data.episodes ?? []).flatMap((episode) => episode.facts ?? []);
-    });
-  }
-
-  public factsAboutEntity(scopeKey: string, entityName: string): Promise<MemoryFact[]> {
-    return this.enqueue(async () => {
-      const data = await this.client.query<{ entities?: { facts?: MemoryFact[] }[] }>(
-        `query aboutEntity($scope: string, $name: string) {
-          entities(func: eq(entity_name, $name)) @filter(type(Entity)) {
-            facts: ~about(orderasc: recorded_at)
-              @filter(type(Fact) AND eq(scope_key, $scope) AND NOT has(expired_at)) {
-              ${FACT_FIELDS}
-            }
-          }
-        }`,
-        { $scope: scopeKey, $name: entityName }
-      );
-      return (data.entities ?? []).flatMap((entity) => entity.facts ?? []);
     });
   }
 

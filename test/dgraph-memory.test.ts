@@ -316,7 +316,7 @@ describe("GraphMemory", () => {
     });
   });
 
-  it("returns episode and entity facts and deduplicates graph search results", async () => {
+  it("deduplicates graph search results", async () => {
     const fact = {
       uid: "0x4",
       statement: "The release team uses a weekly deployment window.",
@@ -324,8 +324,6 @@ describe("GraphMemory", () => {
       recorded_at: "2026-08-22T12:00:00.000Z"
     };
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: { episodes: [{ facts: [fact] }, {}] } }))
-      .mockResolvedValueOnce(jsonResponse({ data: { entities: [{ facts: [fact] }, {}] } }))
       .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }))
       .mockResolvedValueOnce(jsonResponse({ data: {
         entities: [{ related: [fact] }, { related: [fact] }]
@@ -333,8 +331,6 @@ describe("GraphMemory", () => {
       .mockResolvedValueOnce(jsonResponse({ data: { facts: [] } }));
     const memory = new GraphMemory(new DgraphClient("http://dgraph:8080", fetchMock));
 
-    await expect(memory.factsForEpisode(input.scopeKey, "session-1")).resolves.toEqual([fact]);
-    await expect(memory.factsAboutEntity(input.scopeKey, "release team")).resolves.toEqual([fact]);
     await expect(memory.searchRanked(input.scopeKey, "deployment", { episodeId: "session-1" }))
       .resolves.toEqual([expect.objectContaining({ fact, channels: ["graph"] })]);
   });

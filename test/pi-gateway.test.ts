@@ -131,15 +131,8 @@ function healthyFetch() {
 
 function createSessionStore(): PiSessionStore {
   const sessions = new Map<string, { rawEntries: string[] }>();
-  const memorySnapshots = new Map<string, string>();
   let migrationComplete = false;
   return {
-    loadMemorySnapshot: vi.fn((sessionId) => memorySnapshots.get(sessionId)),
-    saveMemorySnapshot: vi.fn((sessionId, snapshot) => {
-      const persisted = memorySnapshots.get(sessionId) ?? snapshot;
-      memorySnapshots.set(sessionId, persisted);
-      return persisted;
-    }),
     loadPiSession: vi.fn((sessionId) => sessions.get(sessionId)),
     createPiSession: vi.fn((sessionId, entries) => {
       sessions.set(sessionId, {
@@ -650,63 +643,5 @@ describe("system prompt Discord channel limits", () => {
     await gateway.generate(generationInput({ sourceMessageId: "message-2" }));
 
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
-  });
-
-  it("persists one memory snapshot across corpus revisions and gateway restarts", async () => {
-    mocks.resourceLoaderConstructor.mockClear();
-    mocks.session.messages = [assistant()];
-    mocks.session.prompt.mockResolvedValue(undefined);
-    mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
-    mocks.hsvaiCorpusRevision
-      .mockResolvedValueOnce("revision-1")
-      .mockResolvedValue("revision-2");
-    let queryCount = 0;
-    const fetchMock = vi.fn().mockImplementation(async () => {
-      queryCount += 1;
-      const statement = queryCount === 1 ? "Original session fact" : "New session fact";
-      return new Response(JSON.stringify({
-        data: {
-          facts: [{
-            uid: `0x${queryCount}`,
-            statement,
-            scope_key: "guild:guild:channel:channel",
-            recorded_at: "2026-08-23T12:00:00.000Z"
-          }]
-        }
-      }), { status: 200 });
-    });
-    const config = {
-      ...artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
-      memoryInject: true
-    };
-    const sessionStore = createSessionStore();
-    const gateway = new PiSdkGateway(config, sessionStore, fetchMock);
-
-    await gateway.generate(generationInput());
-    await gateway.generate(generationInput({ sourceMessageId: "message-2" }));
-
-    const restartedGateway = new PiSdkGateway(config, sessionStore, fetchMock);
-    await restartedGateway.generate(generationInput({ sourceMessageId: "message-3" }));
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(3);
-    const firstPrompt = mocks.resourceLoaderConstructor.mock.calls[0]?.[0] as {
-      systemPrompt: string;
-    };
-    expect(firstPrompt.systemPrompt).toContain("Original session fact");
-    for (const [options] of mocks.resourceLoaderConstructor.mock.calls) {
-      expect((options as { systemPrompt: string }).systemPrompt).toContain("Original session fact");
-    }
-
-    await restartedGateway.generate(generationInput({
-      logicalSessionId: "logical-2",
-      sourceMessageId: "message-4"
-    }));
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(4);
-    const secondPrompt = mocks.resourceLoaderConstructor.mock.calls[3]?.[0] as {
-      systemPrompt: string;
-    };
-    expect(secondPrompt.systemPrompt).toContain("New session fact");
   });
 });

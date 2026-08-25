@@ -31,8 +31,6 @@ Every Artemis profile receives these tools:
 | `memory_forget` | Stop believing one active fact without deleting it. |
 | `memory_believed_at` | List facts believed at an ISO-8601 instant. |
 | `memory_audit` | List current and ended facts with supersession links. |
-| `memory_entity` | List current facts linked to an entity in the conversation scope. |
-| `memory_episode` | List facts recorded during the current PI session. |
 
 Model-facing guidelines permit writes only when the current Discord user
 explicitly asks to remember, correct, or forget something. Recall results are
@@ -43,14 +41,6 @@ classify similarity at 0.6 and duplicates at 0.85. A duplicate is always refused
 and names its existing UID. A similar fact is refused with a
 supersession suggestion unless `force` is true. Refusals are ordinary tool output
 so PI can respond or choose another explicit memory operation in the same turn.
-
-When `MEMORY_INJECT=true`, Artemis renders at most 2,000 characters of current
-facts into the system prompt on the first turn of each durable PI session.
-SQLite stores the rendered snapshot on the logical session row. Every later
-loader for that session reuses those snapshot bytes, including after process
-restarts and corpus-revision loader rebuilds. The snapshot identifies itself as
-user data, remains unchanged after writes, and directs PI to `memory_search` for
-newer or omitted facts. A new PI session takes a new snapshot.
 
 ## Contracts and data flow
 
@@ -91,8 +81,6 @@ permission-7 memory service account, and persists `/dgraph` in the `dgraph-data`
 volume. Artemis applies the additive DQL schema after model health validation
 and before Discord login.
 
-`MEMORY_INJECT` is a strict boolean and defaults to `false`.
-
 ## Persistence
 
 Dgraph stores `Fact` nodes containing the statement, optional subject, scope,
@@ -117,7 +105,6 @@ tools and graph traversal do not provide a cross-conversation read path.
 
 - Invalid `DGRAPH_URL` fails configuration loading.
 - Missing Dgraph credentials, authentication failures, or an invalid namespace fail startup.
-- Invalid `MEMORY_INJECT` fails configuration loading.
 - Schema initialization failure prevents Discord login.
 - Invalid, inactive, or cross-scope fact UIDs fail without changing data.
 - Duplicate and unforced similar writes return a refusal without changing data.

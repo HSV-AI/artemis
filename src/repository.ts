@@ -35,10 +35,6 @@ interface SessionRow {
   updated_at: string;
 }
 
-interface MemorySnapshotRow {
-  memory_snapshot: string | null;
-}
-
 interface MessageRow {
   id: number;
   session_id: string;
@@ -253,34 +249,6 @@ export class ArtemisRepository {
       .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC")
       .all(sessionId) as MessageRow[];
     return rows.map((row) => this.mapMessage(row));
-  }
-
-  public loadMemorySnapshot(sessionId: string): string | undefined {
-    const row = this.database
-      .prepare("SELECT memory_snapshot FROM sessions WHERE id = ?")
-      .get(sessionId) as MemorySnapshotRow | undefined;
-    if (!row) {
-      throw new Error(`Session does not exist: ${sessionId}`);
-    }
-    return optional(row.memory_snapshot);
-  }
-
-  public saveMemorySnapshot(sessionId: string, snapshot: string): string {
-    const result = this.database
-      .prepare(
-        `UPDATE sessions
-         SET memory_snapshot = ?, updated_at = ?
-         WHERE id = ? AND memory_snapshot IS NULL`
-      )
-      .run(snapshot, now(), sessionId);
-    if (result.changes === 1) {
-      return snapshot;
-    }
-    const persisted = this.loadMemorySnapshot(sessionId);
-    if (persisted === undefined) {
-      throw new Error(`Failed to save memory snapshot for session ${sessionId}`);
-    }
-    return persisted;
   }
 
   public loadPiSession(sessionId: string): PersistedPiSession | undefined {
@@ -690,21 +658,6 @@ export class ArtemisRepository {
       transaction();
     }
 
-    const memorySnapshotsApplied = this.database
-      .prepare("SELECT 1 FROM schema_migrations WHERE version = 6")
-      .get();
-    if (!memorySnapshotsApplied) {
-      const transaction = this.database.transaction(() => {
-        const columns = this.database.pragma("table_info(sessions)") as { name: string }[];
-        if (!columns.some((column) => column.name === "memory_snapshot")) {
-          this.database.exec("ALTER TABLE sessions ADD COLUMN memory_snapshot TEXT");
-        }
-        this.database
-          .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (6, ?)")
-          .run(now());
-      });
-      transaction();
-    }
   }
 
   private mapSession(row: SessionRow): SessionRecord {

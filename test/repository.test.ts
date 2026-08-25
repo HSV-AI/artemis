@@ -33,25 +33,6 @@ describe("ArtemisRepository", () => {
     expect(other.id).not.toBe(first.id);
   });
 
-  it("persists the first memory snapshot for a durable session", () => {
-    const directory = mkdtempSync(join(tmpdir(), "artemis-memory-snapshot-"));
-    temporaryDirectories.push(directory);
-    const path = join(directory, "artemis.sqlite");
-    repository = new ArtemisRepository(path);
-    const session = repository.getOrCreateSession(
-      { key: "dm:one", kind: "dm", channelId: "one" },
-      "model"
-    );
-
-    expect(repository.loadMemorySnapshot(session.id)).toBeUndefined();
-    expect(repository.saveMemorySnapshot(session.id, "original snapshot")).toBe("original snapshot");
-    expect(repository.saveMemorySnapshot(session.id, "replacement snapshot")).toBe("original snapshot");
-    repository.close();
-
-    repository = new ArtemisRepository(path);
-    expect(repository.loadMemorySnapshot(session.id)).toBe("original snapshot");
-  });
-
   it("deduplicates Discord messages and restores ordered history", () => {
     repository = new ArtemisRepository(":memory:");
     const session = repository.getOrCreateSession(

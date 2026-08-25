@@ -242,7 +242,7 @@ The model-facing implementation must:
 - Apply a provider definition's explicit reasoning effort to every model request when configured.
 - Restore the native harness state for the logical session directly from durable SQLite entries.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
-- Enable only `web_fetch`, the six GitHub custom tools when configured, the nine scoped memory tools, and the fixed-source `hsvai_graph_search` and `hsvai_graph_query` tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
+- Enable only `web_fetch`, the six GitHub custom tools when configured, the seven scoped memory tools, and the fixed-source `hsvai_graph_search` and `hsvai_graph_query` tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply the complete identity instructions from the profile selected by `PERSONA_PROFILE`, which defaults to `artemis` and includes `wartermis` as a bundled alternative. Keep each profile in its own source file and compose the fixed Discord instruction after it. The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, and tool registry.
 - Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
@@ -355,13 +355,11 @@ The minimal logical schema is:
 - Conversation foreign key.
 - Configured model.
 - Status: `active` or `closed`.
-- Optional rendered memory snapshot, written once on the session's first
-  memory-injected turn.
 - Created and updated timestamps.
 - At most one active session per conversation.
 - Optional harness session reference or serialized state when the selected harness requires it.
 
-The current implementation uses the logical session ID as the native PI session ID. `/clear-session` changes the active row to `closed`; the next accepted message creates a new active row for the same conversation. Migration 6 adds the memory-snapshot column so loader rebuilds and process restarts preserve the original prompt bytes.
+The current implementation uses the logical session ID as the native PI session ID. `/clear-session` changes the active row to `closed`; the next accepted message creates a new active row for the same conversation.
 
 ### `pi_sessions`
 
@@ -468,7 +466,6 @@ Load local environment configuration from `.env` or the process environment, opt
 | `HSVAI_DGRAPH_QUERY_USER` / `HSVAI_DGRAPH_QUERY_PASSWORD` | Yes | None | Public-corpus query account with `dgraph.all=4`. The query and sync usernames must differ. |
 | `HSVAI_DGRAPH_NAMESPACE` | No | `1` | Positive namespace ID containing the public HSVAI corpus. |
 | `HSVAI_EVENT_CATALOG_PATH` | No | `/data/hsvai-event-catalog.jsonl` | Durable event-catalog overlay read at startup and written by the operator refresh task. |
-| `MEMORY_INJECT` | No | `false` | Strict boolean enabling one bounded, byte-stable memory snapshot per durable PI session. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
 | `LOG_LEVEL` | No | `info` | Minimum routine level: `debug`, `info`, `warn`, or `error`. |
 
@@ -530,7 +527,7 @@ Each stage should finish with tests before the next begins.
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
 - Connect the harness's native session manager to ordered SQLite storage and complete the atomic one-time PI cutover before Discord login.
-- Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, and fixed-source HSVAI graph search; disable every built-in tool and build the system instruction from conversation kind, registered-tool metadata, and an optional per-session memory snapshot, including the Capability Gap Protocol.
+- Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, and fixed-source HSVAI graph search; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
 - Load the reviewed HSVAI event baseline and runtime overlay before source synchronization, then project source-matched themes, speaker edges, and complete/pending status without model calls during startup.
 - Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
 - Add configured provider health/model validation.
