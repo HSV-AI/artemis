@@ -26,7 +26,7 @@ import {
   HsvaiWordPressSource
 } from "./hsvai-knowledge.js";
 import { createMemoryTools } from "./memory-tools.js";
-import { DEFAULT_BOT_DISPLAY_NAME, type PersonaProfile } from "./persona-profiles.js";
+import { DEFAULT_BOT_DISPLAY_NAME, selectPersonaByAuthorName, type PersonaProfile } from "./persona-profiles.js";
 import {
   asPiSessionManager,
   SqlitePiSessionManager
@@ -372,7 +372,8 @@ export class PiSdkGateway implements PiGateway {
     tools: readonly ToolRegistryEntry[],
     hsvaiCorpusRevision: string
   ): Promise<DefaultResourceLoader> {
-    const cacheKey = input.conversationKind;
+    const persona = selectPersonaByAuthorName(input.authorName, this.config.persona);
+    const cacheKey = `${input.conversationKind}:${persona.id}`;
     const existing = this.resourceLoaders.get(cacheKey);
     if (existing?.hsvaiCorpusRevision === hsvaiCorpusRevision) {
       return existing.loader;
@@ -387,7 +388,7 @@ export class PiSdkGateway implements PiGateway {
       noContextFiles: true,
       systemPrompt: buildSystemPrompt(
         input.conversationKind,
-        this.config.persona,
+        persona,
         this.botDisplayName,
         tools,
         hsvaiCorpusRevision

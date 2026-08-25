@@ -39,3 +39,31 @@ export function resolvePersonaProfile(id = DEFAULT_PERSONA_PROFILE_ID): PersonaP
   }
   return profile;
 }
+
+/**
+ * The leading prefix that selects the Artemis persona from an author display
+ * name. Matching is case-insensitive and anchored to the start of the trimmed
+ * name, so a name like `Wartemis` does not match.
+ */
+export const ARTEMIS_NAME_PREFIX = "artemis";
+
+/**
+ * Select the persona profile to apply for an incoming Discord message based on
+ * the author's display name. When the trimmed name starts with the
+ * case-insensitive prefix {@link ARTEMIS_NAME_PREFIX} (`artemis`), the bundled
+ * Artemis profile is selected. Otherwise the supplied `defaultProfile` (the
+ * deployment-configured persona) is returned unchanged. The match is anchored
+ * to the start of the name: `Artemis`, `Artemis Rose`, and `artemis` match,
+ * while `Wartemis` and `xArtemis` do not. Empty, blank, or missing names never
+ * match and fall back to the default profile.
+ */
+export function selectPersonaByAuthorName(
+  authorName: string | undefined,
+  defaultProfile: PersonaProfile
+): PersonaProfile {
+  const trimmed = authorName?.trim() ?? "";
+  if (trimmed.toLowerCase().startsWith(ARTEMIS_NAME_PREFIX)) {
+    return ARTEMIS_PROFILE;
+  }
+  return defaultProfile;
+}

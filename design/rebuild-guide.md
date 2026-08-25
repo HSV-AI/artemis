@@ -187,6 +187,7 @@ generate(
   stable_conversation_key,
   triggering_discord_message_id,
   triggering_discord_author_id,
+  triggering_discord_author_display_name optional,
   current_prompt
 ) -> {
   text,
@@ -244,6 +245,7 @@ The model-facing implementation must:
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
 - Enable only `web_fetch`, the six GitHub custom tools when configured, the seven scoped memory tools, and the fixed-source `hsvai_graph_search` and `hsvai_graph_query` tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply the style instructions from the profile selected by `PERSONA_PROFILE`, which defaults to `generic` and also bundles `artemis` and `wartermis`. Keep each profile in its own source file and compose the fixed Discord instruction after it. Name resolution: a named profile (`artemis`, `wartermis`) owns its identity and its `name` is authoritative for self-introduction regardless of the Discord display name. The default `generic` profile defines no name, so the bot's display name is resolved from the connected Discord client at startup (global display name when set, otherwise username) and injected into the system prompt as the authoritative name for self-introduction; the system prompt must not hardcode the Discord name. When neither a profile name nor a Discord display name is available, fall back to `DEFAULT_BOT_DISPLAY_NAME` (`Artemis`). The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, resolved display name, and tool registry.
+- Auto-select the `artemis` persona per generation when the incoming author's display name (forwarded from the Discord adapter alongside the author id) starts with the case-insensitive prefix `artemis` after trimming; otherwise keep the deployment-configured profile. The match is anchored to the start of the name, so `Wartemis` and `xArtemis` do not match. Empty, blank, or missing names never match. The resource-loader cache is keyed by conversation kind and selected persona id so different personas within the same kind build distinct prompts.
 - Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
 - Treat aborted, errored, absent, and blank final responses as failures.
@@ -602,6 +604,7 @@ At minimum, prove all of the following:
 - HSVAI synchronization, retrieval, and catalog loading satisfy the verification contracts in their feature documents.
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
 - The bot's Discord display name is resolved from the connected client on ready (global display name when set, otherwise username), injected into the system prompt as the authoritative self-introduction name, and falls back to the selected profile's `name` when Discord has not reported a name; the system prompt never hardcodes the Discord name.
+- When an incoming author's display name starts with the case-insensitive prefix `artemis` after trimming, that generation uses the bundled `artemis` persona instead of the deployment-configured `PERSONA_PROFILE`; `Wartemis`, `xArtemis`, and blank or missing names do not match. The resource-loader cache is keyed by conversation kind and selected persona id.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Guild sessions receive the channel-limits system-prompt block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3`, self-contained-thought rule) while DM sessions receive no limit messaging; prompt selection is deterministic from the conversation kind.
 - Every outbound Discord message (guild reply, DM send, chunked response, and slash-command reply) carries the `SuppressEmbeds` flag by default; `DISCORD_SUPPRESS_EMBEDS=false` omits it globally, and `DISCORD_EMBEDS_ALLOWED_CHANNEL_ID` omits it per channel with threads resolving through the parent channel.

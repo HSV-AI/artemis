@@ -284,6 +284,36 @@ describe("ConversationService", () => {
     expect(pi.generate).toHaveBeenCalledOnce();
   });
 
+  it("forwards the author display name to the PI gateway for persona selection", async () => {
+    const { service, pi } = createService(createPiMock({ text: "Hi" }));
+    await service.handleMessage(
+      inbound({
+        discordMessageId: "artemis-message",
+        authorName: "Artemis Rose",
+        guildId: "guild-1",
+        channelId: "group-1",
+        mentionsBot: true,
+        content: "hello"
+      })
+    );
+    await service.handleMessage(
+      inbound({
+        discordMessageId: "matt-message",
+        authorName: "Matt",
+        guildId: "guild-1",
+        channelId: "group-1",
+        mentionsBot: true,
+        content: "hello"
+      })
+    );
+    expect(vi.mocked(pi.generate).mock.calls[0]?.[0]).toMatchObject({
+      authorName: "Artemis Rose"
+    });
+    expect(vi.mocked(pi.generate).mock.calls[1]?.[0]).toMatchObject({
+      authorName: "Matt"
+    });
+  });
+
   it("does not start a response indicator for ignored or duplicate messages", async () => {
     const { service } = createService();
     const ignoredIndicator = { start: vi.fn().mockResolvedValue(undefined), stop: vi.fn() };

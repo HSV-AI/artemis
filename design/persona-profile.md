@@ -42,6 +42,9 @@ identity, name, and style instructions. Slash commands do not invoke the model
 and are unaffected. Profile changes become visible after rebuilding and
 restarting Artemis.
 
+A separate per-message override applies the bundled `artemis` persona when an
+incoming author's display name starts with `artemis`; see [persona auto-selection](persona-auto-selection.md).
+
 ## Configuration
 
 `PERSONA_PROFILE` selects a bundled profile by case-insensitive ID and defaults to
@@ -143,4 +146,5 @@ generation, so profiles must not contain credentials or other secrets.
 
 - [Baseline design](baseline.md)
 - [Clean-room rebuild guide](rebuild-guide.md)
+- [Persona auto-selection by author display name](persona-auto-selection.md)
 - [Design document index](README.md)

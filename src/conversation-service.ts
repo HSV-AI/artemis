@@ -134,6 +134,7 @@ export class ConversationService {
           conversationKind: identity.kind,
           sourceMessageId: message.discordMessageId,
           authorId: message.authorId,
+          authorName: message.authorName,
           prompt
         });
         if (!result.text.trim()) {

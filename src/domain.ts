@@ -79,6 +79,12 @@ export interface PiGenerationInput {
   conversationKind: ConversationKind;
   sourceMessageId: string;
   authorId: string;
+  /**
+   * Display name of the Discord author who triggered the generation. Used to
+   * auto-select the Artemis persona when the name starts with the `artemis`
+   * prefix; otherwise the deployment-configured default persona is used.
+   */
+  authorName?: string;
   prompt: string;
 }
 

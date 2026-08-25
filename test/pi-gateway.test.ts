@@ -606,6 +606,69 @@ describe("PiSdkGateway", () => {
   });
 });
 
+describe("PiSdkGateway persona auto-selection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.runtime.getModel.mockReturnValue({ provider: "test-provider", id: "model" });
+    mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
+    mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
+    mocks.loaderReload.mockResolvedValue(undefined);
+    mocks.hsvaiCorpusRevision.mockResolvedValue("revision-1");
+    mocks.session.prompt.mockResolvedValue(undefined);
+    mocks.session.messages = [assistant()];
+    mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
+  });
+
+  it("selects the Artemis persona when the author name starts with artemis over a generic default", async () => {
+    mocks.resourceLoaderConstructor.mockClear();
+    const gateway = new PiSdkGateway(
+      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }), persona: GENERIC_PROFILE },
+      createSessionStore(),
+      vi.fn()
+    );
+    await gateway.generate(generationInput({ authorName: "Artemis Rose" }));
+    const options = mocks.resourceLoaderConstructor.mock.calls.at(-1)?.[0] as
+      | { systemPrompt?: string }
+      | undefined;
+    expect(options?.systemPrompt).toContain("You are Artemis, a curious engineer");
+    expect(options?.systemPrompt).toContain("Your name is Artemis");
+  });
+
+  it("keeps the default persona when the author name does not start with artemis", async () => {
+    mocks.resourceLoaderConstructor.mockClear();
+    const gateway = new PiSdkGateway(
+      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }), persona: GENERIC_PROFILE },
+      createSessionStore(),
+      vi.fn()
+    );
+    await gateway.generate(generationInput({ authorName: "Wartemis" }));
+    const options = mocks.resourceLoaderConstructor.mock.calls.at(-1)?.[0] as
+      | { systemPrompt?: string }
+      | undefined;
+    expect(options?.systemPrompt).not.toContain("You are Artemis,");
+    expect(options?.systemPrompt).toContain("a helpful conversational assistant in Discord");
+  });
+
+  it("caches resource loaders per conversation kind and selected persona", async () => {
+    mocks.resourceLoaderConstructor.mockClear();
+    const gateway = new PiSdkGateway(
+      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }), persona: GENERIC_PROFILE },
+      createSessionStore(),
+      vi.fn()
+    );
+    await gateway.generate(generationInput({ authorName: "Matt" }));
+    await gateway.generate(generationInput({ sourceMessageId: "message-2", authorName: "Matt" }));
+    await gateway.generate(generationInput({ sourceMessageId: "message-3", authorName: "Artemis" }));
+    await gateway.generate(generationInput({
+      sourceMessageId: "message-4",
+      conversationKind: "dm",
+      conversationKey: "dm:channel",
+      authorName: "Artemis"
+    }));
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("system prompt Discord channel limits", () => {
   async function captureSystemPrompt(kind: "dm" | "guild"): Promise<string> {
     mocks.resourceLoaderConstructor.mockClear();
