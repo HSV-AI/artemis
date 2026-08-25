@@ -657,6 +657,7 @@ export class ArtemisRepository {
       });
       transaction();
     }
+
   }
 
   private mapSession(row: SessionRow): SessionRecord {

@@ -19,6 +19,9 @@ const config: ArtemisConfig = {
   githubToken: "",
   githubAllowedRepositories: ["mbrooks/artemis", "HSV-AI/artemis"],
   dgraphUrl: "http://dgraph:8080",
+  dgraphAuth: { username: "memory", password: "memory-password", namespace: 0 },
+  hsvaiDgraphSyncAuth: { username: "hsvai-sync", password: "sync-password", namespace: 1 },
+  hsvaiDgraphQueryAuth: { username: "hsvai-query", password: "query-password", namespace: 1 },
   sqlitePath: ":memory:",
   logLevel: "info"
 };

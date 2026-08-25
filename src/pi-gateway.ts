@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -10,12 +11,20 @@ import { DEFAULT_DGRAPH_URL, type ArtemisConfig } from "./config.js";
 import { DgraphClient, GraphMemory } from "./dgraph-memory.js";
 import type {
   ConversationKind,
+  Logger,
   PiGateway,
   PiGenerationInput,
   PiGenerationResult,
   PiSessionStore
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
+import { loadHsvaiEventCatalog } from "./hsvai-event-catalog.js";
+import {
+  createHsvaiGraphQueryTool,
+  createHsvaiKnowledgeTool,
+  HsvaiKnowledge,
+  HsvaiWordPressSource
+} from "./hsvai-knowledge.js";
 import { createMemoryTools } from "./memory-tools.js";
 import { DEFAULT_BOT_DISPLAY_NAME, type PersonaProfile } from "./persona-profiles.js";
 import {
@@ -87,7 +96,8 @@ export function buildSystemPrompt(
   kind: ConversationKind,
   persona: PersonaProfile,
   botDisplayName: string | undefined = undefined,
-  tools: readonly ToolRegistryEntry[] = []
+  tools: readonly ToolRegistryEntry[] = [],
+  hsvaiCorpusRevision = ""
 ): string {
   const personaName = persona.name.trim();
   const discordName = botDisplayName?.trim();
@@ -107,7 +117,13 @@ export function buildSystemPrompt(
           return lines.join("\n");
         })
         .join("\n");
-  return `${identityBlock} ${persona.instructions.trim()} ${DISCORD_BEHAVIOR_PROMPT}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}`;
+  const corpusState = hsvaiCorpusRevision
+    ? "\n\n## HSVAI Corpus State\n" +
+      `Current corpus revision: ${hsvaiCorpusRevision}. ` +
+      "Historical HSVAI tool results with this revision remain current and may be reused. " +
+      "Results with a different revision or no revision label are stale and must be queried again before use."
+    : "";
+  return `${identityBlock} ${persona.instructions.trim()} ${DISCORD_BEHAVIOR_PROMPT}${channelLimits}${CAPABILITY_GAP_PROMPT_BLOCK}\n\n${registry}${corpusState}`;
 }
 
 function createCustomTools(
@@ -146,19 +162,61 @@ function extractGeneration(message: AssistantMessage): PiGenerationResult {
 
 export class PiSdkGateway implements PiGateway {
   private modelRuntime: ModelRuntime | undefined;
-  private readonly resourceLoaders = new Map<ConversationKind, DefaultResourceLoader>();
+  private readonly resourceLoaders = new Map<string, {
+    hsvaiCorpusRevision: string;
+    loader: DefaultResourceLoader;
+  }>();
   private customTools: ReturnType<typeof createCustomTools> = [];
   private botDisplayName: string | undefined;
   private readonly memory: GraphMemory;
+  private readonly knowledge: HsvaiKnowledge;
 
   public constructor(
     private readonly config: Pick<ArtemisConfig, "model" | "persona"> &
-      Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories" | "dgraphUrl">>,
+      Partial<Pick<
+        ArtemisConfig,
+        | "githubToken"
+        | "githubAllowedRepositories"
+        | "dgraphUrl"
+        | "dgraphAuth"
+        | "hsvaiDgraphSyncAuth"
+        | "hsvaiDgraphQueryAuth"
+        | "sqlitePath"
+      >>,
     private readonly sessionStore: PiSessionStore,
-    private readonly fetchImplementation: typeof fetch = fetch
+    private readonly fetchImplementation: typeof fetch = fetch,
+    logger?: Pick<Logger, "info" | "warn">
   ) {
-    this.memory = new GraphMemory(
-      new DgraphClient(config.dgraphUrl ?? DEFAULT_DGRAPH_URL, fetchImplementation)
+    const dgraph = new DgraphClient(
+      config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
+      fetchImplementation,
+      config.dgraphAuth
+    );
+    const hsvaiSync = new DgraphClient(
+      config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
+      fetchImplementation,
+      config.hsvaiDgraphSyncAuth
+    );
+    const hsvaiQuery = new DgraphClient(
+      config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
+      fetchImplementation,
+      config.hsvaiDgraphQueryAuth
+    );
+    this.memory = new GraphMemory(dgraph);
+    const sourceCachePath = config.sqlitePath && config.sqlitePath !== ":memory:"
+      ? join(dirname(config.sqlitePath), "hsvai-source-cache.json")
+      : undefined;
+    this.knowledge = new HsvaiKnowledge(
+      hsvaiSync,
+      new HsvaiWordPressSource(fetchImplementation, loadHsvaiEventCatalog(), {
+        ...(sourceCachePath ? { cachePath: sourceCachePath } : {}),
+        reportCache(event) {
+          const { state, ...fields } = event;
+          if (state === "repaired") logger?.warn("hsvai_source_cache_repaired", fields);
+          else logger?.info(`hsvai_source_cache_${state}`, fields);
+        }
+      }),
+      hsvaiQuery
     );
   }
 
@@ -192,6 +250,7 @@ export class PiSdkGateway implements PiGateway {
       clearTimeout(timeout);
     }
     await this.memory.initialize();
+    await this.knowledge.initializeAndSync();
     await this.initialize();
     migrateExistingPiSessions(
       this.sessionStore,
@@ -203,19 +262,23 @@ export class PiSdkGateway implements PiGateway {
 
   public async generate(input: PiGenerationInput): Promise<PiGenerationResult> {
     await this.initialize();
+    const hsvaiCorpusRevision = await this.knowledge.corpusRevision();
     const customTools = [
       ...this.customTools,
+      createHsvaiKnowledgeTool(this.knowledge, hsvaiCorpusRevision),
+      createHsvaiGraphQueryTool(this.knowledge, hsvaiCorpusRevision),
       ...createMemoryTools(this.memory, {
         scopeKey: input.conversationKey,
         authorId: input.authorId,
-        sourceMessageId: input.sourceMessageId
+        sourceMessageId: input.sourceMessageId,
+        episodeId: input.logicalSessionId
       })
     ];
     const modelRuntime = this.modelRuntime;
     if (!modelRuntime) {
       throw new Error("PI gateway failed to initialize");
     }
-    const resourceLoader = await this.getResourceLoader(input.conversationKind, customTools);
+    const resourceLoader = await this.getResourceLoader(input, customTools, hsvaiCorpusRevision);
     const model = modelRuntime.getModel(
       this.config.model.providerId,
       this.config.model.modelId
@@ -255,7 +318,7 @@ export class PiSdkGateway implements PiGateway {
     }
   }
 
-  private authorizationHeaders(): HeadersInit {
+  private authorizationHeaders(): Record<string, string> {
     if (!this.usesAuthorizationHeader()) {
       return {};
     }
@@ -312,12 +375,14 @@ export class PiSdkGateway implements PiGateway {
   }
 
   private async getResourceLoader(
-    kind: ConversationKind,
-    tools: readonly ToolRegistryEntry[]
+    input: PiGenerationInput,
+    tools: readonly ToolRegistryEntry[],
+    hsvaiCorpusRevision: string
   ): Promise<DefaultResourceLoader> {
-    const existing = this.resourceLoaders.get(kind);
-    if (existing) {
-      return existing;
+    const cacheKey = input.conversationKind;
+    const existing = this.resourceLoaders.get(cacheKey);
+    if (existing?.hsvaiCorpusRevision === hsvaiCorpusRevision) {
+      return existing.loader;
     }
     const resourceLoader = new DefaultResourceLoader({
       cwd: process.cwd(),
@@ -327,10 +392,16 @@ export class PiSdkGateway implements PiGateway {
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
-      systemPrompt: buildSystemPrompt(kind, this.config.persona, this.botDisplayName, tools)
+      systemPrompt: buildSystemPrompt(
+        input.conversationKind,
+        this.config.persona,
+        this.botDisplayName,
+        tools,
+        hsvaiCorpusRevision
+      )
     });
     await resourceLoader.reload();
-    this.resourceLoaders.set(kind, resourceLoader);
+    this.resourceLoaders.set(cacheKey, { hsvaiCorpusRevision, loader: resourceLoader });
     return resourceLoader;
   }
 }

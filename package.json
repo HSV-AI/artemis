@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "bootstrap:dgraph": "node dist/dgraph-bootstrap.js",
     "check:design": "node scripts/check-design-docs.mjs",
     "check:scripts": "bash -n scripts/update-artemis-if-needed.sh",
     "dev": "tsx src/index.ts",

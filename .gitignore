@@ -3,6 +3,8 @@ dist/
 coverage/
 .env
 model.config.json
+dgraph-acl-secret
+hsvai-source-cache.json
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

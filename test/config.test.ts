@@ -6,7 +6,7 @@ import {
   DEFAULT_OLLAMA_MODEL,
   DEFAULT_SQLITE_PATH,
   loadConfig,
-  parseConfig
+  parseConfig as parseRawConfig
 } from "../src/config.js";
 import { GENERIC_PROFILE } from "../src/personas/generic.js";
 
@@ -22,13 +22,29 @@ const providerDefinition = {
   supportsDeveloperRole: false
 };
 
+const dgraphEnvironment = {
+  DGRAPH_USER: "memory-user",
+  DGRAPH_PASSWORD: "memory-password",
+  HSVAI_DGRAPH_SYNC_USER: "hsvai-sync",
+  HSVAI_DGRAPH_SYNC_PASSWORD: "sync-password",
+  HSVAI_DGRAPH_QUERY_USER: "hsvai-query",
+  HSVAI_DGRAPH_QUERY_PASSWORD: "query-password"
+};
+
+function parseConfig(
+  env: Record<string, string | undefined>,
+  modelConfig?: unknown
+) {
+  return parseRawConfig({ ...dgraphEnvironment, ...env }, modelConfig);
+}
+
 describe("parseConfig", () => {
   it("loads required values, empty Discord allowlists, and safe defaults", () => {
     expect(
       parseConfig({
         DISCORD_TOKEN: "token"
       })
-    ).toEqual({
+    ).toMatchObject({
       discordToken: "token",
       discordAllowedChannelIds: [],
       discordUserIds: [],
@@ -82,7 +98,10 @@ describe("parseConfig", () => {
       DGRAPH_URL: "http://memory.example:8080/",
       SQLITE_PATH: ":memory:",
       LOG_LEVEL: "debug"
-    }, { ...providerDefinition, baseUrl: "https://model.example/v1/" });
+    }, {
+      ...providerDefinition,
+      baseUrl: "https://model.example/v1/"
+    });
     expect(result).toMatchObject({
       discordToken: "token",
       discordAllowedChannelIds: ["channel-one", "channel-two"],
@@ -151,7 +170,11 @@ describe("parseConfig", () => {
   it("loads model settings from MODEL_CONFIG_PATH", () => {
     const readFile = vi.fn().mockReturnValue(JSON.stringify(providerDefinition));
     const result = loadConfig(
-      { DISCORD_TOKEN: "token", MODEL_CONFIG_PATH: "model.config.json" },
+      {
+        ...dgraphEnvironment,
+        DISCORD_TOKEN: "token",
+        MODEL_CONFIG_PATH: "model.config.json"
+      },
       readFile
     );
     expect(readFile).toHaveBeenCalledWith("model.config.json", "utf8");

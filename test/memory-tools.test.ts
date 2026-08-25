@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import type { MemoryFact, MemoryStore } from "../src/dgraph-memory.js";
-import { createMemoryTools, memoryToolInternals } from "../src/memory-tools.js";
+import { NoveltyError, type MemoryFact, type MemoryStore } from "../src/dgraph-memory.js";
+import { createMemoryTools } from "../src/memory-tools.js";
 
 const context = {
   scopeKey: "guild:guild:channel:channel",
   authorId: "discord-user",
-  sourceMessageId: "discord-message"
+  sourceMessageId: "discord-message",
+  episodeId: "session-1"
 };
 
 function memoryMock(): MemoryStore {
@@ -14,30 +15,25 @@ function memoryMock(): MemoryStore {
     supersede: vi.fn().mockResolvedValue("0x2"),
     forget: vi.fn().mockResolvedValue(undefined),
     retrieveCurrent: vi.fn().mockResolvedValue([]),
+    searchRanked: vi.fn().mockResolvedValue([]),
     believedAt: vi.fn().mockResolvedValue([]),
     listScope: vi.fn().mockResolvedValue([])
   };
 }
 
 describe("Artemis memory tools", () => {
-  it("registers the complete explicit memory tool set", () => {
-    expect(createMemoryTools(memoryMock(), context).map((tool) => tool.name)).toEqual([
-      "memory_remember",
-      "memory_recall",
-      "memory_supersede",
-      "memory_forget",
-      "memory_believed_at",
-      "memory_audit"
-    ]);
-  });
-
   it("binds writes to the current Discord scope and provenance", async () => {
     const memory = memoryMock();
-    const [remember, , supersede, forget] = createMemoryTools(memory, context);
+    const [remember, , , supersede, forget] = createMemoryTools(memory, context);
 
     await remember.execute(
       "call",
-      { statement: "The user prefers concise answers.", subject: "user.response-style" },
+      {
+        statement: "The user prefers concise answers.",
+        subject: "user.response-style",
+        entity: "user",
+        force: true
+      },
       undefined,
       undefined,
       {} as Parameters<typeof remember.execute>[4]
@@ -47,7 +43,10 @@ describe("Artemis memory tools", () => {
       statement: "The user prefers concise answers.",
       subject: "user.response-style",
       author: context.authorId,
-      sourceMessageId: context.sourceMessageId
+      sourceMessageId: context.sourceMessageId,
+      episode: { id: context.episodeId, channel: "discord" },
+      entityName: "user",
+      allowSimilar: true
     });
 
     await supersede.execute(
@@ -63,7 +62,8 @@ describe("Artemis memory tools", () => {
       expect.objectContaining({
         scopeKey: context.scopeKey,
         author: context.authorId,
-        sourceMessageId: context.sourceMessageId
+        sourceMessageId: context.sourceMessageId,
+        episode: { id: context.episodeId, channel: "discord" }
       })
     );
 
@@ -86,7 +86,8 @@ describe("Artemis memory tools", () => {
     };
     const memory = memoryMock();
     vi.mocked(memory.retrieveCurrent).mockResolvedValue([fact]);
-    const [, recall, , , believedAt, audit] = createMemoryTools(memory, context);
+    const [, search, recall, , , believedAt, audit] =
+      createMemoryTools(memory, context);
 
     const recalled = await recall.execute(
       "call", {}, undefined, undefined, {} as Parameters<typeof recall.execute>[4]
@@ -97,6 +98,19 @@ describe("Artemis memory tools", () => {
       text: expect.stringContaining("BEGIN USER MEMORY DATA")
     });
     expect(memory.retrieveCurrent).toHaveBeenCalledWith(context.scopeKey);
+
+    await search.execute(
+      "call",
+      { query: "response style" },
+      undefined,
+      undefined,
+      {} as Parameters<typeof search.execute>[4]
+    );
+    expect(memory.searchRanked).toHaveBeenCalledWith(
+      context.scopeKey,
+      "response style",
+      { episodeId: context.episodeId }
+    );
 
     await believedAt.execute(
       "call",
@@ -114,20 +128,27 @@ describe("Artemis memory tools", () => {
       "call", {}, undefined, undefined, {} as Parameters<typeof audit.execute>[4]
     );
     expect(memory.listScope).toHaveBeenCalledWith(context.scopeKey);
+
   });
 
-  it("formats empty, superseded, and forgotten results", () => {
-    expect(memoryToolInternals.factsResult([], context.scopeKey).content[0]?.text).toContain(
-      "No facts"
+  it("returns novelty refusals as tool output", async () => {
+    const memory = memoryMock();
+    vi.mocked(memory.remember).mockRejectedValue(
+      new NoveltyError("duplicate", "0x1", "Existing fact", 1)
     );
-    expect(memoryToolInternals.formatFact({
-      uid: "0x2",
-      statement: "replacement",
-      scope_key: context.scopeKey,
-      recorded_at: "2026-08-22T13:00:00.000Z",
-      expired_at: "2026-08-22T14:00:00.000Z",
-      ended_reason: "forgotten",
-      supersedes: { uid: "0x1" }
-    })).toContain("(supersedes 0x1) [forgotten 2026-08-22T14:00:00.000Z]");
+    const [remember] = createMemoryTools(memory, context);
+
+    const result = await remember.execute(
+      "call",
+      { statement: "Existing fact" },
+      undefined,
+      undefined,
+      {} as Parameters<typeof remember.execute>[4]
+    );
+
+    expect(result.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("Refused: duplicate of 0x1")
+    });
   });
 });

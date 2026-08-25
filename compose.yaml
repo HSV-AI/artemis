@@ -24,14 +24,31 @@ services:
   dgraph:
     image: dgraph/standalone:v25.4.0
     restart: unless-stopped
+    environment:
+      DGRAPH_ALPHA_ACL: secret-file=/run/secrets/dgraph-acl
     volumes:
       - dgraph-data:/dgraph
+      - ./dgraph-acl-secret:/run/secrets/dgraph-acl:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 10s
+
+  dgraph-bootstrap:
+    build:
+      context: .
+    restart: "no"
+    env_file:
+      - path: ${ARTEMIS_ENV_FILE:-.env}
+        required: true
+    environment:
+      DGRAPH_URL: http://dgraph:8080
+    command: ["node", "dist/dgraph-bootstrap.js"]
+    depends_on:
+      dgraph:
+        condition: service_healthy
 
   artemis:
     build:
@@ -43,6 +60,9 @@ services:
     environment:
       OLLAMA_BASE_URL: http://ollama:11434/v1
       DGRAPH_URL: http://dgraph:8080
+      DGRAPH_INITIAL_GROOT_PASSWORD: ""
+      DGRAPH_GROOT_PASSWORD: ""
+      HSVAI_DGRAPH_GROOT_PASSWORD: ""
       SQLITE_PATH: /data/artemis.sqlite
     volumes:
       - artemis-data:/data
@@ -53,6 +73,8 @@ services:
         condition: service_completed_successfully
       dgraph:
         condition: service_healthy
+      dgraph-bootstrap:
+        condition: service_completed_successfully
 
 volumes:
   artemis-data:

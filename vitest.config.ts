@@ -6,7 +6,10 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "json-summary"],
       include: ["src/**/*.ts"],
-      exclude: ["src/index.ts"],
+      exclude: [
+        "src/index.ts",
+        "src/dgraph-bootstrap.ts"
+      ],
       thresholds: {
         statements: 80,
         branches: 80,

@@ -29,6 +29,9 @@ const mocks = vi.hoisted(() => {
     runtimeCreate: vi.fn().mockResolvedValue(runtime),
     resourceLoaderConstructor: vi.fn(),
     loaderReload: vi.fn().mockResolvedValue(undefined),
+    hsvaiSourceConstructor: vi.fn(),
+    hsvaiInitializeAndSync: vi.fn().mockResolvedValue(undefined),
+    hsvaiCorpusRevision: vi.fn().mockResolvedValue("revision-1"),
     settings: {}
   };
 });
@@ -53,6 +56,32 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 
     public reload = mocks.loaderReload;
   }
+}));
+
+vi.mock("../src/hsvai-knowledge.js", () => ({
+  HsvaiWordPressSource: class HsvaiWordPressSource {
+    public constructor(...args: unknown[]) {
+      mocks.hsvaiSourceConstructor(...args);
+    }
+  },
+  HsvaiKnowledge: class HsvaiKnowledge {
+    public initializeAndSync = mocks.hsvaiInitializeAndSync;
+    public corpusRevision = mocks.hsvaiCorpusRevision;
+    public search = vi.fn().mockResolvedValue([]);
+    public queryDql = vi.fn().mockResolvedValue({});
+  },
+  createHsvaiKnowledgeTool: vi.fn(() => ({
+    name: "hsvai_graph_search",
+    label: "Search HSVAI Knowledge",
+    description: "Search source-grounded Huntsville AI transcripts and calendar events.",
+    promptSnippet: "Search Huntsville AI transcripts and events through their connected source graph"
+  })),
+  createHsvaiGraphQueryTool: vi.fn(() => ({
+    name: "hsvai_graph_query",
+    label: "Query HSVAI Graph",
+    description: "Run read-only DQL against Huntsville AI data.",
+    promptSnippet: "Query Huntsville AI with read-only DQL"
+  }))
 }));
 
 import { PiSdkGateway, GROUP_CHANNEL_MULTI_MESSAGE_MAX, buildSystemPrompt, piInternals } from "../src/pi-gateway.js";
@@ -97,7 +126,13 @@ function generationInput(overrides: Partial<PiGenerationInput> = {}): PiGenerati
 }
 
 function healthyFetch() {
-  return vi.fn().mockImplementation(async () => new Response('{"data":{}}', { status: 200 }));
+  const payload = Buffer.from(JSON.stringify({ exp: Math.ceil(Date.now() / 1_000) + 60 })).toString("base64url");
+  return vi.fn().mockImplementation(async (input: URL | RequestInfo) => new Response(
+    String(input).endsWith("/admin")
+      ? JSON.stringify({ data: { login: { response: { accessJWT: `header.${payload}.signature` } } } })
+      : '{"data":{}}',
+    { status: 200 }
+  ));
 }
 
 function createSessionStore(): PiSessionStore {
@@ -269,6 +304,7 @@ describe("PiSdkGateway", () => {
     mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
     mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
     mocks.loaderReload.mockResolvedValue(undefined);
+    mocks.hsvaiCorpusRevision.mockResolvedValue("revision-1");
     mocks.session.prompt.mockResolvedValue(undefined);
     mocks.session.messages = [assistant()];
     mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
@@ -285,6 +321,7 @@ describe("PiSdkGateway", () => {
     );
     await gateway.checkHealth();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(mocks.hsvaiInitializeAndSync).toHaveBeenCalledOnce();
     expect(fetchMock).toHaveBeenCalledWith(
       "http://inference/v1/models",
       expect.objectContaining({ headers: {} })
@@ -293,6 +330,46 @@ describe("PiSdkGateway", () => {
       "test-provider",
       expect.objectContaining({ api: "openai-completions", authHeader: false })
     );
+  });
+
+  it("places the HSVAI source cache beside SQLite and reports cache state", () => {
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    new PiSdkGateway(
+      {
+        ...artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+        sqlitePath: "/data/artemis.sqlite"
+      },
+      createSessionStore(),
+      healthyFetch(),
+      logger
+    );
+    const options = mocks.hsvaiSourceConstructor.mock.calls[0]?.[2] as {
+      cachePath: string;
+      reportCache: (event: {
+        state: "hit" | "repaired";
+        path: string;
+        fetchedAt: string;
+        errorMessage?: string;
+      }) => void;
+    };
+
+    expect(options.cachePath).toBe("/data/hsvai-source-cache.json");
+    options.reportCache({ state: "hit", path: options.cachePath, fetchedAt: "now" });
+    options.reportCache({
+      state: "repaired",
+      path: options.cachePath,
+      fetchedAt: "now",
+      errorMessage: "invalid cache"
+    });
+    expect(logger.info).toHaveBeenCalledWith("hsvai_source_cache_hit", {
+      path: options.cachePath,
+      fetchedAt: "now"
+    });
+    expect(logger.warn).toHaveBeenCalledWith("hsvai_source_cache_repaired", {
+      path: options.cachePath,
+      fetchedAt: "now",
+      errorMessage: "invalid cache"
+    });
   });
 
   it.each([
@@ -465,15 +542,6 @@ describe("PiSdkGateway", () => {
     });
     expect(mocks.createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({
-        tools: [
-          "web_fetch",
-          "memory_remember",
-          "memory_recall",
-          "memory_supersede",
-          "memory_forget",
-          "memory_believed_at",
-          "memory_audit"
-        ],
         customTools: expect.arrayContaining([
           expect.objectContaining({ name: "web_fetch" }),
           expect.objectContaining({ name: "memory_remember" })
@@ -517,12 +585,6 @@ describe("PiSdkGateway", () => {
     );
     await gateway.generate(generationInput());
     expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
-      tools: [
-        "web_fetch", "github_search", "github_list", "github_fetch",
-        "github_create", "github_update", "github_upload_image",
-        "memory_remember", "memory_recall", "memory_supersede",
-        "memory_forget", "memory_believed_at", "memory_audit"
-      ],
       customTools: expect.arrayContaining([
         expect.objectContaining({ name: "github_search" }),
         expect.objectContaining({ name: "github_upload_image" })
@@ -536,7 +598,10 @@ describe("PiSdkGateway", () => {
       {
         model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }),
         persona: ARTEMIS_PROFILE,
-        dgraphUrl: "http://dgraph:8080"
+        dgraphUrl: "http://dgraph:8080",
+        dgraphAuth: { username: "memory", password: "secret", namespace: 0 },
+        hsvaiDgraphSyncAuth: { username: "sync", password: "secret", namespace: 1 },
+        hsvaiDgraphQueryAuth: { username: "query", password: "secret", namespace: 1 }
       },
       createSessionStore(),
       fetchMock
@@ -622,6 +687,7 @@ describe("system prompt Discord channel limits", () => {
     mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
     mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
     mocks.loaderReload.mockResolvedValue(undefined);
+    mocks.hsvaiCorpusRevision.mockResolvedValue("revision-1");
   });
 
   it("applies channel limits only to guild sessions", async () => {
@@ -648,6 +714,23 @@ describe("system prompt Discord channel limits", () => {
       conversationKind: "dm",
       conversationKey: "dm:channel"
     }));
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
+  });
+
+  it("rebuilds the resource loader when the HSVAI corpus revision changes", async () => {
+    mocks.resourceLoaderConstructor.mockClear();
+    mocks.hsvaiCorpusRevision
+      .mockResolvedValueOnce("revision-1")
+      .mockResolvedValueOnce("revision-2");
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      vi.fn()
+    );
+
+    await gateway.generate(generationInput());
+    await gateway.generate(generationInput({ sourceMessageId: "message-2" }));
+
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
   });
 

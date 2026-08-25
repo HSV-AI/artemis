@@ -61,6 +61,7 @@ PI reasoning-effort compatibility; omission means Artemis sends no explicit
 reasoning-effort parameter. Artemis passes a selected effort when creating every
 PI session and registers the selected extended `xhigh` or `max` level for custom
 models. The legacy Ollama workflow explicitly selects `medium`.
+
 `MODEL_API_KEY` remains outside the JSON file and is attached to model discovery
 and completion requests. An empty API key sends no authorization header. In the
 legacy Ollama workflow, the default `OLLAMA_API_KEY=ollama` value remains a
@@ -105,8 +106,8 @@ No compatibility mode or migration marker is retained in the PI session.
 ## Security and privacy
 
 The model API key remains in `.env` or an operator secret mechanism and is never
-written to the model JSON example. The key is sent only to model discovery and
-completion, never to `web_fetch` targets.
+written to the model JSON example. The key is sent only to model discovery,
+completion, and never to `web_fetch` targets.
 
 `web_fetch` permits HTTP and HTTPS URLs and follows redirects. It therefore has
 network reachability equal to the Artemis process. Operators must apply runtime

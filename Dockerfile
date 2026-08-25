@@ -26,6 +26,7 @@ RUN apt-get update \
 COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
+COPY --chown=node:node data ./data
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/artemis-entrypoint
 
 ENTRYPOINT ["artemis-entrypoint"]

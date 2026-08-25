@@ -261,6 +261,7 @@ describe("ArtemisRepository", () => {
         version INTEGER PRIMARY KEY,
         applied_at TEXT NOT NULL
       );
+      CREATE TABLE sessions (id TEXT PRIMARY KEY);
       INSERT INTO schema_migrations(version, applied_at) VALUES (1, '2026-08-19T00:00:00.000Z');
       INSERT INTO schema_migrations(version, applied_at) VALUES (2, '2026-08-19T00:00:00.000Z');
     `);
@@ -292,6 +293,7 @@ describe("ArtemisRepository", () => {
         version INTEGER PRIMARY KEY,
         applied_at TEXT NOT NULL
       );
+      CREATE TABLE sessions (id TEXT PRIMARY KEY);
       INSERT INTO schema_migrations(version, applied_at)
       VALUES (1, '2026-08-19T00:00:00.000Z');
     `);

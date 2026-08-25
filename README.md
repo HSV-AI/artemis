@@ -18,6 +18,7 @@ The product and implementation baseline is documented in [design/baseline.md](de
 - After accepting a normal message, Artemis shows and refreshes Discord's typing indicator every five seconds until generation finishes. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary direct messages.
 - PI may use the explicitly registered `web_fetch` tool to read a user-provided HTTP or HTTPS page directly. When `GITHUB_TOKEN` is configured, PI may also search, list, fetch, create, and update GitHub resources and upload issue images, but only within `GITHUB_ALLOWED_REPOSITORY`. External content is labeled as untrusted and sanitized before it reaches the model; built-in coding tools remain disabled.
 - PI receives explicit Dgraph-backed tools to remember, recall, correct, forget, query past beliefs, and audit facts within the current DM or parent guild-channel scope. Memory persists across sessions.
+- PI receives a read-only GraphRAG tool over source-grounded Huntsville AI transcript and calendar evidence, including stable evidence IDs and source URLs.
 - PI and model-provider failures are written to operator logs and SQLite; nothing is sent to Discord.
 - Sessions, chat content, reasoning, and diagnostics are retained in SQLite until an operator removes them.
 - Every newly received Discord message is logged with its raw content and metadata before filtering, regardless of `LOG_LEVEL`. This includes DMs, guild messages, bot messages, unauthorized messages, and unmentioned messages.
@@ -45,7 +46,13 @@ Copy the example file and fill in the required values:
 
 ```sh
 cp .env.example .env
+openssl rand -out dgraph-acl-secret 32
 ```
+
+Generate independent random values for every blank Dgraph password in `.env`.
+Compose enables Dgraph ACL, rotates the first-start `groot/password` credential,
+creates the HSVAI namespace, and provisions least-privilege service accounts
+before Artemis starts.
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
@@ -62,13 +69,23 @@ cp .env.example .env
 | `PERSONA_PROFILE` | No | `generic` | Named profile: `generic`, `artemis`, or `wartermis`. |
 | `GITHUB_TOKEN` | No | Empty | GitHub API token. A blank value disables every GitHub tool. Grant only the repository permissions needed for the desired read or write operations. |
 | `GITHUB_ALLOWED_REPOSITORY` | No | `HSV-AI/artemis` | Comma-separated `owner/repository` allowlist. A blank list disables every GitHub tool. Matching is case-insensitive. |
-| `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint used by the memory tools. |
+| `DGRAPH_URL` | No | `http://dgraph:8080` | Dgraph Alpha HTTP endpoint used by memory and HSVAI GraphRAG. |
+| `DGRAPH_INITIAL_GROOT_PASSWORD` | No | `password` | Dgraph's first-start galaxy password, used only to rotate it. |
+| `DGRAPH_GROOT_PASSWORD` | Yes | None | Galaxy guardian password used only by `dgraph-bootstrap`. |
+| `DGRAPH_USER` | Yes | `artemis-memory` in `.env.example` | Namespace-0 memory service user. |
+| `DGRAPH_PASSWORD` | Yes | None | Memory service password. |
+| `HSVAI_DGRAPH_GROOT_PASSWORD` | Yes | None | Guardian password for the public HSVAI namespace. |
+| `HSVAI_DGRAPH_SYNC_USER` | Yes | `artemis-hsvai-sync` in `.env.example` | Public-corpus schema and ingestion user. |
+| `HSVAI_DGRAPH_SYNC_PASSWORD` | Yes | None | Public-corpus ingestion password. |
+| `HSVAI_DGRAPH_QUERY_USER` | Yes | `artemis-hsvai-query` in `.env.example` | Public-corpus read-only user used by both HSVAI tools. |
+| `HSVAI_DGRAPH_QUERY_PASSWORD` | Yes | None | Public-corpus read-only password. |
+| `HSVAI_DGRAPH_NAMESPACE` | No | `1` | Namespace containing only public HSVAI data. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable SQLite file. Compose enforces the mounted data path. |
 | `LOG_LEVEL` | No | `info` | `debug`, `info`, `warn`, or `error`. |
 
 When upgrading an existing `.env`, remove `DISCORD_GUILD_ID`, replace `AUTHORIZED_USER_ID` with `DISCORD_ALLOWED_USER_ID`, and add `DISCORD_ALLOWED_CHANNEL_ID`. Separate multiple IDs with commas; surrounding whitespace and duplicate IDs are removed. A blank user allowlist disables DMs, while a blank channel allowlist disables guild responses.
 
-Never commit `.env`, `model.config.json`, the SQLite database, model credentials, or GitHub tokens. Artemis rejects every GitHub operation outside the repository allowlist. GitHub mutations are available only when the current Discord request explicitly asks for the specific mutation.
+Never commit `.env`, `dgraph-acl-secret`, `model.config.json`, the SQLite database, model credentials, or GitHub tokens. Artemis rejects every GitHub operation outside the repository allowlist. GitHub mutations are available only when the current Discord request explicitly asks for the specific mutation.
 
 GitHub repository-scoped operations require both `owner` and `repo`, and both must match an allowlist entry. A search may omit them to search every allowed repository.
 
@@ -135,9 +152,16 @@ docker compose up --build
 
 The base Compose file starts `ollama`, the `ollama-model` pull job, Dgraph, and
 `artemis`. Deployments using another provider should layer their own Compose
-override over this file. Artemis checks the selected provider's `/models`
-endpoint and initializes the Dgraph schema before connecting to Discord. The
-[graph memory protocol](design/memory.md) defines memory behavior and retention.
+override over this file. Before connecting to Discord, Artemis validates the
+model, initializes Dgraph, and synchronizes HSVAI. See [Graph memory](design/memory.md)
+and [HSVAI GraphRAG](design/hsvai-graphrag.md) for their runtime contracts.
+
+Artemis stores the last normalized HSVAI source snapshot at
+`/data/hsvai-source-cache.json`. Restarts reuse a snapshot fetched within the
+last 24 hours without contacting `hsv.ai`. An expired, future-dated, missing, or
+invalid snapshot triggers a bounded source refresh; invalid cache data is
+replaced atomically after a successful refresh rather than treated as source
+authority.
 
 View operator logs with:
 
@@ -203,7 +227,8 @@ Global statement, branch, function, and line coverage thresholds are all enforce
 - At container startup, Artemis repairs ownership of its `/data` volume and then runs the application as the unprivileged `node` user.
 - Application logs are written as structured JSON to standard output and duplicated in SQLite's `application_logs` table. Credentials are excluded. The `discord_message_received` event intentionally includes raw message bodies from every Discord message event.
 - Chat content, model reasoning, and diagnostics are stored in SQLite and do not expire automatically.
-- Memory facts are stored in the `dgraph-data` volume and do not expire automatically. Forgetting creates an audit tombstone rather than physically deleting a fact.
+- Memory facts and the independent HSVAI source graph are stored in the `dgraph-data` volume. Memory forgetting creates an audit tombstone; HSVAI synchronization replaces only its marked public-corpus nodes when the source revision changes.
+- The normalized HSVAI source cache is stored beside SQLite in the `artemis-data` volume. Cache hits, refreshes, and repairs appear as structured `hsvai_source_cache_*` logs. A missing or expired cache still requires `hsv.ai` to be reachable.
 - If base-Compose model preparation fails, repeat the Ollama sign-in and inspect `docker compose logs ollama ollama-model`.
 - If an optional provider fails validation, inspect its `baseUrl`, `modelId`, `MODEL_API_KEY`, and `/models` response.
 - If messages are ignored, verify the allowed channel and user IDs, Message Content Intent, channel/thread permissions, and that guild messages directly mention the bot.
