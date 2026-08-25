@@ -122,9 +122,11 @@ Compose override or another runtime secret/configuration mechanism.
 `PERSONA_PROFILE` selects a named profile. The default `generic` profile defines no
 fixed identity; the bot's display name is read from the connected Discord client
 at startup and used for self-introduction, so asking the bot its name returns the
-Discord-configured name (for example KIPP). `artemis` restores the original
-Artemis identity and introduces itself as Artemis regardless of the Discord
-display name. `wartermis` selects the bundled Wartermis Works profile. Each
+Discord-configured name (for example KIPP). `artemis` selects the bundled
+curious-engineer Artemis identity — a curious, low-ego, dry-wit engineer who
+regards Wartermis as its younger sibling — and introduces itself as Artemis
+regardless of the Discord display name. `wartermis` selects the bundled
+Wartermis Works profile. Each
 complete profile lives in its own file under `src/personas/`, so identity changes
 are isolated and visible in review.
 

@@ -33,7 +33,9 @@ The default `generic` profile defines no fixed identity name. The bot's display
 name is resolved from Discord at startup and used for self-introduction, so
 asking the bot its name returns the Discord-configured name (for example KIPP)
 rather than a name hardcoded in a profile. Selecting `artemis` restores the
-original Artemis identity: the `artemis` profile owns its name and instructs
+original Artemis identity — a curious-engineer personality with an
+affectionate sibling-rivalry view of Wartermis as its younger sibling — and the
+`artemis` profile owns its name and instructs
 the model to introduce itself as Artemis regardless of the Discord display name.
 Selecting `wartermis` gives every DM and guild generation the bundled Wartermis
 identity, name, and style instructions. Slash commands do not invoke the model
