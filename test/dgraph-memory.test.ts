@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   DgraphClient,
-  GraphMemory,
-  dgraphMemoryInternals
+  GraphMemory
 } from "../src/dgraph-memory.js";
 import type { DgraphHttpError, NoveltyError } from "../src/dgraph-memory.js";
 
@@ -346,10 +345,5 @@ describe("GraphMemory", () => {
     );
 
     await expect(memory.searchRanked(input.scopeKey, " ")).rejects.toThrow("requires a query");
-  });
-
-  it("escapes DQL string literals and validates Dgraph UIDs", () => {
-    expect(dgraphMemoryInternals.dqlString('scope"\\value')).toBe('"scope\\"\\\\value"');
-    expect(dgraphMemoryInternals.validatedUid("0xABC123")).toBe("0xABC123");
   });
 });

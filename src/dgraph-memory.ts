@@ -50,10 +50,6 @@ export class DgraphClient {
     await this.request("/alter", schema, "application/dql");
   }
 
-  public async dropAttribute(attribute: string): Promise<void> {
-    await this.request("/alter", JSON.stringify({ drop_attr: attribute }));
-  }
-
   public async query<T>(dql: string, variables: Record<string, string> = {}): Promise<T> {
     const result = await this.request("/query?ro=true", JSON.stringify({ query: dql, variables }));
     return (result as { data: T }).data;
@@ -280,10 +276,6 @@ export interface MemoryStore {
   factsAboutEntity(scopeKey: string, entityName: string): Promise<MemoryFact[]>;
 }
 
-export interface GraphMemoryOptions {
-  clock?: () => Date;
-}
-
 const DUPLICATE_TOKEN_JACCARD = 0.85;
 const SIMILAR_TOKEN_JACCARD = 0.6;
 const RRF_K = 60;
@@ -358,16 +350,12 @@ function tokenJaccard(left: string, right: string): number {
 }
 
 export class GraphMemory implements MemoryStore {
-  private readonly clock: () => Date;
   private queue: Promise<unknown> = Promise.resolve();
 
   public constructor(
     private readonly client: DgraphClient,
-    options: GraphMemoryOptions | (() => Date) = {}
-  ) {
-    const normalized = typeof options === "function" ? { clock: options } : options;
-    this.clock = normalized.clock ?? (() => new Date());
-  }
+    private readonly clock: () => Date = () => new Date()
+  ) {}
 
   public async initialize(): Promise<void> {
     await this.client.alter(MEMORY_SCHEMA);
@@ -777,9 +765,3 @@ export class GraphMemory implements MemoryStore {
     return uid;
   }
 }
-
-export const dgraphMemoryInternals = {
-  dqlString,
-  tokenJaccard,
-  validatedUid
-};

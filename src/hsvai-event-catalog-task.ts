@@ -35,7 +35,7 @@ const queryClient = new DgraphClient(config.dgraphUrl, fetch, config.hsvaiDgraph
 const knowledge = new HsvaiKnowledge(
   syncClient,
   new HsvaiWordPressSource(fetch, catalog),
-  { queryClient }
+  queryClient
 );
 const result = await knowledge.initializeAndSync();
 const speakers = catalog.events.reduce((count, event) => count + event.speakers.length, 0);

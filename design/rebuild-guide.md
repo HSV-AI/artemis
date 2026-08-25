@@ -531,7 +531,7 @@ Each stage should finish with tests before the next begins.
 - Add the selected harness strategy.
 - Connect the harness's native session manager to ordered SQLite storage and complete the atomic one-time PI cutover before Discord login.
 - Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, and fixed-source HSVAI graph search; disable every built-in tool and build the system instruction from conversation kind, registered-tool metadata, and an optional per-session memory snapshot, including the Capability Gap Protocol.
-- Load the reviewed HSVAI event baseline and runtime overlay before source synchronization. Merge legacy facilitators into speakers, then project source-matched themes, speaker edges, and complete/pending status without model calls during startup.
+- Load the reviewed HSVAI event baseline and runtime overlay before source synchronization, then project source-matched themes, speaker edges, and complete/pending status without model calls during startup.
 - Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
 - Add configured provider health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.

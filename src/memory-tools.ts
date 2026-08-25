@@ -232,9 +232,3 @@ export function createMemoryTools(memory: MemoryStore, context: MemoryToolContex
     })
   ] as const;
 }
-
-export const memoryToolInternals = {
-  factsResult,
-  formatFact,
-  rankedFactsResult
-};

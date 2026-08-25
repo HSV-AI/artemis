@@ -188,10 +188,6 @@ export interface HsvaiKnowledgeSource {
   fetchDocuments(): Promise<HsvaiSourceDocument[]>;
 }
 
-export interface HsvaiKnowledgeOptions {
-  queryClient: DgraphClient;
-}
-
 interface WordPressPost {
   id: number;
   date_gmt: string;
@@ -593,20 +589,16 @@ const CHUNK_FIELDS = `
 `;
 
 export class HsvaiKnowledge {
-  private readonly queryClient: DgraphClient;
   private lexicalSnapshot: Bm25Snapshot | undefined;
 
   public constructor(
     private readonly client: DgraphClient,
     private readonly source: HsvaiKnowledgeSource,
-    options: HsvaiKnowledgeOptions
-  ) {
-    this.queryClient = options.queryClient;
-  }
+    private readonly queryClient: DgraphClient
+  ) {}
 
   public async initializeAndSync(): Promise<HsvaiKnowledgeSyncResult> {
     await this.client.alter(HSVAI_SCHEMA);
-    await this.client.dropAttribute("hsvai.facilitators");
     const documents = await this.source.fetchDocuments();
     const chunks = documents.flatMap(documentChunks);
     const entities = new Map<string, CorpusEntity>();
@@ -986,14 +978,3 @@ export function createHsvaiGraphQueryTool(
     }
   });
 }
-
-export const hsvaiKnowledgeInternals = {
-  createBm25Index,
-  chunkText,
-  documentChunks,
-  formatKnowledgeResults,
-  htmlToText,
-  rankBm25,
-  sourceRevision,
-  transcriptSpeakers
-};

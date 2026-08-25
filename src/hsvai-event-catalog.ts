@@ -29,7 +29,6 @@ export interface HsvaiEventCatalogEntry {
   sourceHash: string;
   theme: HsvaiEventTheme;
   speakers: HsvaiCatalogPerson[];
-  facilitators?: HsvaiCatalogPerson[];
 }
 
 export interface HsvaiEventCatalog {
@@ -145,20 +144,12 @@ function parseCatalog(value: unknown, path: string): HsvaiEventCatalog {
     if (!isRecord(event) || typeof event.sourceId !== "string" ||
       typeof event.sourceHash !== "string" || !isTheme(event.theme) ||
       !Array.isArray(event.speakers) || !event.speakers.every(isCatalogPerson) ||
-      (event.facilitators !== undefined &&
-        (!Array.isArray(event.facilitators) || !event.facilitators.every(isCatalogPerson))) ||
       sourceIds.has(event.sourceId)) {
       throw new Error(`Invalid HSVAI event catalog entry: ${path}`);
     }
     sourceIds.add(event.sourceId);
   }
-  return {
-    version: 1,
-    events: events.map(({ facilitators = [], ...event }) => ({
-      ...event,
-      speakers: uniquePeople([...event.speakers, ...facilitators])
-    }))
-  };
+  return { version: 1, events };
 }
 
 function parseCatalogJsonl(content: string, path: string): HsvaiEventCatalog {

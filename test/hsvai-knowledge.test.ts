@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { DgraphClient } from "../src/dgraph-memory.js";
 import { eventCatalogSourceHash } from "../src/hsvai-event-catalog.js";
@@ -6,7 +7,6 @@ import {
   createHsvaiKnowledgeTool,
   HsvaiKnowledge,
   HsvaiWordPressSource,
-  hsvaiKnowledgeInternals,
   type HsvaiKnowledgeResult,
   type HsvaiSourceDocument
 } from "../src/hsvai-knowledge.js";
@@ -61,6 +61,10 @@ const sourceDocument: HsvaiSourceDocument = {
   modifiedAt: "2026-06-20T13:42:38.000Z",
   text: "Graph Talk\nTest Speaker: Graph evidence connects retrieval to sources."
 };
+
+function sourceRevision(documents: HsvaiSourceDocument[]): string {
+  return createHash("sha256").update(JSON.stringify(documents)).digest("hex");
+}
 
 function knowledgeChunk(
   uid: string,
@@ -204,19 +208,18 @@ describe("HsvaiWordPressSource", () => {
 
 describe("HSVAI corpus construction", () => {
   it("skips an unchanged source revision", async () => {
-    const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument]);
+    const revision = sourceRevision([sourceDocument]);
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { corpus: [{ revision }] } }));
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", fetchMock),
       { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) },
-      { queryClient: new DgraphClient("http://dgraph:8080", fetchMock) }
+      new DgraphClient("http://dgraph:8080", fetchMock)
     );
 
     await expect(knowledge.initializeAndSync()).resolves.toMatchObject({ changed: false, revision });
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -246,9 +249,8 @@ describe("HSVAI graph retrieval", () => {
       text: "Neighborhood traversal follows speaker relationships."
     };
     const documents = [sourceDocument, neighborSource];
-    const revision = hsvaiKnowledgeInternals.sourceRevision(documents);
+    const revision = sourceRevision(documents);
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { corpus: [{ revision }] } }))
       .mockResolvedValueOnce(jsonResponse({ data: { chunks: [lexical] } }))
@@ -258,7 +260,7 @@ describe("HSVAI graph retrieval", () => {
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", fetchMock),
       { fetchDocuments: vi.fn().mockResolvedValue(documents) },
-      { queryClient: new DgraphClient("http://dgraph:8080", fetchMock) }
+      new DgraphClient("http://dgraph:8080", fetchMock)
     );
 
     await knowledge.initializeAndSync();
@@ -288,7 +290,7 @@ describe("HSVAI graph retrieval", () => {
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", syncFetch),
       { fetchDocuments: vi.fn() },
-      { queryClient: new DgraphClient("http://dgraph:8080", queryFetch) }
+      new DgraphClient("http://dgraph:8080", queryFetch)
     );
     const dql = `query newest($kind: string) {
       events(func: eq(hsvai.source_kind, $kind), orderdesc: hsvai.event_start, first: 1) {
@@ -304,9 +306,8 @@ describe("HSVAI graph retrieval", () => {
   });
 
   it("reads the current corpus revision through the query account", async () => {
-    const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument]);
+    const revision = sourceRevision([sourceDocument]);
     const syncFetch = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { corpus: [{ revision }] } }));
     const queryFetch = vi.fn()
@@ -316,21 +317,20 @@ describe("HSVAI graph retrieval", () => {
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", syncFetch),
       { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) },
-      { queryClient: new DgraphClient("http://dgraph:8080", queryFetch) }
+      new DgraphClient("http://dgraph:8080", queryFetch)
     );
 
     await knowledge.initializeAndSync();
     await expect(knowledge.corpusRevision()).resolves.toBe(revision);
     await expect(knowledge.corpusRevision()).rejects.toThrow("revision is unavailable");
     await expect(knowledge.corpusRevision()).rejects.toThrow("revision is invalid");
-    expect(syncFetch).toHaveBeenCalledTimes(3);
+    expect(syncFetch).toHaveBeenCalledTimes(2);
   });
 
   it("rejects a corpus revision that does not match the BM25 snapshot", async () => {
-    const indexedRevision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument]);
+    const indexedRevision = sourceRevision([sourceDocument]);
     const currentRevision = "b".repeat(64);
     const syncFetch = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { corpus: [{ revision: indexedRevision }] } }));
     const queryFetch = vi.fn()
@@ -338,7 +338,7 @@ describe("HSVAI graph retrieval", () => {
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", syncFetch),
       { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) },
-      { queryClient: new DgraphClient("http://dgraph:8080", queryFetch) }
+      new DgraphClient("http://dgraph:8080", queryFetch)
     );
 
     await knowledge.initializeAndSync();
@@ -355,7 +355,7 @@ describe("HSVAI graph retrieval", () => {
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", vi.fn()),
       { fetchDocuments: vi.fn() },
-      { queryClient: new DgraphClient("http://dgraph:8080", queryFetch) }
+      new DgraphClient("http://dgraph:8080", queryFetch)
     );
 
     await expect(knowledge.queryDql(" ")).rejects.toThrow("must not be blank");
@@ -365,15 +365,14 @@ describe("HSVAI graph retrieval", () => {
   });
 
   it("rejects blank queries and returns no evidence for no matches", async () => {
-    const revision = hsvaiKnowledgeInternals.sourceRevision([sourceDocument]);
+    const revision = sourceRevision([sourceDocument]);
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: {} }))
       .mockResolvedValueOnce(jsonResponse({ data: { corpus: [{ revision }] } }));
     const knowledge = new HsvaiKnowledge(
       new DgraphClient("http://dgraph:8080", fetchMock),
       { fetchDocuments: vi.fn().mockResolvedValue([sourceDocument]) },
-      { queryClient: new DgraphClient("http://dgraph:8080", fetchMock) }
+      new DgraphClient("http://dgraph:8080", fetchMock)
     );
     await knowledge.initializeAndSync();
     await expect(knowledge.search(" ")).rejects.toThrow("requires a query");

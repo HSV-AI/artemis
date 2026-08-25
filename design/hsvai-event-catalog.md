@@ -32,9 +32,8 @@ overlay on the existing Artemis data volume. `HSVAI_EVENT_CATALOG_PATH` may
 select a different overlay path.
 
 Each JSONL record contains source identity, modification time, SHA-256 source
-hash, one `research`, `building`, or `community` theme, and speakers. Legacy
-version-1 `facilitators` load as speakers but are not written. People retain a
-canonical graph name and source evidence; reviewed corrections use
+hash, one `research`, `building`, or `community` theme, and speakers. People
+retain a canonical graph name and source evidence; reviewed corrections use
 `provenance: operator` and need no placeholder evidence.
 
 Runtime records add or replace events by source ID and hash; an equal-hash
@@ -73,8 +72,7 @@ generated changes require review before commit.
 
 Event documents index `hsvai.theme` and `hsvai.people_status`; `hsvai.speakers`
 links the stable person entities mentioned by event chunks. Graph expansion and
-DQL can therefore connect events and transcripts without parsing prose. Startup
-drops the retired `hsvai.facilitators` predicate before synchronization.
+DQL can therefore connect events and transcripts without parsing prose.
 
 ## Configuration
 

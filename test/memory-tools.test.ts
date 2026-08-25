@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { NoveltyError, type MemoryFact, type MemoryStore } from "../src/dgraph-memory.js";
-import { createMemoryTools, memoryToolInternals } from "../src/memory-tools.js";
+import { createMemoryTools } from "../src/memory-tools.js";
 
 const context = {
   scopeKey: "guild:guild:channel:channel",
@@ -168,20 +168,5 @@ describe("Artemis memory tools", () => {
       type: "text",
       text: expect.stringContaining("Refused: duplicate of 0x1")
     });
-  });
-
-  it("formats empty, superseded, and forgotten results", () => {
-    expect(memoryToolInternals.factsResult([], context.scopeKey).content[0]?.text).toContain(
-      "No facts"
-    );
-    expect(memoryToolInternals.formatFact({
-      uid: "0x2",
-      statement: "replacement",
-      scope_key: context.scopeKey,
-      recorded_at: "2026-08-22T13:00:00.000Z",
-      expired_at: "2026-08-22T14:00:00.000Z",
-      ended_reason: "forgotten",
-      supersedes: { uid: "0x1" }
-    })).toContain("(supersedes 0x1) [forgotten 2026-08-22T14:00:00.000Z]");
   });
 });

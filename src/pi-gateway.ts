@@ -215,7 +215,7 @@ export class PiSdkGateway implements PiGateway {
     this.knowledge = new HsvaiKnowledge(
       hsvaiSync,
       new HsvaiWordPressSource(fetchImplementation, loadHsvaiEventCatalog()),
-      { queryClient: hsvaiQuery }
+      hsvaiQuery
     );
   }
 

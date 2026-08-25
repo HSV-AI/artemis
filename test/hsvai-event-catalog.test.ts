@@ -44,14 +44,6 @@ describe("HSVAI event catalog", () => {
       speakers: [{ name: "Reviewed Speaker", provenance: "operator" }]
     };
     const generated = { ...reviewed, speakers: [] };
-    const legacy = {
-      ...reviewed,
-      sourceId: "event:2",
-      sourceUrl: "https://example.test/events/2",
-      sourceHash: "b".repeat(64),
-      speakers: [],
-      facilitators: [{ name: "Legacy Facilitator", provenance: "operator" }]
-    };
     const added = {
       ...reviewed,
       sourceId: "event:3",
@@ -61,17 +53,13 @@ describe("HSVAI event catalog", () => {
     };
     writeFileSync(
       baselinePath,
-      `\n${JSON.stringify(reviewed)}\n${JSON.stringify(legacy)}\n`,
+      `\n${JSON.stringify(reviewed)}\n`,
       "utf8"
     );
     writeFileSync(runtimePath, `${JSON.stringify(generated)}\n${JSON.stringify(added)}\n`, "utf8");
 
     expect(loadHsvaiEventCatalog(baselinePath, runtimePath).events).toEqual([
       reviewed,
-      expect.objectContaining({
-        sourceId: legacy.sourceId,
-        speakers: [{ name: "Legacy Facilitator", provenance: "operator" }]
-      }),
       added
     ]);
   });
