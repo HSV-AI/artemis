@@ -5,8 +5,9 @@ import type {
   PiSessionEntryRecord,
   PiSessionStore
 } from "../src/domain.js";
-import { type PersonaProfile } from "../src/persona-profiles.js";
+import { DEFAULT_BOT_DISPLAY_NAME, type PersonaProfile } from "../src/persona-profiles.js";
 import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
+import { GENERIC_PROFILE } from "../src/personas/generic.js";
 import { WARTERMIS_PROFILE } from "../src/personas/wartermis.js";
 import { modelConfig } from "./helpers.js";
 
@@ -181,7 +182,7 @@ describe("buildSystemPrompt", () => {
   });
 
   it("registers each tool's snippet, description, and guidelines", () => {
-    const prompt = piInternals.buildSystemPrompt("dm", ARTEMIS_PROFILE, [
+    const prompt = piInternals.buildSystemPrompt("dm", ARTEMIS_PROFILE, undefined, [
       {
         name: "web_fetch",
         description: "Fetch and read the text content from a web page URL.",
@@ -204,7 +205,7 @@ describe("buildSystemPrompt", () => {
   });
 
   it("falls back to the description when a tool has no promptSnippet", () => {
-    const prompt = piInternals.buildSystemPrompt("dm", ARTEMIS_PROFILE, [
+    const prompt = piInternals.buildSystemPrompt("dm", ARTEMIS_PROFILE, undefined, [
       { name: "ad_hoc", description: "Does something useful." }
     ]);
     expect(prompt).toContain("- ad_hoc: Does something useful.");
@@ -213,11 +214,54 @@ describe("buildSystemPrompt", () => {
   it("uses the selected profile without replacing invariant instructions", () => {
     const prompt = buildSystemPrompt("guild", WARTERMIS_PROFILE);
     expect(prompt).toContain("You are Wartermis");
-    expect(prompt).not.toContain("You are Artemis,");
     expect(prompt).toContain("## Discord Channel Limits");
     expect(prompt).toContain("## Capability Gap Protocol");
     const artemisPrompt = buildSystemPrompt("dm", ARTEMIS_PROFILE);
-    expect(artemisPrompt).toContain("You are Artemis, a helpful conversational assistant");
+    expect(artemisPrompt).toContain("You are Artemis, a helpful conversational assistant in Discord");
+    const genericPrompt = buildSystemPrompt("dm", GENERIC_PROFILE);
+    expect(genericPrompt).toContain("a helpful conversational assistant in Discord");
+    expect(genericPrompt).not.toContain("You are Artemis,");
+  });
+});
+
+describe("buildSystemPrompt bot display name", () => {
+  it("injects the Discord-resolved display name for the generic default profile", () => {
+    const prompt = buildSystemPrompt("dm", GENERIC_PROFILE, "KIPP");
+    expect(prompt).toContain("Your name is KIPP");
+    expect(prompt).toContain("introduce yourself as KIPP");
+  });
+
+  it("falls back to the default name when the generic profile has no display name", () => {
+    const prompt = buildSystemPrompt("dm", GENERIC_PROFILE);
+    expect(prompt).toContain(`Your name is ${DEFAULT_BOT_DISPLAY_NAME}`);
+  });
+
+  it("treats a blank display name as absent for the generic profile", () => {
+    const prompt = buildSystemPrompt("dm", GENERIC_PROFILE, "   ");
+    expect(prompt).toContain(`Your name is ${DEFAULT_BOT_DISPLAY_NAME}`);
+    expect(prompt).not.toContain("Your name is    ");
+  });
+
+  it("prefers a selected persona name over the Discord display name", () => {
+    const artemisPrompt = buildSystemPrompt("dm", ARTEMIS_PROFILE, "KIPP");
+    expect(artemisPrompt).toContain("Your name is Artemis");
+    expect(artemisPrompt).not.toContain("Your name is KIPP");
+    const wartermisPrompt = buildSystemPrompt("dm", WARTERMIS_PROFILE, "KIPP");
+    expect(wartermisPrompt).toContain("Your name is Wartermis");
+    expect(wartermisPrompt).not.toContain("Your name is KIPP");
+  });
+
+  it("uses the selected persona name when no display name is provided", () => {
+    const prompt = buildSystemPrompt("dm", ARTEMIS_PROFILE);
+    expect(prompt).toContain("Your name is Artemis");
+  });
+
+  it("places the identity block before the persona instructions", () => {
+    const prompt = buildSystemPrompt("dm", GENERIC_PROFILE, "KIPP");
+    const nameIndex = prompt.indexOf("Your name is KIPP");
+    const instructionsIndex = prompt.indexOf("a helpful conversational assistant");
+    expect(nameIndex).toBeGreaterThanOrEqual(0);
+    expect(instructionsIndex).toBeGreaterThan(nameIndex);
   });
 });
 
@@ -688,5 +732,30 @@ describe("system prompt Discord channel limits", () => {
     await gateway.generate(generationInput({ sourceMessageId: "message-2" }));
 
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledTimes(2);
+  });
+
+  it("rebuilds the cached system prompt when the bot display name is set", async () => {
+    mocks.resourceLoaderConstructor.mockClear();
+    mocks.session.messages = [assistant()];
+    mocks.session.prompt.mockResolvedValue(undefined);
+    mocks.createAgentSession.mockResolvedValue({ session: mocks.session, extensionsResult: {} });
+    const gateway = new PiSdkGateway(
+      { model: modelConfig({ baseUrl: "http://inference/v1", modelId: "model" }), persona: GENERIC_PROFILE },
+      createSessionStore(),
+      vi.fn()
+    );
+    await gateway.generate(generationInput());
+    const firstOptions = mocks.resourceLoaderConstructor.mock.calls.at(-1)?.[0] as
+      | { systemPrompt?: string }
+      | undefined;
+    expect(firstOptions?.systemPrompt).toContain(`Your name is ${DEFAULT_BOT_DISPLAY_NAME}`);
+
+    gateway.setBotDisplayName("KIPP");
+    await gateway.generate(generationInput());
+    const secondOptions = mocks.resourceLoaderConstructor.mock.calls.at(-1)?.[0] as
+      | { systemPrompt?: string }
+      | undefined;
+    expect(secondOptions?.systemPrompt).toContain("Your name is KIPP");
+    expect(secondOptions?.systemPrompt).not.toContain("Your name is Artemis");
   });
 });

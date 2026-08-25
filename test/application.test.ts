@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { Collection, Events, type Client } from "discord.js";
 import { ArtemisApplication } from "../src/application.js";
 import type { ArtemisConfig } from "../src/config.js";
 import type { DiscordGateway } from "../src/discord-gateway.js";
@@ -104,5 +106,31 @@ describe("ArtemisApplication", () => {
       2,
       expect.objectContaining({ level: "info", event: "artemis_stopped" })
     );
+  });
+
+  it("wires the Discord bot display name into the PI gateway on ready", async () => {
+    const client = new EventEmitter();
+    Object.assign(client, {
+      login: vi.fn().mockResolvedValue("token"),
+      destroy: vi.fn(),
+      user: { id: "kipp-user", username: "kipp_bot", globalName: "KIPP" },
+      application: { commands: { set: vi.fn().mockResolvedValue(new Collection()) } }
+    });
+    const pi = createPiMock();
+    const repository = { close: vi.fn() } as unknown as ArtemisRepository;
+    const application = new ArtemisApplication(config, {
+      pi,
+      repository,
+      logger: createLoggerMock(),
+      discordClient: client as unknown as Client
+    });
+
+    await application.start();
+    client.emit(Events.ClientReady, client);
+    await Promise.resolve();
+
+    expect(pi.setBotDisplayName).toHaveBeenCalledWith("KIPP");
+
+    application.stop();
   });
 });

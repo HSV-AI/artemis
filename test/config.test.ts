@@ -8,7 +8,7 @@ import {
   loadConfig,
   parseConfig as parseRawConfig
 } from "../src/config.js";
-import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
+import { GENERIC_PROFILE } from "../src/personas/generic.js";
 
 const providerDefinition = {
   providerId: "configured-provider",
@@ -62,7 +62,7 @@ describe("parseConfig", () => {
         maxTokens: 65_536,
         supportsDeveloperRole: false
       },
-      persona: ARTEMIS_PROFILE,
+      persona: GENERIC_PROFILE,
       githubToken: "",
       githubAllowedRepositories: DEFAULT_GITHUB_ALLOWED_REPOSITORIES,
       dgraphUrl: DEFAULT_DGRAPH_URL,
@@ -199,13 +199,15 @@ describe("parseConfig", () => {
   });
 
   it("selects a named persona profile", () => {
-    const result = parseConfig({ DISCORD_TOKEN: "token", PERSONA_PROFILE: " WARTERMIS " });
-    expect(result.persona.id).toBe("wartermis");
+    expect(parseConfig({ DISCORD_TOKEN: "token" }).persona.id).toBe("generic");
+    expect(parseConfig({ DISCORD_TOKEN: "token", PERSONA_PROFILE: " GENERIC " }).persona.id).toBe("generic");
+    expect(parseConfig({ DISCORD_TOKEN: "token", PERSONA_PROFILE: " WARTERMIS " }).persona.id).toBe("wartermis");
+    expect(parseConfig({ DISCORD_TOKEN: "token", PERSONA_PROFILE: " artemis " }).persona.id).toBe("artemis");
   });
 
   it("rejects an unknown persona profile", () => {
     expect(() => parseConfig({ DISCORD_TOKEN: "token", PERSONA_PROFILE: "unknown" })).toThrow(
-      "PERSONA_PROFILE must be one of artemis, wartermis"
+      "PERSONA_PROFILE must be one of artemis, generic, wartermis"
     );
   });
 

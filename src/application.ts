@@ -1,3 +1,4 @@
+import type { Client } from "discord.js";
 import type { ArtemisConfig } from "./config.js";
 import { ConversationService } from "./conversation-service.js";
 import { DiscordGateway } from "./discord-gateway.js";
@@ -11,6 +12,7 @@ export interface ApplicationDependencies {
   repository?: ArtemisRepository;
   pi?: PiGateway;
   discord?: DiscordGateway;
+  discordClient?: Client;
 }
 
 export class ArtemisApplication {
@@ -46,10 +48,12 @@ export class ArtemisApplication {
           channelIds: config.discordAllowedChannelIds,
           userIds: config.discordUserIds,
           suppressEmbeds: config.discordSuppressEmbeds,
-          embedsAllowedChannelIds: config.discordEmbedsAllowedChannelIds
+          embedsAllowedChannelIds: config.discordEmbedsAllowedChannelIds,
+          onBotIdentity: (name) => this.pi.setBotDisplayName(name)
         },
         conversations,
-        this.logger
+        this.logger,
+        dependencies.discordClient
       );
   }
 

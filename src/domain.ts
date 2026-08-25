@@ -123,6 +123,7 @@ export interface PiGenerationResult {
 export interface PiGateway {
   checkHealth(): Promise<void>;
   generate(input: PiGenerationInput): Promise<PiGenerationResult>;
+  setBotDisplayName(name: string): void;
 }
 
 export interface LogFields {
