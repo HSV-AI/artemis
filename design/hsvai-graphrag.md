@@ -71,9 +71,8 @@ ingestion outside the event-catalog contract.
 The normalized source graph and its revision marker persist in the dedicated
 HSVAI namespace inside the existing Dgraph volume. Dgraph ACL prevents that
 namespace from reading namespace-0 memory facts. It is independent of SQLite
-sessions.
-The reviewed event-catalog baseline is a checked-in artifact, and its optional
-runtime overlay persists in the Artemis data volume. Neither stores Dgraph UIDs.
+sessions. The reviewed event catalog is a checked-in artifact and stores no
+Dgraph UIDs.
 The BM25 index is rebuilt in process from the normalized chunks
 on every startup, bound to the resulting corpus revision, and not persisted as a
 separate artifact.
@@ -83,7 +82,7 @@ separate artifact.
 Startup performs these steps before Discord connects:
 
 1. Apply the additive HSVAI Dgraph schema.
-2. Load and validate the event-catalog baseline and optional runtime overlay.
+2. Load and validate the checked-in event catalog.
 3. Fetch every transcript post and event page from the JSON APIs, applying only
    catalog records whose source hash matches.
 4. Normalize and chunk the corpus, compute a SHA-256 revision over the normalized
@@ -96,9 +95,6 @@ Startup performs these steps before Discord connects:
 Writing the revision last makes an interrupted rebuild visibly incomplete. A
 later startup rebuilds it again. Source or Dgraph failures abort
 startup rather than exposing a partial corpus to Discord.
-
-Catalog enrichment is not part of startup. The operator-only task and its
-stop/run/restart contract are defined by [HSVAI event catalog](hsvai-event-catalog.md).
 
 ## Retrieval And Tool Contract
 
@@ -158,7 +154,6 @@ inference.
 | `HSVAI_DGRAPH_NAMESPACE` | `1` | Namespace containing only the public corpus. |
 | `HSVAI_DGRAPH_SYNC_USER` / `HSVAI_DGRAPH_SYNC_PASSWORD` | Required | Write and schema credentials used only for synchronization. |
 | `HSVAI_DGRAPH_QUERY_USER` / `HSVAI_DGRAPH_QUERY_PASSWORD` | Required | Read-only credentials used by both HSVAI tools. |
-| `HSVAI_EVENT_CATALOG_PATH` | `/data/hsvai-event-catalog.jsonl` | Durable runtime catalog overlay read by startup and written by the operator task. |
 
 ## Security And Privacy
 

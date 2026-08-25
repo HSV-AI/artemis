@@ -152,15 +152,6 @@ View operator logs with:
 docker compose logs -f artemis ollama dgraph
 ```
 
-Refresh the reviewed HSVAI event catalog only while Artemis is stopped. The
-restart rebuilds its process-local BM25 snapshot from the refreshed corpus:
-
-```sh
-docker compose stop artemis
-docker compose run --rm artemis npm run catalog:hsvai-events
-docker compose up -d artemis
-```
-
 Stop without deleting durable data:
 
 ```sh

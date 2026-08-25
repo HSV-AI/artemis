@@ -27,7 +27,7 @@ The following behavior is fixed:
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Group/channel (guild) assistant responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) self-contained Discord messages per turn. DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind (`guild` vs `dm`).
 - Base Compose retains Ollama as a separate service, the model-preparation job, persistent ACL-enabled Dgraph, a one-shot namespace bootstrap, and Artemis. An optional provider-specific Compose path may omit Ollama while retaining Dgraph and its bootstrap.
-- Startup loads the HSVAI catalog baseline and optional runtime overlay without model enrichment; see [HSVAI event catalog](hsvai-event-catalog.md).
+- Startup loads the checked-in HSVAI event catalog without model enrichment; see [HSVAI event catalog](hsvai-event-catalog.md).
 
 The following may be replaced:
 
@@ -326,12 +326,10 @@ Dgraph is the durable system of record for memory facts. Its named volume
 survives process and Compose restarts. Apply the additive fact schema before
 Discord login; fail startup if that operation fails.
 
-The application image must contain the reviewed HSVAI event-catalog baseline.
-Load an optional overlay from `/data/hsvai-event-catalog.jsonl`, or
-`HSVAI_EVENT_CATALOG_PATH` when set. Overlay records replace baseline records by
-source ID, but apply only when their source hash matches the normalized event.
-Malformed catalog data fails loudly; stale records produce pending event
-metadata rather than stale graph edges.
+The application image must contain the reviewed HSVAI event catalog. Records
+apply only when their source hash matches the normalized event. Malformed data
+fails loudly; stale records produce pending metadata rather than stale graph
+edges.
 
 The minimal logical schema is:
 
@@ -465,7 +463,6 @@ Load local environment configuration from `.env` or the process environment, opt
 | `HSVAI_DGRAPH_SYNC_USER` / `HSVAI_DGRAPH_SYNC_PASSWORD` | Yes | None | Public-corpus schema and ingestion account with `dgraph.all=7`. |
 | `HSVAI_DGRAPH_QUERY_USER` / `HSVAI_DGRAPH_QUERY_PASSWORD` | Yes | None | Public-corpus query account with `dgraph.all=4`. The query and sync usernames must differ. |
 | `HSVAI_DGRAPH_NAMESPACE` | No | `1` | Positive namespace ID containing the public HSVAI corpus. |
-| `HSVAI_EVENT_CATALOG_PATH` | No | `/data/hsvai-event-catalog.jsonl` | Durable event-catalog overlay read at startup and written by the operator refresh task. |
 | `SQLITE_PATH` | No | `/data/artemis.sqlite` | Durable database path. |
 | `LOG_LEVEL` | No | `info` | Minimum routine level: `debug`, `info`, `warn`, or `error`. |
 
@@ -528,7 +525,7 @@ Each stage should finish with tests before the next begins.
 - Add the selected harness strategy.
 - Connect the harness's native session manager to ordered SQLite storage and complete the atomic one-time PI cutover before Discord login.
 - Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, and fixed-source HSVAI graph search; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
-- Load the reviewed HSVAI event baseline and runtime overlay before source synchronization, then project source-matched themes, speaker edges, and complete/pending status without model calls during startup.
+- Load the reviewed HSVAI event catalog before source synchronization, then project source-matched themes, speaker edges, and complete/pending status without model calls.
 - Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
 - Add configured provider health/model validation.
 - Normalize response text, reasoning, diagnostics, and actual response model.
@@ -624,8 +621,8 @@ After automated tests pass:
 9. Force a model failure and confirm Discord receives nothing while console and SQLite contain correlated diagnostics.
 10. Inspect the SQLite volume and confirm conversations, sessions, messages, events, application logs, and incoming-message audit rows are durable.
 11. Explicitly remember and recall a non-sensitive fact, clear the PI session, and confirm the fact remains available only in the same DM or parent guild channel.
-12. Stop Artemis, run `npm run catalog:hsvai-events`, restart, and query one
-    event's theme and speakers through the read-only HSVAI account.
+12. Query one reviewed event's theme and speakers through the read-only HSVAI
+    account.
 
 Use test Discord credentials and non-sensitive content for this check because raw messages and model metadata are retained indefinitely.
 
