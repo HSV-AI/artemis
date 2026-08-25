@@ -161,7 +161,7 @@ Within a guild, any user's message may trigger Artemis when it originates in one
 
 #### Conversation coordinator
 
-The coordinator maps a normalized Discord event to a stable conversation key, restores or creates the corresponding durable PI session, submits the message, persists the result, and returns the response to Discord. [Native PI session persistence](pi-session-persistence.md) owns the detailed entry and migration lifecycle.
+The coordinator maps a normalized Discord event to a stable conversation key, restores or creates the corresponding durable PI session, submits the message, persists the result, and returns the response to Discord. [Native PI session persistence](pi-session-persistence.md) owns the detailed entry lifecycle and minimum supported database state.
 
 Conversation keys are namespaced by context:
 
@@ -202,7 +202,7 @@ SQLite stores all durable conversational data. A minimal logical schema includes
 
 Foreign keys and WAL mode are enabled. Conversation keys, source Discord message IDs, and incoming-message Discord IDs are uniquely constrained. Conversation/session creation, source-message batches, assistant insertion, and session clearing are individually transactional. Accepted source messages remain stored when generation fails; a failed turn never creates an assistant row.
 
-The SQLite file lives on a persistent Docker volume and remains available across container restarts and upgrades. Schema migrations run before Discord connects and must be backward-safe for existing local data.
+The SQLite file lives on a persistent Docker volume and remains available across container restarts and upgrades. Schema migration runs before Discord connects. A fresh empty database bootstraps to the current schema (migrations 1 through 5) in one transaction. A verified migration-5 database opens without modification. An existing database whose `schema_migrations` table has rows but lacks migration 5 is a pre-cutover database that Artemis no longer supports; startup rejects it with an actionable operator error and writes nothing. Migrations 4 and 5 are preserved as historical database facts rather than re-runnable incremental steps. See [Native PI session persistence](pi-session-persistence.md) for the steady-state contract and minimum supported database state.
 
 Memory facts, episodes, and entity links are stored in Dgraph namespace `0` under the same stable conversation key. The public HSVAI corpus occupies a separate authenticated namespace in the same `dgraph-data` volume. The reviewed event catalog ships in the image. An exact versioned cache of normalized raw HSVAI source documents persists beside SQLite on the Artemis data volume and is reused for 24 hours; catalog-derived fields are reapplied after each cache load and never serialized into that cache. The volumes survive restarts and `/clear-session`; memory has no automatic expiration, and correction or forgetting retains ended facts for audit.
 
@@ -225,7 +225,7 @@ Base Docker Compose contains `ollama`, the one-shot `ollama-model` pull job, ACL
 ### Startup
 
 1. Load and validate environment configuration.
-2. Open SQLite, enable foreign keys, and apply migrations.
+2. Open SQLite, enable foreign keys, and apply schema migration. A fresh empty database bootstraps to the current schema (migrations 1 through 5) in one transaction. A verified migration-5 database opens without modification. An existing database missing migration 5 fails startup with an actionable operator error and no partial writes.
 3. Load the model provider definition and health-check its OpenAI-compatible `/models` endpoint.
 4. Apply the Dgraph memory schema and fail if Dgraph is unavailable.
 5. Load a fresh normalized HSVAI source cache or refresh it through bounded requests, then synchronize the transcript and event corpus and apply its Dgraph schema.
@@ -287,6 +287,7 @@ Transient Discord disconnects rely on the Discord client's resume and reconnect 
 
 - Invalid or missing required configuration: fail startup with actionable field names and no secret values.
 - SQLite unavailable or migration failure: fail startup; do not accept messages without persistence.
+- Existing database missing migration 5: fail startup with an actionable operator error before Discord connects; do not mark it migrated, replay its normalized transcript, discard its history, or make any partial writes.
 - Model provider unavailable during startup validation: report the provider/model failure and remain unhealthy.
 - Model provider or PI failure during a turn: persist the normalized error name and message with correlation IDs, but send nothing to Discord.
 - Required Dgraph schema initialization failure: fail startup before Discord login. A Dgraph tool failure during a turn follows the PI failure path.
@@ -340,7 +341,7 @@ Required tests include:
 - Configuration defaults and validation behave as documented, including the default model.
 - Persistence transactions, migrations, and error paths preserve the last valid session state.
 - Native PI tool results, compactions, tree relationships, model state, and exact new-turn usage survive gateway reconstruction and application restart without normalized-history replay.
-- The one-time PI cutover converts every existing logical session, including empty sessions, preserves all available normalized history, commits atomically, and records migration 5 only after no unconverted session remains.
+- No runtime code reads normalized messages to construct PI context; a fresh empty database bootstraps to the current schema (migrations 1 through 5), a verified migration-5 database opens without modification, and an existing database missing migration 5 fails startup with actionable guidance and no partial writes.
 - PI or model-provider failures are logged without creating an assistant turn or sending a Discord response.
 - Only `web_fetch`, token-gated GitHub tools, and scoped memory tools are enabled; `web_fetch` and GitHub tools sanitize external content, all populate the Available Tools prompt registry and include the Capability Gap Protocol, and none enable built-in coding tools.
 - Every Discord message is emitted through the log-level-independent audit path and deduplicated in `incoming_messages` before conversation filtering.

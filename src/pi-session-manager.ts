@@ -13,20 +13,14 @@ import {
   type SessionTreeNode
 } from "@earendil-works/pi-coding-agent";
 import type {
-  AssistantMessage,
-  AssistantMessageDiagnostic,
   ImageContent,
-  Message,
   TextContent,
   Usage
 } from "@earendil-works/pi-ai";
 import type {
   PiSessionEntryRecord,
-  PiSessionMigrationSource,
-  PiSessionStore,
-  StoredMessage
+  PiSessionStore
 } from "./domain.js";
-import { formatDiscordMessage } from "./model-context.js";
 
 /**
  * Public PI methods exercised by Artemis's create-session, prompt, extension,
@@ -77,51 +71,6 @@ function createEntryId(existing: ReadonlyMap<string, unknown> | ReadonlySet<stri
   return randomUUID();
 }
 
-function emptyUsage(): Usage {
-  return {
-    input: 0,
-    output: 0,
-    cacheRead: 0,
-    cacheWrite: 0,
-    totalTokens: 0,
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
-  };
-}
-
-function storedToPiMessageForMigration(
-  message: StoredMessage,
-  providerId: string,
-  fallbackModel: string
-): Message {
-  const timestamp = Date.parse(message.createdAt);
-  if (message.role === "user") {
-    return {
-      role: "user",
-      content: formatDiscordMessage(message),
-      timestamp
-    };
-  }
-
-  const content: AssistantMessage["content"] = [];
-  if (message.reasoning) {
-    content.push({ type: "thinking", thinking: message.reasoning });
-  }
-  content.push({ type: "text", text: message.content });
-  return {
-    role: "assistant",
-    content,
-    api: "openai-completions",
-    provider: providerId,
-    model: message.model ?? fallbackModel,
-    ...(Array.isArray(message.diagnostics)
-      ? { diagnostics: message.diagnostics as AssistantMessageDiagnostic[] }
-      : {}),
-    usage: emptyUsage(),
-    stopReason: "stop",
-    timestamp
-  };
-}
-
 function toEntryRecord(entry: FileEntry): PiSessionEntryRecord {
   if (entry.type === "session") {
     return { entryType: entry.type, rawJson: JSON.stringify(entry) };
@@ -141,53 +90,6 @@ function parseEntries(sessionId: string, rawEntries: string[]): FileEntry[] {
     throw new Error(`PI session has an invalid header: ${sessionId}`);
   }
   return entries;
-}
-
-function buildMigrationEntries(
-  source: PiSessionMigrationSource,
-  cwd: string,
-  providerId: string,
-  fallbackModel: string
-): FileEntry[] {
-  const entries: FileEntry[] = [
-    {
-      type: "session",
-      version: CURRENT_SESSION_VERSION,
-      id: source.sessionId,
-      timestamp: source.createdAt,
-      cwd
-    }
-  ];
-  const ids = new Set<string>();
-  let parentId: string | null = null;
-  for (const message of source.messages) {
-    const id = createEntryId(ids);
-    ids.add(id);
-    entries.push({
-      type: "message",
-      id,
-      parentId,
-      timestamp: message.createdAt,
-      message: storedToPiMessageForMigration(message, providerId, fallbackModel)
-    });
-    parentId = id;
-  }
-  return entries;
-}
-
-export function migrateExistingPiSessions(
-  store: PiSessionStore,
-  cwd: string,
-  providerId: string,
-  fallbackModel: string
-): number {
-  const sources = store.listPiSessionMigrationSources();
-  return store.completePiSessionMigration(
-    sources.map((source) => ({
-      sessionId: source.sessionId,
-      entries: buildMigrationEntries(source, cwd, providerId, fallbackModel).map(toEntryRecord)
-    }))
-  );
 }
 
 /**
@@ -539,9 +441,3 @@ export class SqlitePiSessionManager implements PiSessionManagerRuntimeContract {
 export function asPiSessionManager(manager: SqlitePiSessionManager): SessionManager {
   return manager as unknown as SessionManager;
 }
-
-export const piSessionInternals = {
-  buildMigrationEntries,
-  storedToPiMessageForMigration,
-  toEntryRecord
-};

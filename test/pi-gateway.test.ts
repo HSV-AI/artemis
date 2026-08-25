@@ -137,7 +137,6 @@ function healthyFetch() {
 
 function createSessionStore(): PiSessionStore {
   const sessions = new Map<string, { rawEntries: string[] }>();
-  let migrationComplete = false;
   return {
     loadPiSession: vi.fn((sessionId) => sessions.get(sessionId)),
     createPiSession: vi.fn((sessionId, entries) => {
@@ -154,17 +153,6 @@ function createSessionStore(): PiSessionStore {
       const session = sessions.get(sessionId);
       if (!session) throw new Error(`missing session ${sessionId}`);
       session.rawEntries = entries.map((entry: PiSessionEntryRecord) => entry.rawJson);
-    }),
-    listPiSessionMigrationSources: vi.fn(() => []),
-    completePiSessionMigration: vi.fn((migrations) => {
-      if (migrationComplete) return 0;
-      for (const migration of migrations) {
-        sessions.set(migration.sessionId, {
-          rawEntries: migration.entries.map((entry: PiSessionEntryRecord) => entry.rawJson)
-        });
-      }
-      migrationComplete = true;
-      return migrations.length;
     })
   };
 }
@@ -425,46 +413,6 @@ describe("PiSdkGateway", () => {
     expect(mocks.createAgentSession.mock.calls[0]?.[0]).not.toHaveProperty("thinkingLevel");
   });
 
-  it("completes the one-time PI session cutover before startup health completes", async () => {
-    const sessionStore = createSessionStore();
-    vi.mocked(sessionStore.listPiSessionMigrationSources).mockReturnValue([
-      {
-        sessionId: "legacy",
-        createdAt: "2026-08-20T00:00:00.000Z",
-        messages: [
-          {
-            id: 1,
-            sessionId: "legacy",
-            discordMessageId: "message",
-            authorId: "user",
-            authorName: "User",
-            role: "user",
-            content: "old context",
-            createdAt: "2026-08-20T00:00:01.000Z"
-          }
-        ]
-      }
-    ]);
-    const gateway = new PiSdkGateway(
-      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
-      sessionStore,
-      vi.fn().mockResolvedValue(new Response("{}", { status: 200 }))
-    );
-
-    await gateway.checkHealth();
-
-    expect(sessionStore.completePiSessionMigration).toHaveBeenCalledWith([
-      expect.objectContaining({
-        sessionId: "legacy",
-        entries: expect.arrayContaining([
-          expect.objectContaining({
-            entryType: "message",
-            rawJson: expect.stringContaining("old context")
-          })
-        ])
-      })
-    ]);
-  });
   it("preserves unauthenticated access for the legacy Ollama placeholder", async () => {
     const fetchMock = healthyFetch();
     const gateway = new PiSdkGateway(

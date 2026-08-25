@@ -17,6 +17,6 @@ This directory is the authoritative design record for Artemis. Start with the ba
 - [Dgraph access control and namespaces](dgraph-access-control.md) — ACL bootstrap, namespace isolation, service accounts, JWT clients, and migration boundaries.
 - [HSVAI GraphRAG](hsvai-graphrag.md) — source-grounded retrieval over Huntsville AI transcripts and calendar events.
 - [HSVAI event catalog](hsvai-event-catalog.md) — reviewed, source-matched event themes and people.
-- [Native PI session persistence](pi-session-persistence.md) — ordered SQLite storage for native PI entries, restart recovery, clear-session lifecycle, and the one-time database cutover.
+- [Native PI session persistence](pi-session-persistence.md) — ordered SQLite storage for native PI entries, restart recovery, clear-session lifecycle, and the post-cutover minimum supported database state.
 
 Every Markdown document in this directory must appear in this index. Every protocol or major-feature document must also be summarized and linked from the baseline.

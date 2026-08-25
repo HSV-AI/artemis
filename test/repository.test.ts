@@ -251,40 +251,95 @@ describe("ArtemisRepository", () => {
     expect(stored?.parentChannelId).toBeUndefined();
   });
 
-  it("adds incoming message storage when upgrading a version-two database", () => {
-    const directory = mkdtempSync(join(tmpdir(), "artemis-incoming-migration-"));
+  it("bootstraps a fresh empty database with the current schema and migrations 1 through 5", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-bootstrap-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "artemis.sqlite");
-    const database = new Database(path);
-    database.exec(`
-      CREATE TABLE schema_migrations (
-        version INTEGER PRIMARY KEY,
-        applied_at TEXT NOT NULL
-      );
-      CREATE TABLE sessions (id TEXT PRIMARY KEY);
-      INSERT INTO schema_migrations(version, applied_at) VALUES (1, '2026-08-19T00:00:00.000Z');
-      INSERT INTO schema_migrations(version, applied_at) VALUES (2, '2026-08-19T00:00:00.000Z');
-    `);
+    repository = new ArtemisRepository(path);
+    repository.close();
+    repository = undefined;
+
+    const database = new Database(path, { readonly: true });
+    const versions = database
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all() as { version: number }[];
+    const tables = database
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+      .all() as { name: string }[];
+    const piSessionColumns = database.prepare("PRAGMA table_info(pi_sessions)").all() as { name: string }[];
     database.close();
 
-    repository = new ArtemisRepository(path);
-    expect(() =>
-      repository?.logIncomingMessage({
-        discordMessageId: "after-upgrade",
-        channelId: "channel",
-        authorId: "user",
-        isBot: false,
-        mentionsBot: false,
-        repliesToBot: false,
-        content: "logged after migration",
-        createdAt: "2026-08-19T00:00:00.000Z"
-      })
-    ).not.toThrow();
-    expect(repository?.hasIncomingMessage("after-upgrade")).toBe(true);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(tables.map((row) => row.name)).toEqual(
+      expect.arrayContaining([
+        "conversations",
+        "sessions",
+        "messages",
+        "events",
+        "application_logs",
+        "incoming_messages",
+        "pi_sessions",
+        "pi_session_entries",
+        "schema_migrations"
+      ])
+    );
+    expect(piSessionColumns.map((column) => column.name)).toEqual([
+      "session_id",
+      "next_ordinal",
+      "created_at",
+      "updated_at"
+    ]);
   });
 
-  it("adds log storage when upgrading a version-one database", () => {
-    const directory = mkdtempSync(join(tmpdir(), "artemis-migration-"));
+  it("starts a verified migration-5 database without modification or conversion work", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-steady-state-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const identity = { key: "dm:steady", kind: "dm" as const, channelId: "steady" };
+    const session = repository.getOrCreateSession(identity, "model");
+    repository.insertSourceMessages(session.id, [
+      {
+        discordMessageId: "steady-1",
+        authorId: "user",
+        authorName: "User",
+        role: "user",
+        content: "steady state",
+        createdAt: "2026-08-20T00:00:00.000Z"
+      }
+    ]);
+    repository.insertAssistant(session.id, { text: "ack", model: "model" });
+    repository.close();
+    repository = undefined;
+
+    const before = new Database(path, { readonly: true });
+    const beforeVersions = before
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all() as { version: number }[];
+    const beforeMessages = before
+      .prepare("SELECT content FROM messages ORDER BY id")
+      .all() as { content: string }[];
+    before.close();
+
+    repository = new ArtemisRepository(path);
+    expect(repository.getHistory(session.id).map((message) => message.content)).toEqual(
+      beforeMessages.map((row) => row.content)
+    );
+    repository.close();
+    repository = undefined;
+
+    const after = new Database(path, { readonly: true });
+    const afterVersions = after
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all() as { version: number }[];
+    after.close();
+
+    expect(beforeVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("rejects an existing pre-migration database missing migration 5 with actionable guidance and no partial writes", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-pre-migration-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "artemis.sqlite");
     const database = new Database(path);
@@ -293,19 +348,60 @@ describe("ArtemisRepository", () => {
         version INTEGER PRIMARY KEY,
         applied_at TEXT NOT NULL
       );
-      CREATE TABLE sessions (id TEXT PRIMARY KEY);
-      INSERT INTO schema_migrations(version, applied_at)
-      VALUES (1, '2026-08-19T00:00:00.000Z');
+      INSERT INTO schema_migrations(version, applied_at) VALUES (1, '2026-08-19T00:00:00.000Z');
+      INSERT INTO schema_migrations(version, applied_at) VALUES (2, '2026-08-19T00:00:00.000Z');
+      INSERT INTO schema_migrations(version, applied_at) VALUES (3, '2026-08-19T00:00:00.000Z');
+      INSERT INTO schema_migrations(version, applied_at) VALUES (4, '2026-08-19T00:00:00.000Z');
+      CREATE TABLE conversations (
+        id TEXT PRIMARY KEY,
+        conversation_key TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        guild_id TEXT,
+        channel_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        discord_message_id TEXT UNIQUE,
+        thread_id TEXT,
+        role TEXT NOT NULL,
+        author_id TEXT,
+        author_name TEXT,
+        content TEXT NOT NULL,
+        reasoning TEXT,
+        diagnostics_json TEXT,
+        model TEXT,
+        created_at TEXT NOT NULL
+      );
     `);
     database.close();
 
-    repository = new ArtemisRepository(path);
-    expect(() =>
-      repository?.recordLog({
-        timestamp: "2026-08-19T12:00:00.000Z",
-        level: "info",
-        event: "upgraded"
-      })
-    ).not.toThrow();
+    expect(() => {
+      repository = new ArtemisRepository(path);
+    }).toThrow(/migration 5/);
+
+    const reopened = new Database(path, { readonly: true });
+    const versions = reopened
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all() as { version: number }[];
+    const piTables = reopened
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'pi_%' ORDER BY name"
+      )
+      .all() as { name: string }[];
+    reopened.close();
+
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4]);
+    expect(piTables).toEqual([]);
   });
 });

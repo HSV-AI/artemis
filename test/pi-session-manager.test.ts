@@ -4,12 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage, ToolResultMessage, Usage, UserMessage } from "@earendil-works/pi-ai";
 import Database from "better-sqlite3";
-import type { PiSessionStore, SourceMessage, StoredMessage } from "../src/domain.js";
-import {
-  migrateExistingPiSessions,
-  piSessionInternals,
-  SqlitePiSessionManager
-} from "../src/pi-session-manager.js";
+import type { PiSessionStore } from "../src/domain.js";
+import { SqlitePiSessionManager } from "../src/pi-session-manager.js";
 import { ArtemisRepository } from "../src/repository.js";
 
 const exactUsage: Usage = {
@@ -139,9 +135,7 @@ describe("SqlitePiSessionManager", () => {
       appendPiSessionEntry: vi.fn(() => {
         throw new Error("database unavailable");
       }),
-      replacePiSessionEntries: vi.fn(),
-      listPiSessionMigrationSources: vi.fn(() => []),
-      completePiSessionMigration: vi.fn(() => 0)
+      replacePiSessionEntries: vi.fn()
     };
     const manager = SqlitePiSessionManager.open(store, "/app", "session");
 
@@ -261,155 +255,5 @@ describe("SqlitePiSessionManager", () => {
     expect(() => reopened.loadPiSession(session.id)).toThrow(
       `PI session entry sequence is incomplete: ${session.id}`
     );
-  });
-});
-
-describe("PI session cutover migration", () => {
-  let repository: ArtemisRepository | undefined;
-  afterEach(() => repository?.close());
-
-  it("converts every existing session once, including empty sessions", () => {
-    repository = new ArtemisRepository(":memory:");
-    const session = createSession(repository, "existing");
-    const emptySession = createSession(repository, "empty");
-    const source: SourceMessage = {
-      discordMessageId: "legacy-user",
-      authorId: "user-1",
-      authorName: "Legacy User",
-      role: "user",
-      content: "remember me",
-      createdAt: "2026-08-20T10:00:00.000Z"
-    };
-    repository.insertSourceMessages(session.id, [source]);
-    repository.insertAssistant(session.id, {
-      text: "remembered",
-      reasoning: "legacy reasoning",
-      diagnostics: [{ type: "trace", timestamp: 1 }],
-      model: "saved-model"
-    });
-
-    expect(migrateExistingPiSessions(repository, "/app", "test-provider", "fallback-model")).toBe(2);
-    expect(migrateExistingPiSessions(repository, "/app", "test-provider", "fallback-model")).toBe(0);
-
-    const persisted = repository.loadPiSession(session.id);
-    expect(persisted?.rawEntries.map((raw) => JSON.parse(raw))).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: "message",
-          message: expect.objectContaining({
-            role: "user",
-            content: expect.stringContaining('"author":{"id":"user-1","name":"Legacy User"}')
-          })
-        }),
-        expect.objectContaining({
-          type: "message",
-          message: expect.objectContaining({
-            role: "assistant",
-            model: "saved-model",
-            usage: expect.objectContaining({ totalTokens: 0 })
-          })
-        })
-      ])
-    );
-    expect(persisted?.rawEntries.map((raw) => JSON.parse(raw))).not.toEqual(
-      expect.arrayContaining([expect.objectContaining({ type: "custom" })])
-    );
-    expect(repository.loadPiSession(emptySession.id)?.rawEntries).toHaveLength(1);
-    expect(repository.listPiSessionMigrationSources()).toEqual([]);
-  });
-
-  it("keeps the cutover converter isolated from normal native-session writes", () => {
-    const storedMessage: StoredMessage = {
-      id: 1,
-      sessionId: "legacy",
-      discordMessageId: "message",
-      authorId: "user",
-      authorName: "User",
-      role: "assistant",
-      content: "answer",
-      createdAt: "2026-08-20T10:00:00.000Z"
-    };
-    expect(
-      piSessionInternals.storedToPiMessageForMigration(storedMessage, "provider", "fallback")
-    ).toMatchObject({ role: "assistant", usage: { totalTokens: 0 } });
-  });
-
-  it("rolls back instead of marking a partial conversion complete", () => {
-    repository = new ArtemisRepository(":memory:");
-    const first = createSession(repository, "first");
-    createSession(repository, "second");
-    const header = {
-      entryType: "session",
-      rawJson: JSON.stringify({
-        type: "session",
-        version: 3,
-        id: first.id,
-        timestamp: first.createdAt,
-        cwd: "/app"
-      })
-    };
-
-    expect(() =>
-      repository?.completePiSessionMigration([{ sessionId: first.id, entries: [header] }])
-    ).toThrow("PI session migration left 1 session(s) unconverted");
-    expect(repository.loadPiSession(first.id)).toBeUndefined();
-    expect(repository.listPiSessionMigrationSources()).toHaveLength(2);
-  });
-
-  it("upgrades a version-three database with no compatibility schema left behind", () => {
-    const path = join(mkdtempSync(join(tmpdir(), "artemis-pi-cutover-")), "artemis.sqlite");
-    repository = new ArtemisRepository(path);
-    const populated = createSession(repository, "populated-upgrade");
-    const empty = createSession(repository, "empty-upgrade");
-    repository.insertSourceMessages(populated.id, [
-      {
-        discordMessageId: "upgrade-message",
-        authorId: "upgrade-user",
-        authorName: "Upgrade User",
-        role: "user",
-        content: "preserve during cutover",
-        createdAt: "2026-08-20T10:00:00.000Z"
-      }
-    ]);
-    repository.close();
-    repository = undefined;
-
-    const versionThree = new Database(path);
-    versionThree.exec(`
-      DROP TABLE pi_session_entries;
-      DROP TABLE pi_sessions;
-      DELETE FROM schema_migrations WHERE version >= 4;
-    `);
-    versionThree.close();
-
-    repository = new ArtemisRepository(path);
-    expect(migrateExistingPiSessions(repository, "/app", "provider", "model")).toBe(2);
-    expect(repository.loadPiSession(populated.id)?.rawEntries).toHaveLength(2);
-    expect(repository.loadPiSession(empty.id)?.rawEntries).toHaveLength(1);
-    repository.close();
-    repository = undefined;
-
-    const migrated = new Database(path, { readonly: true });
-    const versions = migrated
-      .prepare("SELECT version FROM schema_migrations ORDER BY version")
-      .all() as { version: number }[];
-    const columns = migrated.prepare("PRAGMA table_info(pi_sessions)").all() as { name: string }[];
-    const counts = migrated
-      .prepare(
-        `SELECT
-           (SELECT COUNT(*) FROM sessions) AS logical_sessions,
-           (SELECT COUNT(*) FROM pi_sessions) AS pi_sessions`
-      )
-      .get() as { logical_sessions: number; pi_sessions: number };
-    migrated.close();
-
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
-    expect(columns.map((column) => column.name)).toEqual([
-      "session_id",
-      "next_ordinal",
-      "created_at",
-      "updated_at"
-    ]);
-    expect(counts.pi_sessions).toBe(counts.logical_sessions);
   });
 });
