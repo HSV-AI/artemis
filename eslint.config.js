@@ -9,7 +9,9 @@ export default tseslint.config(
     files: ["**/*.ts"],
     rules: {
       "@typescript-eslint/consistent-type-imports": "error",
-      "@typescript-eslint/no-explicit-any": "error"
+      "@typescript-eslint/no-explicit-any": "error",
+      "no-useless-assignment": "off",
+      "preserve-caught-error": "off"
     }
   }
 );
