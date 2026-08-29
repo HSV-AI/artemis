@@ -998,6 +998,184 @@ describe("ArtemisRepository", () => {
     expect(listed[0]?.cancelledAt).toBeUndefined();
   });
 
+  it("updates an ongoing job's prompt in place and preserves schedule, id, and history", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "old text",
+      schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
+      responseType: "silent",
+      scheduledByUserId: "user-1"
+    });
+    const originalCreatedAt =
+      repository.listScheduledPromptHistory("dm:one").find((job) => job.id === created.id)?.createdAt ?? "";
+
+    const updated = repository.updateScheduledPrompt("dm:one", created.id, {
+      prompt: "new text"
+    });
+
+    expect(updated).toBeDefined();
+    expect(updated?.id).toBe(created.id);
+    expect(updated?.prompt).toBe("new text");
+    expect(updated?.schedule).toEqual({ type: "daily", time: "09:15", timezone: "America/Chicago" });
+    expect(updated?.responseType).toBe("silent");
+    expect(updated?.scheduledByUserId).toBe("user-1");
+    expect(updated?.status).toBe("active");
+    expect(updated?.createdAt).toBe(originalCreatedAt);
+    expect(repository.listScheduledPromptHistory("dm:one")).toHaveLength(1);
+  });
+
+  it("updates an ongoing job's schedule for every recurrence shape and preserves the prompt", () => {
+    repository = new ArtemisRepository(":memory:");
+    const recurring = repository.createScheduledPrompt("dm:one", {
+      prompt: "standup",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const once = repository.createScheduledPrompt("dm:one", {
+      prompt: "one-time",
+      schedule: { type: "once", atUtc: "2026-09-01T14:15:00.000Z" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    // A fired recurring job keeps its fire marker across an update: the
+    // engine must never re-fire the already-consumed occurrence.
+    repository.markScheduledPromptFired(recurring.id, "2026-08-30T14:20:00.001Z");
+    const recurringCreatedAt =
+      repository.listScheduledPromptHistory("dm:one").find((job) => job.id === recurring.id)?.createdAt ?? "";
+
+    const weekly = repository.updateScheduledPrompt("dm:one", recurring.id, {
+      schedule: { type: "weekly", time: "10:00", dayOfWeek: 1, timezone: "UTC" }
+    });
+    expect(weekly?.schedule).toEqual({ type: "weekly", time: "10:00", dayOfWeek: 1, timezone: "UTC" });
+    expect(weekly?.prompt).toBe("standup");
+    expect(weekly?.lastRunAt).toBe("2026-08-30T14:20:00.001Z");
+    expect(weekly?.createdAt).toBe(recurringCreatedAt);
+
+    const daily = repository.updateScheduledPrompt("dm:one", once.id, {
+      schedule: { type: "daily", time: "08:30", timezone: "Europe/Berlin" }
+    });
+    expect(daily?.schedule).toEqual({ type: "daily", time: "08:30", timezone: "Europe/Berlin" });
+    expect(daily?.prompt).toBe("one-time");
+
+    const monthly = repository.updateScheduledPrompt("dm:one", once.id, {
+      schedule: { type: "monthly", time: "07:30", dayOfMonth: 15, timezone: "America/Chicago" }
+    });
+    expect(monthly?.schedule)
+      .toEqual({ type: "monthly", time: "07:30", dayOfMonth: 15, timezone: "America/Chicago" });
+
+    const oneTime = repository.updateScheduledPrompt("dm:one", once.id, {
+      schedule: { type: "once", atUtc: "2026-09-15T09:00:00.000Z" }
+    });
+    expect(oneTime?.schedule).toEqual({ type: "once", atUtc: "2026-09-15T09:00:00.000Z" });
+
+    const listed = repository.listScheduledPrompts("dm:one");
+    expect(listed.map((job) => job.schedule)).toEqual([
+      { type: "weekly", time: "10:00", dayOfWeek: 1, timezone: "UTC" },
+      { type: "once", atUtc: "2026-09-15T09:00:00.000Z" }
+    ]);
+  });
+
+  it("updates prompt and schedule together in one call", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "old",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "silent",
+      scheduledByUserId: "user-1"
+    });
+
+    const updated = repository.updateScheduledPrompt("dm:one", created.id, {
+      prompt: "new",
+      schedule: { type: "weekly", time: "11:00", dayOfWeek: 3, timezone: "UTC" }
+    });
+
+    expect(updated?.prompt).toBe("new");
+    expect(updated?.schedule).toEqual({ type: "weekly", time: "11:00", dayOfWeek: 3, timezone: "UTC" });
+    expect(updated?.responseType).toBe("silent");
+  });
+
+  it("refuses to update records that are not ongoing or belong to another conversation", () => {
+    repository = new ArtemisRepository(":memory:");
+    const live = repository.createScheduledPrompt("dm:one", {
+      prompt: "live",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const done = repository.createScheduledPrompt("dm:one", {
+      prompt: "done",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    repository.completeScheduledPrompt(done.id, "2026-08-30T14:30:00.000Z");
+    const cancelled = repository.createScheduledPrompt("dm:one", {
+      prompt: "cancelled",
+      schedule: { type: "daily", time: "10:00", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    repository.cancelScheduledPrompt("dm:one", cancelled.id);
+
+    const changes = { prompt: "mutated" };
+    expect(repository.updateScheduledPrompt("dm:one", "missing-id", changes)).toBeUndefined();
+    expect(repository.updateScheduledPrompt("dm:two", live.id, changes)).toBeUndefined();
+    expect(repository.updateScheduledPrompt("dm:one", done.id, changes)).toBeUndefined();
+    expect(repository.updateScheduledPrompt("dm:one", cancelled.id, changes)).toBeUndefined();
+
+    expect(repository.listScheduledPromptHistory("dm:one").find((job) => job.id === live.id)?.prompt)
+      .toBe("live");
+    expect(repository.listScheduledPromptHistory("dm:one").find((job) => job.id === done.id)?.prompt)
+      .toBe("done");
+    expect(repository.listScheduledPromptHistory("dm:one").find((job) => job.id === cancelled.id)?.prompt)
+      .toBe("cancelled");
+  });
+
+  it("keeps an updated job as one row in active and history listings", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "before",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+
+    repository.updateScheduledPrompt("dm:one", created.id, {
+      prompt: "after",
+      schedule: { type: "weekly", time: "10:00", dayOfWeek: 2, timezone: "UTC" }
+    });
+
+    expect(repository.listScheduledPrompts("dm:one")).toHaveLength(1);
+    expect(repository.listScheduledPromptHistory("dm:one")).toHaveLength(1);
+  });
+
+  it("persists an updated job across a repository reopen", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-update-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "durable update",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const updated = repository.updateScheduledPrompt("dm:one", created.id, {
+      schedule: { type: "weekly", time: "12:00", dayOfWeek: 5, timezone: "America/Chicago" }
+    });
+    expect(updated).toBeDefined();
+    repository.close();
+    repository = undefined;
+
+    repository = new ArtemisRepository(path);
+    const listed = repository.listScheduledPrompts("dm:one");
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.prompt).toBe("durable update");
+    expect(listed[0]?.schedule)
+      .toEqual({ type: "weekly", time: "12:00", dayOfWeek: 5, timezone: "America/Chicago" });
+  });
+
   it("applies migration 9 to a migration-8 database, preserving jobs, attribution, and history", () => {
     const directory = mkdtempSync(join(tmpdir(), "artemis-migration9-"));
     temporaryDirectories.push(directory);

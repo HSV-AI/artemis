@@ -211,6 +211,18 @@ export type ScheduledPromptPruneFilter =
     };
 
 /**
+ * In-place edit of an existing scheduled prompt. Exactly the fields the
+ * caller supplies change; everything else stays untouched — the record id,
+ * creation instant, response type, and scheduling attribution included.
+ */
+export interface ScheduledPromptUpdate {
+  /** Replacement prompt text. Absent preserves the stored prompt. */
+  prompt?: string;
+  /** Replacement schedule. Absent preserves the stored schedule. */
+  schedule?: PromptSchedule;
+}
+
+/**
  * Outcome of a hard prune: the ids actually removed (destructive, not
  * recoverable) and how many of the conversation's records remain.
  */
@@ -253,6 +265,20 @@ export interface ScheduledPromptStore {
     conversationKey: string,
     id: string,
     schedule: PromptSchedule
+  ): ScheduledPromptRecord | undefined;
+  /**
+   * Rewrites an ongoing record's prompt text and/or schedule in place,
+   * preserving its id, creation instant, and history. Fields absent from
+   * the changes object keep their stored values. Returns the updated
+   * record, or undefined when the id does not exist in this conversation
+   * or is not ongoing (only ongoing records can be edited in place;
+   * canceled records are restored by resume, completed records are retired
+   * history).
+   */
+  updateScheduledPrompt(
+    conversationKey: string,
+    id: string,
+    changes: ScheduledPromptUpdate
   ): ScheduledPromptRecord | undefined;
 }
 

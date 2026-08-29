@@ -17,6 +17,7 @@ import type {
   ScheduledPromptRecord,
   ScheduledPromptStatus,
   ScheduledPromptStore,
+  ScheduledPromptUpdate,
   SchedulerExecutionStore,
   SessionRecord,
   SourceMessage,
@@ -579,6 +580,55 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
     if (result.changes !== 1) {
       return undefined;
     }
+    const row = this.database
+      .prepare("SELECT * FROM scheduled_prompts WHERE id = ? AND conversation_key = ?")
+      .get(id, conversationKey) as ScheduledPromptRow;
+    return this.mapScheduledPrompt(row);
+  }
+
+  public updateScheduledPrompt(
+    conversationKey: string,
+    id: string,
+    changes: ScheduledPromptUpdate
+  ): ScheduledPromptRecord | undefined {
+    // An in-place repair of an ongoing record: the schedule columns are
+    // read first so fields absent from the changes object keep their stored
+    // values, then rewritten as a set (so the row-shape CHECK constraint
+    // stays satisfied). id, conversation key, status, creation instant,
+    // response type, attribution, and the fire marker are never touched:
+    // the record keeps its id and history, and the engine's at-most-once
+    // fire semantics survive the edit. Only status='active' rows qualify;
+    // cancelled and completed records are refused.
+    const existingRow = this.database
+      .prepare(
+        `SELECT * FROM scheduled_prompts
+         WHERE id = ? AND conversation_key = ? AND status = 'active'`
+      )
+      .get(id, conversationKey) as ScheduledPromptRow | undefined;
+    if (!existingRow) {
+      return undefined;
+    }
+    const existing = this.mapScheduledPrompt(existingRow);
+    const prompt = changes.prompt ?? existing.prompt;
+    const schedule = changes.schedule ?? existing.schedule;
+    this.database
+      .prepare(
+        `UPDATE scheduled_prompts
+         SET prompt = ?, schedule_type = ?, at_utc = ?, time_of_day = ?,
+             day_of_week = ?, day_of_month = ?, timezone = ?
+         WHERE id = ? AND conversation_key = ? AND status = 'active'`
+      )
+      .run(
+        prompt,
+        schedule.type,
+        schedule.type === "once" ? schedule.atUtc : null,
+        schedule.type === "once" ? null : schedule.time,
+        schedule.type === "weekly" ? schedule.dayOfWeek : null,
+        schedule.type === "monthly" ? schedule.dayOfMonth : null,
+        schedule.type === "once" ? null : schedule.timezone,
+        id,
+        conversationKey
+      );
     const row = this.database
       .prepare("SELECT * FROM scheduled_prompts WHERE id = ? AND conversation_key = ?")
       .get(id, conversationKey) as ScheduledPromptRow;
