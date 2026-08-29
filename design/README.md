@@ -13,6 +13,7 @@ This directory is the authoritative design record for Artemis. Start with the ba
 - [Discord link-embed suppression](discord-link-embeds.md) — application-layer suppression of link-preview cards on every outbound Discord message, with global and per-channel override.
 - [Configurable model provider](model-provider.md) — local model configuration, PI provider registration, startup validation, provider-independent web fetch, and Compose topology.
 - [Model self-introspection](model-self-introspection.md) — the `model_info` tool that reports the live registered provider and model from actual runtime state.
+- [Channel timezone tools](timezone-tools.md) — per-DM/Channel-Group IANA timezone setting and current-datetime tools bound to the harness-injected conversation key, with all times stored as UTC.
 - [Persona profiles](persona-profile.md) — optional deployment-owned identity and style instructions composed with Artemis's fixed system rules.
 - [Graph memory](memory.md) — explicit, conversation-scoped PI memory tools backed by persistent Dgraph facts.
 - [Dgraph access control and namespaces](dgraph-access-control.md) — ACL bootstrap, namespace isolation, service accounts, JWT clients, and migration boundaries.

@@ -251,7 +251,7 @@ describe("ArtemisRepository", () => {
     expect(stored?.parentChannelId).toBeUndefined();
   });
 
-  it("bootstraps a fresh empty database with the current schema and migrations 1 through 5", () => {
+  it("bootstraps a fresh empty database with the current schema and migrations 1 through 6", () => {
     const directory = mkdtempSync(join(tmpdir(), "artemis-bootstrap-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "artemis.sqlite");
@@ -269,7 +269,7 @@ describe("ArtemisRepository", () => {
     const piSessionColumns = database.prepare("PRAGMA table_info(pi_sessions)").all() as { name: string }[];
     database.close();
 
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(tables.map((row) => row.name)).toEqual(
       expect.arrayContaining([
         "conversations",
@@ -280,6 +280,7 @@ describe("ArtemisRepository", () => {
         "incoming_messages",
         "pi_sessions",
         "pi_session_entries",
+        "channel_timezones",
         "schema_migrations"
       ])
     );
@@ -291,8 +292,8 @@ describe("ArtemisRepository", () => {
     ]);
   });
 
-  it("starts a verified migration-5 database without modification or conversion work", () => {
-    const directory = mkdtempSync(join(tmpdir(), "artemis-steady-state-"));
+  it("applies incremental migration 6 to a verified migration-5 database without touching its history", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-migration5-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "artemis.sqlite");
     repository = new ArtemisRepository(path);
@@ -309,6 +310,11 @@ describe("ArtemisRepository", () => {
       }
     ]);
     repository.insertAssistant(session.id, { text: "ack", model: "model" });
+    // Simulate a pre-timezone database: drop migration 6 and its table.
+    const downgrade = new Database(path);
+    downgrade.exec("DROP TABLE channel_timezones;");
+    downgrade.prepare("DELETE FROM schema_migrations WHERE version = 6").run();
+    downgrade.close();
     repository.close();
     repository = undefined;
 
@@ -316,15 +322,16 @@ describe("ArtemisRepository", () => {
     const beforeVersions = before
       .prepare("SELECT version FROM schema_migrations ORDER BY version")
       .all() as { version: number }[];
-    const beforeMessages = before
-      .prepare("SELECT content FROM messages ORDER BY id")
-      .all() as { content: string }[];
+    const beforeTables = before
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_timezones'")
+      .all() as { name: string }[];
     before.close();
 
     repository = new ArtemisRepository(path);
-    expect(repository.getHistory(session.id).map((message) => message.content)).toEqual(
-      beforeMessages.map((row) => row.content)
-    );
+    expect(repository.getHistory(session.id).map((message) => message.content)).toEqual([
+      "steady state",
+      "ack"
+    ]);
     repository.close();
     repository = undefined;
 
@@ -332,10 +339,15 @@ describe("ArtemisRepository", () => {
     const afterVersions = after
       .prepare("SELECT version FROM schema_migrations ORDER BY version")
       .all() as { version: number }[];
+    const afterTables = after
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_timezones'")
+      .all() as { name: string }[];
     after.close();
 
     expect(beforeVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
-    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(beforeTables).toEqual([]);
+    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(afterTables.map((row) => row.name)).toEqual(["channel_timezones"]);
   });
 
   it("rejects an existing pre-migration database missing migration 5 with actionable guidance and no partial writes", () => {
@@ -403,5 +415,33 @@ describe("ArtemisRepository", () => {
 
     expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4]);
     expect(piTables).toEqual([]);
+  });
+
+  it("stores, reads, and overwrites one timezone per conversation key", () => {
+    repository = new ArtemisRepository(":memory:");
+    expect(repository.getChannelTimezone("dm:one")).toBeUndefined();
+
+    repository.setChannelTimezone("dm:one", "America/Chicago");
+    expect(repository.getChannelTimezone("dm:one")).toBe("America/Chicago");
+    expect(repository.getChannelTimezone("dm:other")).toBeUndefined();
+
+    repository.setChannelTimezone("dm:one", "Europe/Berlin");
+    expect(repository.getChannelTimezone("dm:one")).toBe("Europe/Berlin");
+  });
+
+  it("persists channel timezones across a repository reopen", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-timezone-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    repository.setChannelTimezone("dm:one", "America/Chicago");
+    repository.setChannelTimezone("guild:g:channel:c", "Pacific/Auckland");
+    repository.close();
+    repository = undefined;
+
+    repository = new ArtemisRepository(path);
+    expect(repository.getChannelTimezone("dm:one")).toBe("America/Chicago");
+    expect(repository.getChannelTimezone("guild:g:channel:c")).toBe("Pacific/Auckland");
+    expect(repository.getChannelTimezone("guild:other:channel:other")).toBeUndefined();
   });
 });

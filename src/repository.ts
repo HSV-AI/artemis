@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import type {
+  ChannelTimezoneStore,
   ConversationIdentity,
   IncomingMessageRecord,
   LogEntry,
@@ -82,7 +83,7 @@ function optional<T>(value: T | null): T | undefined {
   return value === null ? undefined : value;
 }
 
-export class ArtemisRepository {
+export class ArtemisRepository implements ChannelTimezoneStore {
   private readonly database: Database.Database;
 
   public constructor(path: string) {
@@ -385,6 +386,27 @@ export class ArtemisRepository {
       );
   }
 
+  public getChannelTimezone(conversationKey: string): string | undefined {
+    const row = this.database
+      .prepare("SELECT timezone FROM channel_timezones WHERE conversation_key = ?")
+      .get(conversationKey) as { timezone: string } | undefined;
+    return row?.timezone;
+  }
+
+  public setChannelTimezone(conversationKey: string, timezone: string): void {
+    const transaction = this.database.transaction(() => {
+      this.database
+        .prepare(
+          `INSERT INTO channel_timezones (conversation_key, timezone, created_at, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(conversation_key)
+           DO UPDATE SET timezone = excluded.timezone, updated_at = excluded.updated_at`
+        )
+        .run(conversationKey, timezone, now(), now());
+    });
+    transaction();
+  }
+
   public recordLog(entry: LogEntry): void {
     const { timestamp, level, event, ...details } = entry;
     this.database
@@ -463,8 +485,36 @@ export class ArtemisRepository {
       );
     }
 
-    // A verified migration-5 database is the steady state. The bootstrap path
-    // creates a fully current empty database; no incremental work runs here.
+    if (!applied.has(6)) {
+      this.applyMigration6();
+    }
+
+    // A fully migrated database is the steady state. The bootstrap path
+    // creates a fully current empty database; earlier migrations are
+    // preserved as historical database facts and are never re-run.
+  }
+
+  /**
+   * Migration 6 introduces per-conversation (DM or Channel Group) timezone
+   * settings. It is additive: an existing verified migration-5 database
+   * receives the new table in one transaction without touching any history.
+   */
+  private applyMigration6(): void {
+    const timestamp = now();
+    const transaction = this.database.transaction(() => {
+      this.database.exec(`
+        CREATE TABLE IF NOT EXISTS channel_timezones (
+          conversation_key TEXT PRIMARY KEY,
+          timezone TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      this.database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+        .run(6, timestamp);
+    });
+    transaction();
   }
 
   private bootstrapFreshDatabase(): void {
@@ -574,11 +624,18 @@ export class ArtemisRepository {
 
         CREATE INDEX pi_session_entries_by_parent
           ON pi_session_entries(session_id, parent_id);
+
+        CREATE TABLE channel_timezones (
+          conversation_key TEXT PRIMARY KEY,
+          timezone TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
       `);
       const insert = this.database.prepare(
         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)"
       );
-      for (const version of [1, 2, 3, 4, 5]) {
+      for (const version of [1, 2, 3, 4, 5, 6]) {
         insert.run(version, timestamp);
       }
     });

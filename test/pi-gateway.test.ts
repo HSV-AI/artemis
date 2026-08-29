@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type {
+  ChannelTimezoneStore,
   PiGenerationInput,
   PiSessionEntryRecord,
   PiSessionStore
@@ -618,8 +619,14 @@ describe("PiSdkGateway", () => {
     await gateway.checkHealth();
     await gateway.generate(generationInput());
 
+    type CapturedTool = {
+      name: string;
+      execute: (id: string, params: unknown, ...rest: unknown[]) => Promise<{
+        content: ReadonlyArray<{ type: string; text?: string }>;
+      }>;
+    };
     const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
-      | { customTools?: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: ReadonlyArray<{ type: unknown; text?: unknown }> }> }> }
+      | { customTools?: CapturedTool[] }
       | undefined;
     const tool = sessionOptions?.customTools?.find((entry) => entry.name === "model_info");
     expect(tool).toBeDefined();
@@ -656,6 +663,80 @@ describe("PiSdkGateway", () => {
       gateway.generate(generationInput())
     ).rejects.toThrow("PI completed without an assistant message");
     expect(mocks.session.dispose).toHaveBeenCalled();
+  });
+
+  it("registers timezone tools bound to the harness-injected conversation key", async () => {
+    const settings = new Map<string, string>();
+    const timezoneStore: ChannelTimezoneStore = {
+      getChannelTimezone: vi.fn((key) => settings.get(key)),
+      setChannelTimezone: vi.fn((key, timezone) => {
+        settings.set(key, timezone);
+      })
+    };
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      healthyFetch(),
+      undefined,
+      timezoneStore
+    );
+    await gateway.checkHealth();
+    await gateway.generate(generationInput({ conversationKey: "dm:tz-channel", conversationKind: "dm" }));
+
+    expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      tools: expect.arrayContaining(["set_channel_timezone", "get_current_datetime"]),
+      customTools: expect.arrayContaining([
+        expect.objectContaining({ name: "set_channel_timezone" }),
+        expect.objectContaining({ name: "get_current_datetime" })
+      ])
+    }));
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringContaining("- set_channel_timezone: ")
+    }));
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringContaining("- get_current_datetime: ")
+    }));
+
+    type CapturedTool = {
+      name: string;
+      execute: (id: string, params: unknown, ...rest: unknown[]) => Promise<{
+        content: ReadonlyArray<{ type: string; text?: string }>;
+      }>;
+    };
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { customTools?: CapturedTool[] }
+      | undefined;
+    const set = sessionOptions?.customTools?.find((tool) => tool.name === "set_channel_timezone");
+    const get = sessionOptions?.customTools?.find((tool) => tool.name === "get_current_datetime");
+    expect(set).toBeDefined();
+    expect(get).toBeDefined();
+
+    const setResult = await set!.execute("call", { timezone: "America/Chicago" }, undefined, undefined, {} as never);
+    expect(setResult.content[0]?.text).toContain("America/Chicago");
+    expect(timezoneStore.setChannelTimezone).toHaveBeenCalledWith("dm:tz-channel", "America/Chicago");
+
+    const getResult = await get!.execute("call", {}, undefined, undefined, {} as never);
+    expect(getResult.content[0]?.text).toContain("Timezone: America/Chicago");
+    expect(getResult.content[0]?.text).toContain("UTC now: ");
+    expect(timezoneStore.getChannelTimezone).toHaveBeenCalledWith("dm:tz-channel");
+  });
+
+  it("omits the timezone tools when no channel settings store is configured", async () => {
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      healthyFetch()
+    );
+    await gateway.checkHealth();
+    await gateway.generate(generationInput());
+
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { tools?: string[]; customTools?: Array<{ name: string }> }
+      | undefined;
+    expect(sessionOptions?.tools).not.toContain("set_channel_timezone");
+    expect(sessionOptions?.tools).not.toContain("get_current_datetime");
+    expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain("set_channel_timezone");
+    expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain("get_current_datetime");
   });
 });
 

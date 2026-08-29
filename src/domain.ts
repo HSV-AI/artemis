@@ -107,6 +107,16 @@ export interface PiGenerationResult {
   model: string;
 }
 
+/**
+ * Per-conversation (DM or Channel Group) settings storage keyed by the stable
+ * conversation key. Backed by SQLite; the harness injects the key, so the
+ * model can never read or write another conversation's settings.
+ */
+export interface ChannelTimezoneStore {
+  getChannelTimezone(conversationKey: string): string | undefined;
+  setChannelTimezone(conversationKey: string, timezone: string): void;
+}
+
 export interface PiGateway {
   checkHealth(): Promise<void>;
   generate(input: PiGenerationInput): Promise<PiGenerationResult>;

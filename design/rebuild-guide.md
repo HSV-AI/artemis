@@ -23,7 +23,7 @@ The following behavior is fixed:
 - Every Discord message event is logged to the console and SQLite before filtering, including DMs, bot messages, unauthorized messages, unmentioned messages, and messages from disallowed channels.
 - Accepted conversations retain their history in SQLite across restarts. There is no automatic retention or deletion.
 - Model or harness failures are logged and persisted, but produce no Discord response.
-- The model may use explicitly registered `web_fetch`, GitHub, conversation-scoped memory, and read-only HSVAI graph tools. The [GraphRAG](hsvai-graphrag.md) and [event catalog](hsvai-event-catalog.md) documents define their retrieval, projection, and revision contracts. External content is sanitized and labeled as untrusted; built-in coding tools remain disabled. The system prompt advertises the actual registry and its Capability Gap Protocol.
+- The model may use explicitly registered `web_fetch`, GitHub, conversation-scoped memory, read-only HSVAI graph, and channel timezone tools. The [GraphRAG](hsvai-graphrag.md) and [event catalog](hsvai-event-catalog.md) documents define their retrieval, projection, and revision contracts. External content is sanitized and labeled as untrusted; built-in coding tools remain disabled. The system prompt advertises the actual registry and its Capability Gap Protocol.
 - Accepted normal messages show a typing indicator throughout generation. Guild and guild-thread answers reply to the triggering message; DM answers remain ordinary channel messages.
 - Group/channel (guild) assistant responses are capped at `GROUP_CHANNEL_MULTI_MESSAGE_MAX` (currently 3) self-contained Discord messages per turn. DM responses are not length-restricted. The cap is conveyed to the model through the system prompt only for guild sessions, and prompt selection is deterministic from the conversation kind (`guild` vs `dm`).
 - Base Compose retains Ollama as a separate service, the model-preparation job, persistent ACL-enabled Dgraph, a one-shot namespace bootstrap, and Artemis. An optional provider-specific Compose path may omit Ollama while retaining Dgraph and its bootstrap.
@@ -54,11 +54,13 @@ flowchart LR
     Harness --> WebFetch[web_fetch tool]
     Harness --> GitHubTools[Token-gated GitHub tools]
     Harness --> MemoryTools[Memory tools]
+    Harness --> TimezoneTools[Channel timezone tools]
     Harness --> KnowledgeTools[HSVAI search and DQL]
     WebFetch --> Web[HTTP or HTTPS page]
     GitHubTools --> GitHubAPI[GitHub API]
     MemoryTools --> Dgraph[(Dgraph facts)]
     KnowledgeTools --> Dgraph
+    TimezoneTools --> Store
     Model --> Provider[Configured OpenAI-compatible endpoint]
     Commands -- clear-session only --> Store
     Commands --> Discord
@@ -242,7 +244,7 @@ The model-facing implementation must:
 - Apply a provider definition's explicit reasoning effort to every model request when configured.
 - Restore the native harness state for the logical session directly from durable SQLite entries.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
-- Enable only `web_fetch`, the six GitHub custom tools when configured, the seven scoped memory tools, the fixed-source `hsvai_graph_search` and `hsvai_graph_query` tools, and the `model_info` self-introspection tool. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
+- Enable only `web_fetch`, the six GitHub custom tools when configured, the seven scoped memory tools, the fixed-source `hsvai_graph_search` and `hsvai_graph_query` tools, the `model_info` self-introspection tool, and the `set_channel_timezone` and `get_current_datetime` channel timezone tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply the style instructions from the profile selected by `PERSONA_PROFILE`, which defaults to `generic` and also bundles `artemis` and `wartermis`. Keep each profile in its own source file and compose the fixed Discord instruction after it. Name resolution: a named profile (`artemis`, `wartermis`) owns its identity and its `name` is authoritative for self-introduction regardless of the Discord display name. The default `generic` profile defines no name, so the bot's display name is resolved from the connected Discord client at startup (global display name when set, otherwise username) and injected into the system prompt as the authoritative name for self-introduction; the system prompt must not hardcode the Discord name. When neither a profile name nor a Discord display name is available, fall back to `DEFAULT_BOT_DISPLAY_NAME` (`Artemis`). The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, resolved display name, and tool registry.
 - Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
@@ -275,6 +277,10 @@ This is a defense-in-depth transformation, not a claim that arbitrary web conten
 ### Model self-introspection tool contract
 
 Register `model_info` for every profile with no input parameters. Resolve the answer at execution time from the live registered harness state: the configured provider id selects the registered provider (display name and base URL) and registered model (id, API, reasoning support, context window, max tokens); the configured reasoning effort contributes the configured-effort segment. Render a deterministic labeled text block with provider name and id, model id, API, endpoint, reasoning support with its configured effort, context window, and max output tokens. Render every unresolvable field as the literal `unknown`, and return "Model runtime information is currently unavailable." when the whole snapshot cannot be resolved or resolution fails unexpectedly. Never include the model API key and never derive model identity from conversation memory. See [Model self-introspection](model-self-introspection.md) for the authoritative contract.
+
+### Channel timezone tool contract
+
+Register `set_channel_timezone` and `get_current_datetime` for every conversation kind when a channel settings store is configured. Build the tools around a conversation context supplied by the harness from the immutable Discord conversation key; tool parameters contain only timezone data and can never select or override the channel identity. `set_channel_timezone` requires one `timezone` string; validate it against the runtime's IANA database, store it with a transactional upsert keyed by the injected conversation key, and answer with the stored identifier and its current offset and abbreviation. Blank or invalid identifiers return an error that names the offending value and suggests `<Area>/<City>` form, without writing. `get_current_datetime` takes one optional `timezone` string for the rendering; it defaults to the stored channel timezone and falls back to UTC when none is stored or the stored identifier no longer validates. It reports the same instant as the UTC instant, a summary line with timezone, numeric offset, and zone abbreviation, and an offset-qualified local ISO-8601 timestamp with weekday. Resolve daylight saving time with the runtime for the exact instant; store and compute all times as UTC. See [Channel timezone tools](timezone-tools.md) for the authoritative contract.
 
 ### GitHub tool contract
 
@@ -388,14 +394,22 @@ The current implementation uses the logical session ID as the native PI session 
 
 Opening a PI session reads its rows in ordinal order, validates the header ID and complete sequence, applies PI format migrations transactionally when required, and builds native context without appending normalized messages. Native entry appends commit before the in-memory leaf advances.
 
+### `channel_timezones`
+
+- Conversation key, primary key: the stable `dm:` or `guild:` conversation key.
+- Stored IANA timezone identifier.
+- Creation and update timestamps in UTC.
+
+Setting a timezone never stores a local time; all instants remain UTC.
+
 ### Schema migration and minimum supported database state
 
-Migrations 4 and 5 are historical database facts: migration 4 introduced the `pi_sessions` and `pi_session_entries` tables, and migration 5 marked the one-time native PI session cutover complete. They are not re-runnable incremental steps and no cutover conversion code remains in the application.
+Migrations 4 and 5 are historical database facts: migration 4 introduced the `pi_sessions` and `pi_session_entries` tables, and migration 5 marked the one-time native PI session cutover complete. They are not re-runnable incremental steps and no cutover conversion code remains in the application. Migration 6 is the current incremental step: it adds the `channel_timezones` table for per-conversation timezone settings in one additive transaction.
 
 At startup, before Discord login:
 
-- A fresh empty database bootstraps to the current schema in one transaction: create every table (`conversations`, `sessions`, `messages`, `events`, `application_logs`, `incoming_messages`, `pi_sessions`, `pi_session_entries`) and record migrations 1 through 5.
-- A verified migration-5 database opens without modification or conversion work.
+- A fresh empty database bootstraps to the current schema in one transaction: create every table (`conversations`, `sessions`, `messages`, `events`, `application_logs`, `incoming_messages`, `pi_sessions`, `pi_session_entries`, `channel_timezones`) and record migrations 1 through 6.
+- A verified migration-5 database opens without converting its history and applies incremental migration 6 in one additive transaction.
 - An existing database whose `schema_migrations` table has rows but lacks migration 5 is a pre-cutover database that this build no longer supports. Fail startup with an actionable operator error before Discord connects and write nothing. Do not silently mark it migrated, replay its normalized transcript into native PI entries, or discard its history; the operator must restore from a verified migration-5 backup or start fresh.
 
 No runtime code reads the normalized `messages` table to construct PI context. The normalized transcript remains the Discord deduplication, attribution, audit, and operator-history contract and is never replayed as the model-context authority.
@@ -440,7 +454,7 @@ No runtime code reads the normalized `messages` table to construct PI context. T
 - Raw content, Discord creation timestamp, and local logging timestamp.
 - Indexes by channel/local ID and Discord creation time/local ID.
 
-Incoming-message and source-message insertion must ignore duplicate Discord message IDs. Conversation and session creation, batch source-message insertion, assistant insertion, native PI session creation/append/format replacement, and active-session closing should each be transactional. The fresh-database bootstrap is a single transaction that creates every table and records migrations 1 through 5. A failed generation retains newly accepted source messages and records `generation_failed`, but it must not create a normalized assistant message. Native PI entries already committed by the harness remain its model-context authority. A successful generation inserts one assistant record and records `generation_succeeded`. Every clear attempt records `session_cleared`, including whether an active session existed.
+Incoming-message and source-message insertion must ignore duplicate Discord message IDs. Conversation and session creation, batch source-message insertion, assistant insertion, native PI session creation/append/format replacement, and active-session closing should each be transactional. The fresh-database bootstrap is a single transaction that creates every table and records migrations 1 through 6. A failed generation retains newly accepted source messages and records `generation_failed`, but it must not create a normalized assistant message. Native PI entries already committed by the harness remain its model-context authority. A successful generation inserts one assistant record and records `generation_succeeded`. Every clear attempt records `session_cleared`, including whether an active session existed.
 
 No table has time-based expiration. Operators retain all chat content, reasoning, diagnostics, events, and logs until they deliberately delete records or the data volume.
 
@@ -514,7 +528,7 @@ Each stage should finish with tests before the next begins.
 ### 3. Implement SQLite and dual-output logging
 
 - Create the database parent directory before opening the file.
-- Apply the schema bootstrap or rejection: a fresh empty database creates the current schema (migrations 1 through 5) in one transaction; a verified migration-5 database opens without modification; an existing database missing migration 5 fails startup with an actionable error and no partial writes.
+- Apply the schema bootstrap or rejection: a fresh empty database creates the current schema (migrations 1 through 6) in one transaction; a verified migration-5 database opens and applies incremental migration 6 without touching its history; an existing database missing migration 5 fails startup with an actionable error and no partial writes.
 - Implement conversation/session lookup, active-session closing, ordered normalized history, native harness session storage, source and incoming-message deduplication, assistant insertion, events, and application logs.
 - Write every accepted log to console first, then SQLite.
 - Test restart recovery by closing one repository instance and opening another over the same test database, including exact native usage, tool results, compactions, and parent relationships.
@@ -546,7 +560,7 @@ Each stage should finish with tests before the next begins.
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
 - Connect the harness's native session manager to ordered SQLite storage. The schema bootstrap runs at repository construction; startup health validates the model provider and Dgraph and performs no cutover.
-- Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, fixed-source HSVAI graph search, and the `model_info` self-introspection tool; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
+- Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, fixed-source HSVAI graph search, the `model_info` self-introspection tool, and the channel timezone tools; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
 - Load the reviewed HSVAI event catalog and exact raw-source cache before synchronization. Reapply source-matched themes, speaker edges, and structurally exclusive complete/pending status after every cache load without model calls.
 - Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
 - Add configured provider health/model validation.
@@ -594,7 +608,7 @@ At minimum, prove all of the following:
 - A redelivered trigger invokes generation once.
 - Same-conversation turns serialize; different conversations can progress independently.
 - Restarting the application preserves the logical session plus native tool, compaction, tree, model, and exact new-turn usage state without replaying normalized history.
-- No runtime code reads normalized messages to construct PI context. A fresh empty database bootstraps to the current schema (migrations 1 through 5) in one transaction; a verified migration-5 database opens without modification; an existing database missing migration 5 fails startup with actionable guidance and no partial writes, no replay, and no history discard.
+- No runtime code reads normalized messages to construct PI context. A fresh empty database bootstraps to the current schema (migrations 1 through 6) in one transaction; a verified migration-5 database receives incremental migration 6 while preserving its history; an existing database missing migration 5 fails startup with actionable guidance and no partial writes, no replay, and no history discard.
 - A successful turn persists one assistant record, reasoning, diagnostics, and actual model.
 - Failed, aborted, missing, or blank generation persists a failure and sends nothing to Discord.
 - Typing appears only for accepted, non-duplicate messages, refreshes until generation ends, and a typing API failure does not cancel generation.
@@ -602,6 +616,7 @@ At minimum, prove all of the following:
 - `web_fetch` rejects non-HTTP(S) targets, fetches directly without model credentials, bounds content, limits displayed links to ten, labels external data, and sanitizes adversarial role or instruction patterns.
 - GitHub tools are absent without a token or allowed repository; when enabled they reject repositories outside the allowlist, scope searches to allowed repositories, cover all six operations, sanitize read results, and publish the explicit-mutation guideline in the model's tool registry.
 - Memory tools are present for every profile; every operation uses the immutable conversation scope, writes retain Discord provenance, corrections and forgetting create tombstones, and scope isolation survives PI session clearing.
+- The timezone tools are bound to the harness-injected conversation key; `set_channel_timezone` accepts only runtime-valid IANA identifiers and writes nothing on blank or invalid input, while `get_current_datetime` prefers an explicit timezone, falls back to the stored or UTC default, renders DST-correct local times, and reads without mutation.
 - A fresh raw HSVAI source cache avoids network requests, excludes all catalog-derived fields, and is atomically replaced after expiry. Invalid cache is repaired from the source; future-dated or expired cache is never published as current; every source request is bounded.
 - HSVAI synchronization, retrieval, and catalog loading satisfy the verification contracts in their feature documents.
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
