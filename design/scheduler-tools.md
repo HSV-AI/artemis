@@ -27,9 +27,6 @@ This protocol owns:
 - the `scheduled_prompts` SQLite table (schema migrations 7 and 8)
 - recurrence-resolution helpers: strict `HH:MM` parsing, ISO-8601 `at`
   resolution, and DST-correct next-occurrence computation
-- the `scheduled_prompts` SQLite table (schema migrations 7 and 8)
-- recurrence-resolution helpers: strict `HH:MM` parsing, ISO-8601 `at`
-  resolution, and DST-correct next-occurrence computation
 - the trust boundary that binds all three tools to the harness-injected
   conversation key
 - the scheduler authorization model: creation-time membership verification for
@@ -42,7 +39,8 @@ This protocol owns:
 It does not define the execution loop that polls due jobs, wraps them for a
 JSON response, validates that JSON, or posts output to Discord; the execution
 engine (issue #53) must run every job through the authorization gate defined
-here (`ConversationService.runScheduledPrompt`). It does not change memory,
+here (`ConversationService.runScheduledPrompt`) and is specified by
+[scheduler-execution.md](scheduler-execution.md). It does not change memory,
 timezone, or knowledge-tool contracts.
 
 ## Trust boundary and authorization (issue #52)
@@ -155,9 +153,9 @@ fall-back and spring-forward transitions. A monthly day that does not exist
 in a month is skipped for that month. One-time schedules store the resolved
 UTC instant directly (`atUtc`) and are the only jobs with a fixed next run.
 
-`response_type` is stored metadata for the execution engine (`message` posts
-the agent's response to the channel; `silent` suppresses posting); this issue
-only persists it.
+`response_type` is stored metadata for the [execution
+engine](scheduler-execution.md) (`message` posts the agent's response to the
+channel; `silent` suppresses posting).
 
 ## Configuration
 
@@ -184,18 +182,25 @@ scoped by the stable conversation key:
   the schedule (migration 8, `NOT NULL DEFAULT ''`). Pre-authorization rows are
   backfilled with an empty id, which the fire-time gate treats as unattributed
   and refuses to run.
-- `status`: `active` or `cancelled`; `created_at`, `cancelled_at`.
+- `status`: `active`, `cancelled`, or — after migration 9 — `completed` for
+  fired one-time jobs; `created_at`, `cancelled_at`, and `last_run_at` bookkeep
+  the lifecycle and last fire instant.
 
 Cancelling is a soft delete: status flips to `cancelled` with `cancelled_at`,
 keeping the row for audit; listings return only active jobs ordered by
 creation time. Cancellation is keyed by both `id` and `conversation_key`, so
 one conversation can never cancel another's job. Times are stored as UTC
-everywhere. A fresh empty database bootstraps migrations 1 through 8 in one
+everywhere. A fresh empty database bootstraps migrations 1 through 9 in one
 transaction; a verified migration-5 database receives the timezone table and
-the scheduler table (migrations 6, 7, 8) incrementally without touching its
-history, and a verified migration-7 database receives migration 8's attribution
-column additively with legacy rows backfilled to `''`. Jobs survive restarts,
-container recreation, and `/clear-session`; there is no expiration.
+the scheduler table (migrations 6, 7, 8) plus migration 9's execution-engine
+rebuild incrementally without touching its history, and a verified
+migration-7 database receives migration 8's attribution column additively
+with legacy rows backfilled to `''` before migration 9 rebuilds the table.
+Jobs survive restarts, container recreation, and `/clear-session`; there is
+no expiration. Migration 9 extends the table for the [execution
+engine](scheduler-execution.md): a `last_run_at` fire marker that re-arms
+recurring jobs, and a `completed` status that retires fired one-time jobs while
+keeping their rows for audit.
 
 ## Security and privacy
 
@@ -270,9 +275,11 @@ wrote, the harness-derived identities, and nothing else.
   recurrence shape, the scheduling-user round-trip, per-conversation
   isolation, durable cancel across a repository reopen, the storage-layer
   shape constraint, the fresh-database bootstrap including migrations 1
-  through 8, the incremental migration-6+7+8 path for a verified migration-5
-  database, and the additive migration-8 upgrade of a migration-7 database
-  with legacy rows backfilled to an unattributed scheduler.
+  through 9, the incremental migration-6+7+8+9 path for a verified migration-5
+  database, the additive migration-8 upgrade of a migration-7 database
+  with legacy rows backfilled to an unattributed scheduler, and the
+  migration-9 rebuild that preserves jobs, attribution, and history while
+  adding `last_run_at` and the `completed` status.
 - `test/conversation-service.test.ts` covers the fire-time gate: scheduled
   runs resolve the conversation session and kind from the stored key, persist
   scheduler-attributed history and events, skip revoked members, enforce the

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ConversationService,
-  deriveConversationIdentity
+  deriveConversationIdentity,
+  parseConversationKey
 } from "../src/conversation-service.js";
 import type {
   ChannelMembershipChecker,
@@ -40,6 +41,39 @@ describe("conversation identity", () => {
     });
   });
 
+});
+
+describe("conversation identity parsing", () => {
+  it("restores DM and guild identities from stable conversation keys", () => {
+    expect(parseConversationKey("dm:chan-1")).toEqual({
+      key: "dm:chan-1",
+      kind: "dm",
+      channelId: "chan-1"
+    });
+    expect(parseConversationKey("guild:g1:channel:c1")).toEqual({
+      key: "guild:g1:channel:c1",
+      kind: "guild",
+      guildId: "g1",
+      channelId: "c1"
+    });
+  });
+
+  it("returns undefined for blank or malformed conversation keys", () => {
+    expect(parseConversationKey("")).toBeUndefined();
+    expect(parseConversationKey("dm:")).toBeUndefined();
+    expect(parseConversationKey("guild:g1")).toBeUndefined();
+    expect(parseConversationKey("guild:g1:channel:")).toBeUndefined();
+    expect(parseConversationKey("channel:c1")).toBeUndefined();
+  });
+
+  it("round-trips identities produced by deriveChannelIdentity", () => {
+    const dm = deriveConversationIdentity(inbound({ channelId: "dm-key" }));
+    expect(parseConversationKey(dm.key)).toEqual(dm);
+    const guild = deriveConversationIdentity(
+      inbound({ guildId: "guild", channelId: "thread", parentChannelId: "parent" })
+    );
+    expect(parseConversationKey(guild.key)).toEqual(guild);
+  });
 });
 
 describe("ConversationService incoming message logging", () => {
@@ -461,6 +495,58 @@ describe("ConversationService", () => {
     await expect(Promise.all([first, second])).resolves.toEqual(["first", "second"]);
     expect(pi.generate).toHaveBeenCalledTimes(2);
   });
+
+  it("serializes exclusive scheduled work behind an in-flight conversation turn", async () => {
+    let release: ((result: PiGenerationResult) => void) | undefined;
+    const firstResult = new Promise<PiGenerationResult>((resolve) => {
+      release = resolve;
+    });
+    const pi: PiGateway = {
+      checkHealth: vi.fn().mockResolvedValue(undefined),
+      setBotDisplayName: vi.fn(),
+      generate: vi
+        .fn()
+        .mockImplementationOnce(() => firstResult)
+        .mockResolvedValue({ text: "{\"type\":\"silent\"}", model: "test-model" })
+    };
+    const { service } = createService(pi);
+    const message = service.handleMessage(inbound({ discordMessageId: "first" }));
+    const order: string[] = [];
+    const scheduled = service.runExclusive("dm:channel-1", async () => {
+      order.push("scheduled");
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    order.push("checked");
+    expect(order).toEqual(["checked"]);
+
+    release?.({ text: "first", model: "test-model" });
+    await message;
+    await scheduled;
+    expect(order).toEqual(["checked", "scheduled"]);
+  });
+
+  it("serializes two exclusive tasks for the same conversation", async () => {
+    const { service } = createService();
+    const order: string[] = [];
+    let releaseFirst: (() => void) | undefined;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = service.runExclusive("dm:channel-1", async () => {
+      await firstGate;
+      order.push("first");
+    });
+    const second = service.runExclusive("dm:channel-1", async () => {
+      order.push("second");
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(order).toEqual([]);
+    releaseFirst?.();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["first", "second"]);
+  });
 });
 
 describe("ConversationService scheduled prompts", () => {
@@ -511,10 +597,14 @@ describe("ConversationService scheduled prompts", () => {
     expect(input).toMatchObject({
       conversationKey: "guild:guild-1:channel:group-1",
       conversationKind: "guild",
-      authorId: "603384387685449728",
-      prompt: "Post the weekly standup summary"
+      authorId: "603384387685449728"
     });
     expect(input?.sourceMessageId).toMatch(/^scheduled:job-1:/);
+    // The stored prompt reaches the agent as the task, framed with the
+    // execution engine's strict JSON response contract.
+    expect(input?.prompt).toContain("Post the weekly standup summary");
+    expect(input?.prompt).toContain('{"type":"message","content":');
+    expect(input?.prompt).toContain('{"type":"silent"}');
     const session = repository?.getOrCreateSession(
       { key: "guild:guild-1:channel:group-1", kind: "guild", guildId: "guild-1", channelId: "group-1" },
       "test-model"

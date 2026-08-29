@@ -987,3 +987,111 @@ describe("DiscordGateway link-embed suppression", () => {
     expect(threadReply).not.toHaveBeenCalledWith(expect.objectContaining({ flags: expect.anything() }));
   });
 });
+
+describe("DiscordGateway.sendToConversation", () => {
+  const guildIdentity = {
+    key: "guild:g1:channel:channel",
+    kind: "guild" as const,
+    guildId: "g1",
+    channelId: "channel"
+  };
+  const dmIdentity = { key: "dm:dm-channel", kind: "dm" as const, channelId: "dm-channel" };
+
+  interface SendableClient {
+    client: Client;
+    send: ReturnType<typeof vi.fn>;
+  }
+
+  function createSendableClient(sendImplementation?: () => Promise<void>): SendableClient {
+    const send = vi.fn(sendImplementation ?? (async () => undefined));
+    const channel = { id: "channel", isSendable: () => true, send };
+    const client = new FakeClient();
+    Object.assign(client, { channels: { fetch: vi.fn().mockResolvedValue(channel) } });
+    return { client: client as unknown as Client, send };
+  }
+
+  function createGateway(
+    client: Client,
+    logger = createLoggerMock(),
+    options: { suppressEmbeds?: boolean; embedsAllowedChannelIds?: string[] } = {}
+  ): DiscordGateway {
+    return new DiscordGateway(
+      {
+        token: "token",
+        channelIds: [],
+        userIds: [],
+        suppressEmbeds: options.suppressEmbeds ?? true,
+        embedsAllowedChannelIds: options.embedsAllowedChannelIds ?? []
+      },
+      { handleMessage: vi.fn() } as unknown as ConversationService,
+      logger,
+      client
+    );
+  }
+
+  it("posts scheduler output to the resolved channel with suppressed embeds", async () => {
+    const { client, send } = createSendableClient();
+    const gateway = createGateway(client);
+
+    await expect(gateway.sendToConversation(guildIdentity, "Standing reminder")).resolves.toBe(true);
+    expect(send).toHaveBeenCalledWith({
+      content: "Standing reminder",
+      flags: MessageFlags.SuppressEmbeds
+    });
+  });
+
+  it("omits the suppression flag for per-channel embed allowlists and disabled suppression", async () => {
+    const allowed = createSendableClient();
+    await createGateway(allowed.client, createLoggerMock(), {
+      embedsAllowedChannelIds: ["channel"]
+    }).sendToConversation(guildIdentity, "plain");
+    expect(allowed.send).toHaveBeenCalledWith({ content: "plain" });
+
+    const disabled = createSendableClient();
+    await createGateway(disabled.client, createLoggerMock(), { suppressEmbeds: false }).sendToConversation(
+      dmIdentity,
+      "plain"
+    );
+    expect(disabled.send).toHaveBeenCalledWith({ content: "plain" });
+  });
+
+  it("splits long scheduler output at Discord-safe boundaries", async () => {
+    const { client, send } = createSendableClient();
+    const gateway = createGateway(client);
+    const content = "word ".repeat(600); // 3000 characters
+
+    await gateway.sendToConversation(guildIdentity, content);
+    expect(send.mock.calls.length).toBeGreaterThan(1);
+    for (const call of send.mock.calls) {
+      expect(((call[0] as { content: string }).content as string).length).toBeLessThanOrEqual(2000);
+    }
+  });
+
+  it("warns and reports failure when the resolved channel is not sendable", async () => {
+    const send = vi.fn();
+    const raw = new FakeClient();
+    Object.assign(raw, { channels: { fetch: vi.fn().mockResolvedValue({ id: "channel", isSendable: () => false }) } });
+    const logger = createLoggerMock();
+    const gateway = createGateway(raw as unknown as Client, logger);
+
+    await expect(gateway.sendToConversation(dmIdentity, "hello")).resolves.toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "discord_channel_not_sendable",
+      expect.objectContaining({ conversationKey: "dm:dm-channel", channelId: "dm-channel" })
+    );
+  });
+
+  it("logs an error and reports failure when the channel cannot be fetched", async () => {
+    const raw = new FakeClient();
+    Object.assign(raw, { channels: { fetch: vi.fn().mockRejectedValue(new Error("unknown channel")) } });
+    const logger = createLoggerMock();
+    const gateway = createGateway(raw as unknown as Client, logger);
+
+    await expect(gateway.sendToConversation(dmIdentity, "hello")).resolves.toBe(false);
+    expect(logger.error).toHaveBeenCalledWith(
+      "scheduler_channel_unavailable",
+      expect.objectContaining({ conversationKey: "dm:dm-channel", errorMessage: "unknown channel" })
+    );
+  });
+});

@@ -11,7 +11,15 @@ import {
   type ThreadChannel
 } from "discord.js";
 import type { ConversationService } from "./conversation-service.js";
-import type { ChannelRef, InboundMessage, Logger, MembershipStatus, ResponseIndicator, SourceMessage } from "./domain.js";
+import type {
+  ChannelRef,
+  ConversationIdentity,
+  InboundMessage,
+  Logger,
+  MembershipStatus,
+  ResponseIndicator,
+  SourceMessage
+} from "./domain.js";
 import { resolveChannelMembership } from "./scheduler-authorization.js";
 import { safeError } from "./logger.js";
 
@@ -379,6 +387,45 @@ export class DiscordGateway {
         await message.channel.send(options);
       }
     }
+  }
+
+  /**
+   * Deliver application-generated content (scheduler-fired prompt responses)
+   * to a conversation's channel. Resolves the channel from the conversation
+   * identity, applies the same link-embed suppression as every outbound
+   * message, and splits long content at Discord-safe boundaries. Returns
+   * false when the channel is unavailable or not sendable; send failures
+   * propagate to the caller instead of being hidden.
+   */
+  public async sendToConversation(
+    identity: ConversationIdentity,
+    content: string
+  ): Promise<boolean> {
+    let channel: unknown;
+    try {
+      channel = await this.client.channels.fetch(identity.channelId);
+    } catch (error) {
+      this.logger.error("scheduler_channel_unavailable", {
+        conversationKey: identity.key,
+        channelId: identity.channelId,
+        ...safeError(error)
+      });
+      return false;
+    }
+    const sendable = channel as { isSendable?: () => boolean; send?: unknown } | null;
+    if (!sendable || sendable.isSendable?.() === false || typeof sendable.send !== "function") {
+      this.logger.warn("discord_channel_not_sendable", {
+        conversationKey: identity.key,
+        channelId: identity.channelId
+      });
+      return false;
+    }
+    for (const chunk of splitDiscordMessage(content)) {
+      await (sendable.send as (options: unknown) => Promise<unknown>)(
+        this.messageOptions(chunk, identity.channelId)
+      );
+    }
+    return true;
   }
 
   private messageChannelId(message: Message): string {

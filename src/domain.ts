@@ -158,8 +158,17 @@ export interface ScheduledPromptRecord {
   responseType: PromptResponseType;
   /** Harness-injected Discord user id that requested the schedule. */
   scheduledByUserId: string;
-  status: "active" | "cancelled";
+  /**
+   * `active` until the execution engine consumes it: one-time jobs end as
+   * `completed` after firing, user cancellations become `cancelled`.
+   */
+  status: "active" | "cancelled" | "completed";
   createdAt: string;
+  /**
+   * Instant the execution engine last armed this job, set just after each
+   * fire. Absent until the job has fired at least once.
+   */
+  lastRunAt?: string;
   cancelledAt?: string;
 }
 
@@ -183,6 +192,21 @@ export interface ScheduledPromptStore {
   cancelScheduledPrompt(conversationKey: string, id: string): boolean;
 }
 
+/**
+ * Application-facing storage for the scheduler execution engine. Unlike the
+ * model-facing {@link ScheduledPromptStore}, these operations run inside the
+ * process boundary across every conversation and are never exposed to the
+ * model as tool parameters or tool outputs.
+ */
+export interface SchedulerExecutionStore {
+  /** Every active job across conversations, ordered by creation. */
+  listActiveScheduledPrompts(): ScheduledPromptRecord[];
+  /** Records the moment a recurring job was last armed, blocking re-fires. */
+  markScheduledPromptFired(id: string, firedAtUtc: string): void;
+  /** Marks a one-time job completed after it fired. */
+  completeScheduledPrompt(id: string, completedAtUtc: string): void;
+}
+
 export interface PiGateway {
   checkHealth(): Promise<void>;
   generate(input: PiGenerationInput): Promise<PiGenerationResult>;
@@ -191,6 +215,32 @@ export interface PiGateway {
 
 export interface LogFields {
   [key: string]: unknown;
+}
+
+/**
+ * Conversation coordinator surface for the scheduler execution engine. The
+ * engine shares the conversation service's per-conversation queue so a
+ * scheduler-fired turn can never race a live Discord turn on the same durable
+ * PI session, and every fired job passes through the same authorization gate
+ * as the interactive pipeline before any generation work.
+ */
+export interface ConversationWorkQueue {
+  runExclusive<T>(conversationKey: string, task: () => Promise<T>): Promise<T>;
+  /**
+   * Authorize and run one scheduled job in its stored conversation's scope
+   * (scope gate, membership re-check, queued generation, turn persistence).
+   * Returns null for denied or failed runs; posting belongs to the engine.
+   */
+  runScheduledPrompt(record: ScheduledPromptRecord): Promise<PiGenerationResult | null>;
+}
+
+/**
+ * Delivers application-generated content to a conversation's Discord channel.
+ * Implemented by the Discord gateway; returns false when content could not be
+ * delivered, without throwing for missing or non-sendable channels.
+ */
+export interface ScheduledPromptDispatcher {
+  sendToConversation(identity: ConversationIdentity, content: string): Promise<boolean>;
 }
 
 export interface LogEntry extends LogFields {

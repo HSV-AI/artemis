@@ -29,7 +29,7 @@ const config: ArtemisConfig = {
 describe("ArtemisApplication", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("checks the model provider before starting Discord and closes dependencies on stop", async () => {
+  it("checks the model provider, then starts Discord and the scheduler, and closes everything on stop", async () => {
     const order: string[] = [];
     const pi = createPiMock();
     vi.mocked(pi.checkHealth).mockImplementation(async () => {
@@ -39,14 +39,24 @@ describe("ArtemisApplication", () => {
       start: vi.fn().mockImplementation(async () => {
         order.push("discord");
       }),
-      stop: vi.fn()
+      stop: vi.fn().mockImplementation(() => {
+        order.push("discord-stop");
+      })
     } as unknown as DiscordGateway;
+    const scheduler = {
+      start: vi.fn(() => {
+        order.push("scheduler");
+      }),
+      stop: vi.fn(() => {
+        order.push("scheduler-stop");
+      })
+    };
     const repository = { close: vi.fn() } as unknown as ArtemisRepository;
     const logger = createLoggerMock();
-    const application = new ArtemisApplication(config, { pi, discord, repository, logger });
+    const application = new ArtemisApplication(config, { pi, discord, repository, logger, scheduler });
 
     await application.start();
-    expect(order).toEqual(["pi", "discord"]);
+    expect(order).toEqual(["pi", "discord", "scheduler"]);
     expect(logger.info).toHaveBeenCalledWith("artemis_starting", {
       channelIds: ["channel-one", "channel-two"],
       model: "model",
@@ -55,7 +65,13 @@ describe("ArtemisApplication", () => {
     });
 
     application.stop();
-    expect(discord.stop).toHaveBeenCalledOnce();
+    expect(order).toEqual([
+      "pi",
+      "discord",
+      "scheduler",
+      "scheduler-stop",
+      "discord-stop"
+    ]);
     expect(repository.close).toHaveBeenCalledOnce();
     expect(logger.info).toHaveBeenCalledWith("artemis_stopped");
   });
@@ -64,16 +80,19 @@ describe("ArtemisApplication", () => {
     const pi = createPiMock();
     vi.mocked(pi.checkHealth).mockRejectedValue(new Error("offline"));
     const discord = { start: vi.fn(), stop: vi.fn() } as unknown as DiscordGateway;
+    const scheduler = { start: vi.fn(), stop: vi.fn() };
     const repository = { close: vi.fn() } as unknown as ArtemisRepository;
     const logger = createLoggerMock();
     const application = new ArtemisApplication(config, {
       pi,
       discord,
       repository,
-      logger
+      logger,
+      scheduler
     });
     await expect(application.start()).rejects.toThrow("offline");
     expect(discord.start).not.toHaveBeenCalled();
+    expect(scheduler.start).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith("artemis_start_failed", {
       errorName: "Error",
       errorMessage: "offline"
@@ -87,11 +106,12 @@ describe("ArtemisApplication", () => {
       start: vi.fn().mockResolvedValue(undefined),
       stop: vi.fn()
     } as unknown as DiscordGateway;
+    const scheduler = { start: vi.fn(), stop: vi.fn() };
     const repository = {
       recordLog: vi.fn(),
       close: vi.fn()
     } as unknown as ArtemisRepository;
-    const application = new ArtemisApplication(config, { pi, discord, repository });
+    const application = new ArtemisApplication(config, { pi, discord, repository, scheduler });
 
     await application.start();
     application.stop();
@@ -118,11 +138,13 @@ describe("ArtemisApplication", () => {
     });
     const pi = createPiMock();
     const repository = { close: vi.fn() } as unknown as ArtemisRepository;
+    const scheduler = { start: vi.fn(), stop: vi.fn() };
     const application = new ArtemisApplication(config, {
       pi,
       repository,
       logger: createLoggerMock(),
-      discordClient: client as unknown as Client
+      discordClient: client as unknown as Client,
+      scheduler
     });
 
     await application.start();
