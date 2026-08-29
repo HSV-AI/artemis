@@ -117,6 +117,48 @@ export interface ChannelTimezoneStore {
   setChannelTimezone(conversationKey: string, timezone: string): void;
 }
 
+export type PromptResponseType = "message" | "silent";
+
+/**
+ * A validated prompt schedule. One-time schedules carry an absolute UTC
+ * instant; recurring schedules carry a zone-local wall-clock time plus the
+ * IANA timezone it is interpreted in. Recurring UTC instants are derived at
+ * evaluation time so daylight saving time stays correct.
+ */
+export type PromptSchedule =
+  | { type: "once"; atUtc: string }
+  | { type: "daily"; time: string; timezone: string }
+  | { type: "weekly"; time: string; dayOfWeek: number; timezone: string }
+  | { type: "monthly"; time: string; dayOfMonth: number; timezone: string };
+
+export interface ScheduledPromptRecord {
+  id: string;
+  conversationKey: string;
+  prompt: string;
+  schedule: PromptSchedule;
+  responseType: PromptResponseType;
+  status: "active" | "cancelled";
+  createdAt: string;
+  cancelledAt?: string;
+}
+
+export interface ScheduledPromptInput {
+  prompt: string;
+  schedule: PromptSchedule;
+  responseType: PromptResponseType;
+}
+
+/**
+ * Durable storage for scheduled prompts, scoped by the stable conversation
+ * key. Backed by SQLite so jobs survive restarts. The harness injects the
+ * key; the model can only manage schedules for the conversation it is in.
+ */
+export interface ScheduledPromptStore {
+  createScheduledPrompt(conversationKey: string, input: ScheduledPromptInput): ScheduledPromptRecord;
+  listScheduledPrompts(conversationKey: string): ScheduledPromptRecord[];
+  cancelScheduledPrompt(conversationKey: string, id: string): boolean;
+}
+
 export interface PiGateway {
   checkHealth(): Promise<void>;
   generate(input: PiGenerationInput): Promise<PiGenerationResult>;
