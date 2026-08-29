@@ -11,7 +11,8 @@ import {
   type ThreadChannel
 } from "discord.js";
 import type { ConversationService } from "./conversation-service.js";
-import type { ChannelRef, InboundMessage, Logger, ResponseIndicator, SourceMessage } from "./domain.js";
+import type { ChannelRef, InboundMessage, Logger, MembershipStatus, ResponseIndicator, SourceMessage } from "./domain.js";
+import { resolveChannelMembership } from "./scheduler-authorization.js";
 import { safeError } from "./logger.js";
 
 const DISCORD_MESSAGE_LIMIT = 2_000;
@@ -263,6 +264,31 @@ export class DiscordGateway {
 
   public stop(): void {
     this.client.destroy();
+  }
+
+  /**
+   * Answer whether a Discord user is a member of the conversation behind a
+   * stable conversation key, from live Discord state. DM conversations check
+   * the channel's recipient(s); Channel Groups require guild membership plus
+   * the View Channel permission on the conversation's parent channel.
+   * Definitive “resource unknown” API answers deny membership outright;
+   * transient failures return "unknown" so callers can apply their own
+   * failure policy. Implements {@link ChannelMembershipChecker} so the
+   * composition can wire this straight into the scheduler tools and the
+   * scheduled-run authorization gate.
+   */
+  public async isChannelMember(
+    conversationKey: string,
+    userId: string
+  ): Promise<MembershipStatus> {
+    return resolveChannelMembership(
+      {
+        fetchChannel: async (channelId) => this.client.channels.fetch(channelId),
+        fetchGuild: async (guildId) => this.client.guilds.fetch(guildId)
+      },
+      conversationKey,
+      userId
+    );
   }
 
   public async handleInteraction(interaction: Interaction): Promise<void> {

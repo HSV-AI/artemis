@@ -93,6 +93,7 @@ interface ScheduledPromptRow {
   status: "active" | "cancelled";
   created_at: string;
   cancelled_at: string | null;
+  scheduled_by_user_id: string | null;
 }
 
 function now(): string {
@@ -435,8 +436,9 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       .prepare(
         `INSERT INTO scheduled_prompts
          (id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
-          day_of_week, day_of_month, timezone, response_type, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`
+          day_of_week, day_of_month, timezone, response_type, scheduled_by_user_id,
+          status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`
       )
       .run(
         id,
@@ -449,6 +451,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
         schedule.type === "monthly" ? schedule.dayOfMonth : null,
         schedule.type === "once" ? null : schedule.timezone,
         input.responseType,
+        input.scheduledByUserId,
         createdAt
       );
     return {
@@ -457,6 +460,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       prompt: input.prompt,
       schedule,
       responseType: input.responseType,
+      scheduledByUserId: input.scheduledByUserId,
       status: "active",
       createdAt
     };
@@ -511,6 +515,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       prompt: row.prompt,
       schedule,
       responseType: row.response_type,
+      scheduledByUserId: row.scheduled_by_user_id ?? "",
       status: row.status,
       createdAt: row.created_at,
       ...(row.cancelled_at ? { cancelledAt: row.cancelled_at } : {})
@@ -603,6 +608,10 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       this.applyMigration7();
     }
 
+    if (!applied.has(8)) {
+      this.applyMigration8();
+    }
+
     // A fully migrated database is the steady state. The bootstrap path
     // creates a fully current empty database; earlier migrations are
     // preserved as historical database facts and are never re-run.
@@ -653,6 +662,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
           day_of_month INTEGER,
           timezone TEXT,
           response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
+          scheduled_by_user_id TEXT NOT NULL DEFAULT '',
           status TEXT NOT NULL CHECK (status IN ('active', 'cancelled')),
           created_at TEXT NOT NULL,
           cancelled_at TEXT,
@@ -678,6 +688,32 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       this.database
         .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
         .run(7, timestamp);
+    });
+    transaction();
+  }
+
+  /**
+   * Migration 8 attributes every scheduled prompt to its scheduling user. It
+   * is additive: an existing verified migration-7 database receives the new
+   * column in one transaction. Rows written before authorization existed are
+   * backfilled with an empty user id, which the scheduler authorization gate
+   * treats as unattributed and refuses to fire.
+   */
+  private applyMigration8(): void {
+    const timestamp = now();
+    const transaction = this.database.transaction(() => {
+      const columns = this.database.prepare("PRAGMA table_info(scheduled_prompts)").all() as {
+        name: string;
+      }[];
+      const hasColumn = columns.some((column) => column.name === "scheduled_by_user_id");
+      if (!hasColumn) {
+        this.database.exec(
+          "ALTER TABLE scheduled_prompts ADD COLUMN scheduled_by_user_id TEXT NOT NULL DEFAULT '';"
+        );
+      }
+      this.database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+        .run(8, timestamp);
     });
     transaction();
   }
@@ -809,6 +845,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
           day_of_month INTEGER,
           timezone TEXT,
           response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
+          scheduled_by_user_id TEXT NOT NULL DEFAULT '',
           status TEXT NOT NULL CHECK (status IN ('active', 'cancelled')),
           created_at TEXT NOT NULL,
           cancelled_at TEXT,
@@ -834,7 +871,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       const insert = this.database.prepare(
         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)"
       );
-      for (const version of [1, 2, 3, 4, 5, 6, 7]) {
+      for (const version of [1, 2, 3, 4, 5, 6, 7, 8]) {
         insert.run(version, timestamp);
       }
     });

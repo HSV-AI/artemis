@@ -251,7 +251,7 @@ describe("ArtemisRepository", () => {
     expect(stored?.parentChannelId).toBeUndefined();
   });
 
-  it("bootstraps a fresh empty database with the current schema and migrations 1 through 7", () => {
+  it("bootstraps a fresh empty database with the current schema and migrations 1 through 8", () => {
     const directory = mkdtempSync(join(tmpdir(), "artemis-bootstrap-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "artemis.sqlite");
@@ -269,7 +269,7 @@ describe("ArtemisRepository", () => {
     const piSessionColumns = database.prepare("PRAGMA table_info(pi_sessions)").all() as { name: string }[];
     database.close();
 
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(tables.map((row) => row.name)).toEqual(
       expect.arrayContaining([
         "conversations",
@@ -315,7 +315,7 @@ describe("ArtemisRepository", () => {
     const downgrade = new Database(path);
     downgrade.exec("DROP TABLE channel_timezones;");
     downgrade.exec("DROP TABLE scheduled_prompts;");
-    downgrade.prepare("DELETE FROM schema_migrations WHERE version IN (6, 7)").run();
+    downgrade.prepare("DELETE FROM schema_migrations WHERE version IN (6, 7, 8)").run();
     downgrade.close();
     repository.close();
     repository = undefined;
@@ -354,7 +354,7 @@ describe("ArtemisRepository", () => {
 
     expect(beforeVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
     expect(beforeTables).toEqual([]);
-    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(afterTables.map((row) => row.name)).toEqual(["channel_timezones", "scheduled_prompts"]);
   });
 
@@ -458,6 +458,7 @@ describe("ArtemisRepository", () => {
     const created = repository.createScheduledPrompt("dm:one", {
       prompt: "Remind me to stretch",
       schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
+      scheduledByUserId: "user-1",
       responseType: "silent"
     });
 
@@ -474,21 +475,25 @@ describe("ArtemisRepository", () => {
     const once = repository.createScheduledPrompt("dm:one", {
       prompt: "once",
       schedule: { type: "once", atUtc: "2026-09-01T14:15:00.000Z" },
+      scheduledByUserId: "user-1",
       responseType: "message"
     });
     const daily = repository.createScheduledPrompt("dm:one", {
       prompt: "daily",
       schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
+      scheduledByUserId: "user-1",
       responseType: "message"
     });
     const weekly = repository.createScheduledPrompt("dm:one", {
       prompt: "weekly",
       schedule: { type: "weekly", time: "08:00", dayOfWeek: 6, timezone: "UTC" },
+      scheduledByUserId: "user-1",
       responseType: "silent"
     });
     const monthly = repository.createScheduledPrompt("dm:one", {
       prompt: "monthly",
       schedule: { type: "monthly", time: "07:30", dayOfMonth: 31, timezone: "Europe/Berlin" },
+      scheduledByUserId: "user-1",
       responseType: "message"
     });
 
@@ -505,6 +510,7 @@ describe("ArtemisRepository", () => {
     repository.createScheduledPrompt("dm:one", {
       prompt: "mine",
       schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      scheduledByUserId: "user-1",
       responseType: "message"
     });
 
@@ -519,6 +525,7 @@ describe("ArtemisRepository", () => {
     const created = repository.createScheduledPrompt("dm:one", {
       prompt: "cancel me",
       schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      scheduledByUserId: "user-1",
       responseType: "message"
     });
 
@@ -530,6 +537,69 @@ describe("ArtemisRepository", () => {
     repository = undefined;
     repository = new ArtemisRepository(path);
     expect(repository.listScheduledPrompts("dm:one")).toEqual([]);
+  });
+
+  it("records the scheduling user with each job and returns it in listings", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "attribute me",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "scheduler-42"
+    });
+
+    expect(created.scheduledByUserId).toBe("scheduler-42");
+    const listed = repository.listScheduledPrompts("dm:one");
+    expect(listed).toHaveLength(1);
+    expect(listed.map((job) => job.scheduledByUserId)).toEqual(["scheduler-42"]);
+  });
+
+  it("applies migration 8 additively, backfilling legacy jobs with an unattributed scheduler", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-migration8-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "pre-migration job",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    repository.close();
+    repository = undefined;
+
+    // Simulate a migration-7 database: drop the attribution column and its marker.
+    const downgrade = new Database(path);
+    downgrade.exec("ALTER TABLE scheduled_prompts DROP COLUMN scheduled_by_user_id;");
+    downgrade.prepare("DELETE FROM schema_migrations WHERE version = 8").run();
+    downgrade.close();
+
+    repository = new ArtemisRepository(path);
+    const listed = repository.listScheduledPrompts("dm:one");
+    expect(listed).toHaveLength(1);
+    expect(listed.map((job) => job.id)).toEqual([created.id]);
+    expect(listed.map((job) => job.scheduledByUserId)).toEqual([""]);
+
+    const attributed = repository.createScheduledPrompt("dm:one", {
+      prompt: "after migration",
+      schedule: { type: "daily", time: "10:00", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-2"
+    });
+    expect(attributed.scheduledByUserId).toBe("user-2");
+    repository.close();
+    repository = undefined;
+
+    const database = new Database(path, { readonly: true });
+    const versions = database
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all() as { version: number }[];
+    const columns = database.prepare("PRAGMA table_info(scheduled_prompts)").all() as {
+      name: string;
+    }[];
+    database.close();
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(columns.map((column) => column.name)).toContain("scheduled_by_user_id");
   });
 
   it("enforces the recurrence shape at the storage layer", () => {

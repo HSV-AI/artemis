@@ -10,6 +10,7 @@ import type { AssistantMessage, ThinkingContent } from "@earendil-works/pi-ai";
 import { DEFAULT_DGRAPH_URL, type ArtemisConfig } from "./config.js";
 import { DgraphClient, GraphMemory } from "./dgraph-memory.js";
 import type {
+  ChannelMembershipChecker,
   ChannelTimezoneStore,
   ConversationKind,
   Logger,
@@ -195,7 +196,8 @@ export class PiSdkGateway implements PiGateway {
     private readonly fetchImplementation: typeof fetch = fetch,
     logger?: Pick<Logger, "info" | "warn">,
     timezoneStore?: ChannelTimezoneStore,
-    schedulerStore?: ScheduledPromptStore
+    schedulerStore?: ScheduledPromptStore,
+    private readonly membership?: ChannelMembershipChecker
   ) {
     const dgraph = new DgraphClient(
       config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
@@ -287,16 +289,17 @@ export class PiSdkGateway implements PiGateway {
       ...(this.timezoneStore
         ? createChannelTimezoneTools(this.timezoneStore, { conversationKey: input.conversationKey })
         : []),
-      // Scheduler tools are bound to the harness-injected conversation key and
-      // to the conversation's stored timezone. Model parameters cannot supply
-      // or override the channel identity or the default timezone.
+      // Scheduler tools are bound to the harness-injected conversation key,
+      // scheduling user, and membership authority, plus the conversation's
+      // stored timezone. Model parameters cannot supply or override the
+      // channel identity, the scheduling user, or the default timezone.
       ...(this.schedulerStore
-        ? createSchedulerTools(
-            this.schedulerStore,
-            defaultTimezone === undefined
-              ? { conversationKey: input.conversationKey }
-              : { conversationKey: input.conversationKey, defaultTimezone }
-          )
+        ? createSchedulerTools(this.schedulerStore, {
+            conversationKey: input.conversationKey,
+            schedulingUserId: input.authorId,
+            ...(defaultTimezone === undefined ? {} : { defaultTimezone }),
+            ...(this.membership === undefined ? {} : { membership: this.membership })
+          })
         : [])
     ];
     const modelRuntime = this.modelRuntime;
