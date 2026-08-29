@@ -16,7 +16,8 @@ import type {
   PiGateway,
   PiGenerationInput,
   PiGenerationResult,
-  PiSessionStore
+  PiSessionStore,
+  ScheduledPromptStore
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
 import { loadHsvaiEventCatalog } from "./hsvai-event-catalog.js";
@@ -33,6 +34,7 @@ import {
   asPiSessionManager,
   SqlitePiSessionManager
 } from "./pi-session-manager.js";
+import { createSchedulerTools } from "./scheduler-tools.js";
 import { createChannelTimezoneTools } from "./timezone-tools.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
 
@@ -175,6 +177,7 @@ export class PiSdkGateway implements PiGateway {
   private readonly memory: GraphMemory;
   private readonly knowledge: HsvaiKnowledge;
   private readonly timezoneStore: ChannelTimezoneStore | undefined;
+  private readonly schedulerStore: ScheduledPromptStore | undefined;
 
   public constructor(
     private readonly config: Pick<ArtemisConfig, "model" | "persona"> &
@@ -191,7 +194,8 @@ export class PiSdkGateway implements PiGateway {
     private readonly sessionStore: PiSessionStore,
     private readonly fetchImplementation: typeof fetch = fetch,
     logger?: Pick<Logger, "info" | "warn">,
-    timezoneStore?: ChannelTimezoneStore
+    timezoneStore?: ChannelTimezoneStore,
+    schedulerStore?: ScheduledPromptStore
   ) {
     const dgraph = new DgraphClient(
       config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
@@ -210,6 +214,7 @@ export class PiSdkGateway implements PiGateway {
     );
     this.memory = new GraphMemory(dgraph);
     this.timezoneStore = timezoneStore;
+    this.schedulerStore = schedulerStore;
     const sourceCachePath = config.sqlitePath && config.sqlitePath !== ":memory:"
       ? join(dirname(config.sqlitePath), "hsvai-source-cache.json")
       : undefined;
@@ -264,6 +269,9 @@ export class PiSdkGateway implements PiGateway {
   public async generate(input: PiGenerationInput): Promise<PiGenerationResult> {
     await this.initialize();
     const hsvaiCorpusRevision = await this.knowledge.corpusRevision();
+    // The conversation's stored timezone is resolved by the harness and
+    // injected into the scheduler tools; the model cannot set it per call.
+    const defaultTimezone = this.timezoneStore?.getChannelTimezone(input.conversationKey);
     const customTools = [
       ...this.customTools,
       createHsvaiKnowledgeTool(this.knowledge, hsvaiCorpusRevision),
@@ -278,6 +286,17 @@ export class PiSdkGateway implements PiGateway {
       // conversation key. No tool parameter can influence the channel identity.
       ...(this.timezoneStore
         ? createChannelTimezoneTools(this.timezoneStore, { conversationKey: input.conversationKey })
+        : []),
+      // Scheduler tools are bound to the harness-injected conversation key and
+      // to the conversation's stored timezone. Model parameters cannot supply
+      // or override the channel identity or the default timezone.
+      ...(this.schedulerStore
+        ? createSchedulerTools(
+            this.schedulerStore,
+            defaultTimezone === undefined
+              ? { conversationKey: input.conversationKey }
+              : { conversationKey: input.conversationKey, defaultTimezone }
+          )
         : [])
     ];
     const modelRuntime = this.modelRuntime;

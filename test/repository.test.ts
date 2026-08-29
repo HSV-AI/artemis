@@ -251,7 +251,7 @@ describe("ArtemisRepository", () => {
     expect(stored?.parentChannelId).toBeUndefined();
   });
 
-  it("bootstraps a fresh empty database with the current schema and migrations 1 through 6", () => {
+  it("bootstraps a fresh empty database with the current schema and migrations 1 through 7", () => {
     const directory = mkdtempSync(join(tmpdir(), "artemis-bootstrap-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "artemis.sqlite");
@@ -269,7 +269,7 @@ describe("ArtemisRepository", () => {
     const piSessionColumns = database.prepare("PRAGMA table_info(pi_sessions)").all() as { name: string }[];
     database.close();
 
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(tables.map((row) => row.name)).toEqual(
       expect.arrayContaining([
         "conversations",
@@ -281,6 +281,7 @@ describe("ArtemisRepository", () => {
         "pi_sessions",
         "pi_session_entries",
         "channel_timezones",
+        "scheduled_prompts",
         "schema_migrations"
       ])
     );
@@ -292,7 +293,7 @@ describe("ArtemisRepository", () => {
     ]);
   });
 
-  it("applies incremental migration 6 to a verified migration-5 database without touching its history", () => {
+  it("applies incremental migrations 6 and 7 to a verified migration-5 database without touching its history", () => {
     const directory = mkdtempSync(join(tmpdir(), "artemis-migration5-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "artemis.sqlite");
@@ -310,10 +311,11 @@ describe("ArtemisRepository", () => {
       }
     ]);
     repository.insertAssistant(session.id, { text: "ack", model: "model" });
-    // Simulate a pre-timezone database: drop migration 6 and its table.
+    // Simulate a pre-timezone, pre-scheduler database: drop migrations 6 and 7 and their tables.
     const downgrade = new Database(path);
     downgrade.exec("DROP TABLE channel_timezones;");
-    downgrade.prepare("DELETE FROM schema_migrations WHERE version = 6").run();
+    downgrade.exec("DROP TABLE scheduled_prompts;");
+    downgrade.prepare("DELETE FROM schema_migrations WHERE version IN (6, 7)").run();
     downgrade.close();
     repository.close();
     repository = undefined;
@@ -323,7 +325,10 @@ describe("ArtemisRepository", () => {
       .prepare("SELECT version FROM schema_migrations ORDER BY version")
       .all() as { version: number }[];
     const beforeTables = before
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_timezones'")
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' " +
+        "AND name IN ('channel_timezones', 'scheduled_prompts') ORDER BY name"
+      )
       .all() as { name: string }[];
     before.close();
 
@@ -340,14 +345,17 @@ describe("ArtemisRepository", () => {
       .prepare("SELECT version FROM schema_migrations ORDER BY version")
       .all() as { version: number }[];
     const afterTables = after
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'channel_timezones'")
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' " +
+        "AND name IN ('channel_timezones', 'scheduled_prompts') ORDER BY name"
+      )
       .all() as { name: string }[];
     after.close();
 
     expect(beforeVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
     expect(beforeTables).toEqual([]);
-    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(afterTables.map((row) => row.name)).toEqual(["channel_timezones"]);
+    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(afterTables.map((row) => row.name)).toEqual(["channel_timezones", "scheduled_prompts"]);
   });
 
   it("rejects an existing pre-migration database missing migration 5 with actionable guidance and no partial writes", () => {
@@ -443,5 +451,108 @@ describe("ArtemisRepository", () => {
     expect(repository.getChannelTimezone("dm:one")).toBe("America/Chicago");
     expect(repository.getChannelTimezone("guild:g:channel:c")).toBe("Pacific/Auckland");
     expect(repository.getChannelTimezone("guild:other:channel:other")).toBeUndefined();
+  });
+
+  it("stores a scheduled prompt with its generated id and active status", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "Remind me to stretch",
+      schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
+      responseType: "silent"
+    });
+
+    expect(created.id).toMatch(/[0-9a-f-]{36}/);
+    expect(created.status).toBe("active");
+    expect(created.responseType).toBe("silent");
+    const listed = repository.listScheduledPrompts("dm:one");
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toEqual(created);
+  });
+
+  it("round-trips every recurrence shape through storage", () => {
+    repository = new ArtemisRepository(":memory:");
+    const once = repository.createScheduledPrompt("dm:one", {
+      prompt: "once",
+      schedule: { type: "once", atUtc: "2026-09-01T14:15:00.000Z" },
+      responseType: "message"
+    });
+    const daily = repository.createScheduledPrompt("dm:one", {
+      prompt: "daily",
+      schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
+      responseType: "message"
+    });
+    const weekly = repository.createScheduledPrompt("dm:one", {
+      prompt: "weekly",
+      schedule: { type: "weekly", time: "08:00", dayOfWeek: 6, timezone: "UTC" },
+      responseType: "silent"
+    });
+    const monthly = repository.createScheduledPrompt("dm:one", {
+      prompt: "monthly",
+      schedule: { type: "monthly", time: "07:30", dayOfMonth: 31, timezone: "Europe/Berlin" },
+      responseType: "message"
+    });
+
+    const listed = repository.listScheduledPrompts("dm:one");
+    expect(listed).toHaveLength(4);
+    expect(once.schedule).toEqual({ type: "once", atUtc: "2026-09-01T14:15:00.000Z" });
+    expect(daily.schedule).toEqual({ type: "daily", time: "09:15", timezone: "America/Chicago" });
+    expect(weekly.schedule).toEqual({ type: "weekly", time: "08:00", dayOfWeek: 6, timezone: "UTC" });
+    expect(monthly.schedule).toEqual({ type: "monthly", time: "07:30", dayOfMonth: 31, timezone: "Europe/Berlin" });
+  });
+
+  it("keeps scheduled prompts isolated per conversation key", () => {
+    repository = new ArtemisRepository(":memory:");
+    repository.createScheduledPrompt("dm:one", {
+      prompt: "mine",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message"
+    });
+
+    expect(repository.listScheduledPrompts("dm:two")).toEqual([]);
+  });
+
+  it("cancels a scheduled prompt durably and excludes it from later lists", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "cancel me",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message"
+    });
+
+    expect(repository.cancelScheduledPrompt("dm:two", created.id)).toBe(false);
+    expect(repository.cancelScheduledPrompt("dm:one", "missing-id")).toBe(false);
+    expect(repository.cancelScheduledPrompt("dm:one", created.id)).toBe(true);
+
+    repository.close();
+    repository = undefined;
+    repository = new ArtemisRepository(path);
+    expect(repository.listScheduledPrompts("dm:one")).toEqual([]);
+  });
+
+  it("enforces the recurrence shape at the storage layer", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-constraint-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    repository.close();
+    repository = undefined;
+
+    const database = new Database(path);
+    // A weekly schedule without day_of_week violates the shape constraint.
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO scheduled_prompts
+           (id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
+            day_of_week, day_of_month, timezone, response_type, status, created_at)
+           VALUES ('x', 'k', 'p', 'weekly', NULL, '09:15', NULL, NULL, 'UTC',
+                   'message', 'active', '2026-08-29T00:00:00.000Z')`
+        )
+        .run()
+    ).toThrow();
+    database.close();
   });
 });

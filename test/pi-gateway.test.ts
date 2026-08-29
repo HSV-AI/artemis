@@ -4,7 +4,9 @@ import type {
   ChannelTimezoneStore,
   PiGenerationInput,
   PiSessionEntryRecord,
-  PiSessionStore
+  PiSessionStore,
+  ScheduledPromptRecord,
+  ScheduledPromptStore
 } from "../src/domain.js";
 import { DEFAULT_BOT_DISPLAY_NAME, type PersonaProfile } from "../src/persona-profiles.js";
 import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
@@ -737,6 +739,106 @@ describe("PiSdkGateway", () => {
     expect(sessionOptions?.tools).not.toContain("get_current_datetime");
     expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain("set_channel_timezone");
     expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain("get_current_datetime");
+  });
+
+  it("registers scheduler tools bound to the harness-injected conversation key", async () => {
+    const settings = new Map<string, string>([["dm:sched-channel", "America/Chicago"]]);
+    const timezoneStore: ChannelTimezoneStore = {
+      getChannelTimezone: vi.fn((key) => settings.get(key)),
+      setChannelTimezone: vi.fn((key, timezone) => {
+        settings.set(key, timezone);
+      })
+    };
+    const jobs: ScheduledPromptRecord[] = [];
+    const schedulerStore: ScheduledPromptStore = {
+      createScheduledPrompt: vi.fn((key, input) => ({
+        id: "job-1",
+        conversationKey: key,
+        status: "active" as const,
+        createdAt: "2026-08-29T14:30:00.000Z",
+        ...input
+      })),
+      listScheduledPrompts: vi.fn(() => jobs),
+      cancelScheduledPrompt: vi.fn(() => true)
+    };
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      healthyFetch(),
+      undefined,
+      timezoneStore,
+      schedulerStore
+    );
+    await gateway.checkHealth();
+    await gateway.generate(generationInput({ conversationKey: "dm:sched-channel", conversationKind: "dm" }));
+
+    expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      tools: expect.arrayContaining([
+        "schedule_prompt",
+        "list_scheduled_prompts",
+        "cancel_scheduled_prompt"
+      ]),
+      customTools: expect.arrayContaining([
+        expect.objectContaining({ name: "schedule_prompt" }),
+        expect.objectContaining({ name: "list_scheduled_prompts" }),
+        expect.objectContaining({ name: "cancel_scheduled_prompt" })
+      ])
+    }));
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringContaining("- schedule_prompt: ")
+    }));
+
+    type CapturedTool = {
+      name: string;
+      execute: (id: string, params: unknown, ...rest: unknown[]) => Promise<{
+        content: ReadonlyArray<{ type: string; text?: string }>;
+      }>;
+    };
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { customTools?: CapturedTool[] }
+      | undefined;
+    const schedulePrompt = sessionOptions?.customTools?.find((tool) => tool.name === "schedule_prompt");
+    expect(schedulePrompt).toBeDefined();
+
+    // A model-supplied channel identity must not override the injected key.
+    const result = await schedulePrompt!.execute(
+      "call",
+      {
+        prompt: "Reminder",
+        schedule: { type: "daily", time: "09:15" },
+        response_type: "silent",
+        conversationKey: "dm:not-my-channel"
+      },
+      undefined,
+      undefined,
+      {} as never
+    );
+    expect(result.content[0]?.text).toContain("dm:sched-channel");
+    expect(schedulerStore.createScheduledPrompt).toHaveBeenCalledWith(
+      "dm:sched-channel",
+      expect.objectContaining({
+        schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
+        responseType: "silent"
+      })
+    );
+  });
+
+  it("omits the scheduler tools when no scheduler store is configured", async () => {
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      healthyFetch()
+    );
+    await gateway.checkHealth();
+    await gateway.generate(generationInput());
+
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { tools?: string[]; customTools?: Array<{ name: string }> }
+      | undefined;
+    for (const name of ["schedule_prompt", "list_scheduled_prompts", "cancel_scheduled_prompt"]) {
+      expect(sessionOptions?.tools).not.toContain(name);
+      expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain(name);
+    }
   });
 });
 

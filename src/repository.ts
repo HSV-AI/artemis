@@ -10,6 +10,10 @@ import type {
   PersistedPiSession,
   PiGenerationResult,
   PiSessionEntryRecord,
+  PromptSchedule,
+  ScheduledPromptInput,
+  ScheduledPromptRecord,
+  ScheduledPromptStore,
   SessionRecord,
   SourceMessage,
   StoredMessage
@@ -75,6 +79,22 @@ interface PiSessionEntryRow {
   raw_json: string;
 }
 
+interface ScheduledPromptRow {
+  id: string;
+  conversation_key: string;
+  prompt: string;
+  schedule_type: "once" | "daily" | "weekly" | "monthly";
+  at_utc: string | null;
+  time_of_day: string | null;
+  day_of_week: number | null;
+  day_of_month: number | null;
+  timezone: string | null;
+  response_type: "message" | "silent";
+  status: "active" | "cancelled";
+  created_at: string;
+  cancelled_at: string | null;
+}
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -83,7 +103,7 @@ function optional<T>(value: T | null): T | undefined {
   return value === null ? undefined : value;
 }
 
-export class ArtemisRepository implements ChannelTimezoneStore {
+export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptStore {
   private readonly database: Database.Database;
 
   public constructor(path: string) {
@@ -407,6 +427,96 @@ export class ArtemisRepository implements ChannelTimezoneStore {
     transaction();
   }
 
+  public createScheduledPrompt(conversationKey: string, input: ScheduledPromptInput): ScheduledPromptRecord {
+    const schedule = input.schedule;
+    const id = randomUUID();
+    const createdAt = now();
+    this.database
+      .prepare(
+        `INSERT INTO scheduled_prompts
+         (id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
+          day_of_week, day_of_month, timezone, response_type, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`
+      )
+      .run(
+        id,
+        conversationKey,
+        input.prompt,
+        schedule.type,
+        schedule.type === "once" ? schedule.atUtc : null,
+        schedule.type === "once" ? null : schedule.time,
+        schedule.type === "weekly" ? schedule.dayOfWeek : null,
+        schedule.type === "monthly" ? schedule.dayOfMonth : null,
+        schedule.type === "once" ? null : schedule.timezone,
+        input.responseType,
+        createdAt
+      );
+    return {
+      id,
+      conversationKey,
+      prompt: input.prompt,
+      schedule,
+      responseType: input.responseType,
+      status: "active",
+      createdAt
+    };
+  }
+
+  public listScheduledPrompts(conversationKey: string): ScheduledPromptRecord[] {
+    const rows = this.database
+      .prepare(
+        `SELECT * FROM scheduled_prompts
+         WHERE conversation_key = ? AND status = 'active'
+         ORDER BY created_at ASC, id ASC`
+      )
+      .all(conversationKey) as ScheduledPromptRow[];
+    return rows.map((row) => this.mapScheduledPrompt(row));
+  }
+
+  public cancelScheduledPrompt(conversationKey: string, id: string): boolean {
+    const result = this.database
+      .prepare(
+        `UPDATE scheduled_prompts
+         SET status = 'cancelled', cancelled_at = ?
+         WHERE id = ? AND conversation_key = ? AND status = 'active'`
+      )
+      .run(now(), id, conversationKey);
+    return result.changes === 1;
+  }
+
+  private mapScheduledPrompt(row: ScheduledPromptRow): ScheduledPromptRecord {
+    let schedule: PromptSchedule;
+    if (row.schedule_type === "once") {
+      schedule = { type: "once", atUtc: row.at_utc ?? "" };
+    } else if (row.schedule_type === "daily") {
+      schedule = { type: "daily", time: row.time_of_day ?? "", timezone: row.timezone ?? "UTC" };
+    } else if (row.schedule_type === "weekly") {
+      schedule = {
+        type: "weekly",
+        time: row.time_of_day ?? "",
+        dayOfWeek: row.day_of_week ?? 0,
+        timezone: row.timezone ?? "UTC"
+      };
+    } else {
+      schedule = {
+        type: "monthly",
+        time: row.time_of_day ?? "",
+        dayOfMonth: row.day_of_month ?? 1,
+        timezone: row.timezone ?? "UTC"
+      };
+    }
+    return {
+      id: row.id,
+      conversationKey: row.conversation_key,
+      prompt: row.prompt,
+      schedule,
+      responseType: row.response_type,
+      status: row.status,
+      createdAt: row.created_at,
+      ...(row.cancelled_at ? { cancelledAt: row.cancelled_at } : {})
+    };
+  }
+
   public recordLog(entry: LogEntry): void {
     const { timestamp, level, event, ...details } = entry;
     this.database
@@ -489,6 +599,10 @@ export class ArtemisRepository implements ChannelTimezoneStore {
       this.applyMigration6();
     }
 
+    if (!applied.has(7)) {
+      this.applyMigration7();
+    }
+
     // A fully migrated database is the steady state. The bootstrap path
     // creates a fully current empty database; earlier migrations are
     // preserved as historical database facts and are never re-run.
@@ -513,6 +627,57 @@ export class ArtemisRepository implements ChannelTimezoneStore {
       this.database
         .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
         .run(6, timestamp);
+    });
+    transaction();
+  }
+
+  /**
+   * Migration 7 introduces durable scheduled prompts. It is additive: an
+   * existing verified migration-6 database receives the new table in one
+   * transaction without touching any history. CHECK constraints enforce the
+   * recurrence shape per schedule type so malformed rows cannot be stored.
+   */
+  private applyMigration7(): void {
+    const timestamp = now();
+    const transaction = this.database.transaction(() => {
+      this.database.exec(`
+        CREATE TABLE IF NOT EXISTS scheduled_prompts (
+          id TEXT PRIMARY KEY,
+          conversation_key TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          schedule_type TEXT NOT NULL
+            CHECK (schedule_type IN ('once', 'daily', 'weekly', 'monthly')),
+          at_utc TEXT,
+          time_of_day TEXT,
+          day_of_week INTEGER,
+          day_of_month INTEGER,
+          timezone TEXT,
+          response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
+          status TEXT NOT NULL CHECK (status IN ('active', 'cancelled')),
+          created_at TEXT NOT NULL,
+          cancelled_at TEXT,
+          CHECK (
+            (schedule_type = 'once'
+              AND at_utc IS NOT NULL AND time_of_day IS NULL AND day_of_week IS NULL
+              AND day_of_month IS NULL AND timezone IS NULL)
+            OR (schedule_type = 'daily'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
+              AND day_of_month IS NULL AND timezone IS NOT NULL)
+            OR (schedule_type = 'weekly'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NOT NULL
+              AND day_of_month IS NULL AND timezone IS NOT NULL)
+            OR (schedule_type = 'monthly'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
+              AND day_of_month IS NOT NULL AND timezone IS NOT NULL)
+          )
+        );
+
+        CREATE INDEX IF NOT EXISTS scheduled_prompts_by_conversation
+          ON scheduled_prompts(conversation_key, status, created_at);
+      `);
+      this.database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+        .run(7, timestamp);
     });
     transaction();
   }
@@ -631,11 +796,45 @@ export class ArtemisRepository implements ChannelTimezoneStore {
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE scheduled_prompts (
+          id TEXT PRIMARY KEY,
+          conversation_key TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          schedule_type TEXT NOT NULL
+            CHECK (schedule_type IN ('once', 'daily', 'weekly', 'monthly')),
+          at_utc TEXT,
+          time_of_day TEXT,
+          day_of_week INTEGER,
+          day_of_month INTEGER,
+          timezone TEXT,
+          response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
+          status TEXT NOT NULL CHECK (status IN ('active', 'cancelled')),
+          created_at TEXT NOT NULL,
+          cancelled_at TEXT,
+          CHECK (
+            (schedule_type = 'once'
+              AND at_utc IS NOT NULL AND time_of_day IS NULL AND day_of_week IS NULL
+              AND day_of_month IS NULL AND timezone IS NULL)
+            OR (schedule_type = 'daily'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
+              AND day_of_month IS NULL AND timezone IS NOT NULL)
+            OR (schedule_type = 'weekly'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NOT NULL
+              AND day_of_month IS NULL AND timezone IS NOT NULL)
+            OR (schedule_type = 'monthly'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
+              AND day_of_month IS NOT NULL AND timezone IS NOT NULL)
+          )
+        );
+
+        CREATE INDEX scheduled_prompts_by_conversation
+          ON scheduled_prompts(conversation_key, status, created_at);
       `);
       const insert = this.database.prepare(
         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)"
       );
-      for (const version of [1, 2, 3, 4, 5, 6]) {
+      for (const version of [1, 2, 3, 4, 5, 6, 7]) {
         insert.run(version, timestamp);
       }
     });
