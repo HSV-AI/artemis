@@ -10,6 +10,7 @@ import type { AssistantMessage, ThinkingContent } from "@earendil-works/pi-ai";
 import { DEFAULT_DGRAPH_URL, type ArtemisConfig } from "./config.js";
 import { DgraphClient, GraphMemory } from "./dgraph-memory.js";
 import type {
+  ChannelTimezoneStore,
   ConversationKind,
   Logger,
   PiGateway,
@@ -32,6 +33,7 @@ import {
   asPiSessionManager,
   SqlitePiSessionManager
 } from "./pi-session-manager.js";
+import { createChannelTimezoneTools } from "./timezone-tools.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
 
 /**
@@ -172,6 +174,7 @@ export class PiSdkGateway implements PiGateway {
   private botDisplayName: string | undefined;
   private readonly memory: GraphMemory;
   private readonly knowledge: HsvaiKnowledge;
+  private readonly timezoneStore: ChannelTimezoneStore | undefined;
 
   public constructor(
     private readonly config: Pick<ArtemisConfig, "model" | "persona"> &
@@ -187,7 +190,8 @@ export class PiSdkGateway implements PiGateway {
       >>,
     private readonly sessionStore: PiSessionStore,
     private readonly fetchImplementation: typeof fetch = fetch,
-    logger?: Pick<Logger, "info" | "warn">
+    logger?: Pick<Logger, "info" | "warn">,
+    timezoneStore?: ChannelTimezoneStore
   ) {
     const dgraph = new DgraphClient(
       config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
@@ -205,6 +209,7 @@ export class PiSdkGateway implements PiGateway {
       config.hsvaiDgraphQueryAuth
     );
     this.memory = new GraphMemory(dgraph);
+    this.timezoneStore = timezoneStore;
     const sourceCachePath = config.sqlitePath && config.sqlitePath !== ":memory:"
       ? join(dirname(config.sqlitePath), "hsvai-source-cache.json")
       : undefined;
@@ -268,7 +273,12 @@ export class PiSdkGateway implements PiGateway {
         authorId: input.authorId,
         sourceMessageId: input.sourceMessageId,
         episodeId: input.logicalSessionId
-      })
+      }),
+      // Channel timezone tools read and write through the harness-injected
+      // conversation key. No tool parameter can influence the channel identity.
+      ...(this.timezoneStore
+        ? createChannelTimezoneTools(this.timezoneStore, { conversationKey: input.conversationKey })
+        : [])
     ];
     const modelRuntime = this.modelRuntime;
     if (!modelRuntime) {
