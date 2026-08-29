@@ -242,7 +242,7 @@ The model-facing implementation must:
 - Apply a provider definition's explicit reasoning effort to every model request when configured.
 - Restore the native harness state for the logical session directly from durable SQLite entries.
 - Supply the current normal message as the new prompt, or the formatted thread snapshot for a thread message.
-- Enable only `web_fetch`, the six GitHub custom tools when configured, the seven scoped memory tools, and the fixed-source `hsvai_graph_search` and `hsvai_graph_query` tools. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
+- Enable only `web_fetch`, the six GitHub custom tools when configured, the seven scoped memory tools, the fixed-source `hsvai_graph_search` and `hsvai_graph_query` tools, and the `model_info` self-introspection tool. Disable built-in read, write, edit, shell, filesystem-search, skills, prompt templates, repository context, and all other agentic extensions.
 - Apply the style instructions from the profile selected by `PERSONA_PROFILE`, which defaults to `generic` and also bundles `artemis` and `wartermis`. Keep each profile in its own source file and compose the fixed Discord instruction after it. Name resolution: a named profile (`artemis`, `wartermis`) owns its identity and its `name` is authoritative for self-introduction regardless of the Discord display name. The default `generic` profile defines no name, so the bot's display name is resolved from the connected Discord client at startup (global display name when set, otherwise username) and injected into the system prompt as the authoritative name for self-introduction; the system prompt must not hardcode the Discord name. When neither a profile name nor a Discord display name is available, fall back to `DEFAULT_BOT_DISPLAY_NAME` (`Artemis`). The instruction is conversation-kind-aware: guild sessions additionally include the Discord Channel Limits block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX`, self-contained-thought rule); DM sessions never include it. It must also include the Capability Gap Protocol and an Available Tools section generated from the registered custom tools. Prompt construction must be a pure function of the conversation kind, selected profile, resolved display name, and tool registry.
 - Under the Capability Gap Protocol, tell Artemis to acknowledge an unavailable capability, stop instead of exploring source or improvising code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when available.
 - Return final assistant text separately from optional reasoning and diagnostics.
@@ -271,6 +271,10 @@ Expect a response containing a title, page content, and links. Return the title,
 - Redact common instruction-override phrases and add a security notice when any content was changed.
 
 This is a defense-in-depth transformation, not a claim that arbitrary web content is safe. Tool errors follow the generation-failure path and send nothing to Discord.
+
+### Model self-introspection tool contract
+
+Register `model_info` for every profile with no input parameters. Resolve the answer at execution time from the live registered harness state: the configured provider id selects the registered provider (display name and base URL) and registered model (id, API, reasoning support, context window, max tokens); the configured reasoning effort contributes the configured-effort segment. Render a deterministic labeled text block with provider name and id, model id, API, endpoint, reasoning support with its configured effort, context window, and max output tokens. Render every unresolvable field as the literal `unknown`, and return "Model runtime information is currently unavailable." when the whole snapshot cannot be resolved or resolution fails unexpectedly. Never include the model API key and never derive model identity from conversation memory. See [Model self-introspection](model-self-introspection.md) for the authoritative contract.
 
 ### GitHub tool contract
 
@@ -542,7 +546,7 @@ Each stage should finish with tests before the next begins.
 - Start with a deterministic fake satisfying the harness port.
 - Add the selected harness strategy.
 - Connect the harness's native session manager to ordered SQLite storage. The schema bootstrap runs at repository construction; startup health validates the model provider and Dgraph and performs no cutover.
-- Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, and fixed-source HSVAI graph search; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
+- Register and allowlist `web_fetch`, token-gated GitHub tools, scoped memory tools, fixed-source HSVAI graph search, and the `model_info` self-introspection tool; disable every built-in tool and build the system instruction from conversation kind and registered-tool metadata, including the Capability Gap Protocol.
 - Load the reviewed HSVAI event catalog and exact raw-source cache before synchronization. Reapply source-matched themes, speaker edges, and structurally exclusive complete/pending status after every cache load without model calls.
 - Queue memory operations in tool-call arrival order. Ranked retrieval must fuse full-text, current-episode graph, and recency channels deterministically. Memory writes must reject duplicate and unforced similar facts without mutation.
 - Add configured provider health/model validation.
@@ -601,6 +605,7 @@ At minimum, prove all of the following:
 - A fresh raw HSVAI source cache avoids network requests, excludes all catalog-derived fields, and is atomically replaced after expiry. Invalid cache is repaired from the source; future-dated or expired cache is never published as current; every source request is bounded.
 - HSVAI synchronization, retrieval, and catalog loading satisfy the verification contracts in their feature documents.
 - The system prompt lists only registered tools and includes the Capability Gap Protocol in both DM and guild variants.
+- `model_info` reports the registered provider and model with no parameters, renders `unknown` for unresolvable fields, reports unavailability instead of a failure when the configured model is absent, never exposes the model API key, and is advertised in the Available Tools prompt registry.
 - The bot's Discord display name is resolved from the connected client on ready (global display name when set, otherwise username), injected into the system prompt as the authoritative self-introduction name, and falls back to the selected profile's `name` when Discord has not reported a name; the system prompt never hardcodes the Discord name.
 - Long assistant text is persisted once and sent in ordered Discord-safe chunks.
 - Guild sessions receive the channel-limits system-prompt block (`GROUP_CHANNEL_MULTI_MESSAGE_MAX = 3`, self-contained-thought rule) while DM sessions receive no limit messaging; prompt selection is deterministic from the conversation kind.

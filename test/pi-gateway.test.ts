@@ -15,6 +15,11 @@ const mocks = vi.hoisted(() => {
   const runtime = {
     registerProvider: vi.fn(),
     setRuntimeApiKey: vi.fn().mockResolvedValue(undefined),
+    getProvider: vi.fn().mockReturnValue({
+      id: "test-provider",
+      name: "Test Provider",
+      baseUrl: "http://model-provider/v1"
+    }),
     getModel: vi.fn().mockReturnValue({ provider: "test-provider", id: "model" })
   };
   const session = {
@@ -289,6 +294,11 @@ describe("PI result conversion", () => {
 describe("PiSdkGateway", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.runtime.getProvider.mockReturnValue({
+      id: "test-provider",
+      name: "Test Provider",
+      baseUrl: "http://model-provider/v1"
+    });
     mocks.runtime.getModel.mockReturnValue({ provider: "test-provider", id: "model" });
     mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
     mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
@@ -587,6 +597,49 @@ describe("PiSdkGateway", () => {
     }));
   });
 
+  it("exposes the live model runtime through the model_info tool and prompt registry", async () => {
+    mocks.runtime.getProvider.mockReturnValue({
+      id: "live-provider",
+      name: "Live Provider",
+      baseUrl: "http://live-endpoint/v1"
+    });
+    mocks.runtime.getModel.mockReturnValue({
+      id: "live-model",
+      api: "openai-completions",
+      reasoning: true,
+      contextWindow: 128_000,
+      maxTokens: 8_192
+    });
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "test-model" })),
+      createSessionStore(),
+      healthyFetch()
+    );
+    await gateway.checkHealth();
+    await gateway.generate(generationInput());
+
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { customTools?: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ content: ReadonlyArray<{ type: unknown; text?: unknown }> }> }> }
+      | undefined;
+    const tool = sessionOptions?.customTools?.find((entry) => entry.name === "model_info");
+    expect(tool).toBeDefined();
+    const result = await tool!.execute("call", {}, undefined, undefined, {} as never);
+    const text = result.content[0]?.text ?? "";
+    expect(text).toContain("Provider: Live Provider (id: test-provider)");
+    expect(text).toContain("Model: live-model");
+    expect(text).toContain("API: openai-completions");
+    expect(text).toContain("Endpoint: http://live-endpoint/v1");
+    expect(text).toContain("Reasoning: enabled (configured effort: medium)");
+    expect(text).toContain("Context window: 128000 tokens");
+    expect(text).toContain("Max output tokens: 8192 tokens");
+    expect(text).not.toContain("Test Provider");
+    expect(text).not.toContain("test-model");
+
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringContaining("- model_info: Report the model provider and model Artemis is currently running on")
+    }));
+  });
+
   it("rejects a missing configured model and a missing assistant response", async () => {
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
@@ -632,6 +685,11 @@ describe("system prompt Discord channel limits", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.runtime.getProvider.mockReturnValue({
+      id: "test-provider",
+      name: "Test Provider",
+      baseUrl: "http://model-provider/v1"
+    });
     mocks.runtime.getModel.mockReturnValue({ provider: "test-provider", id: "model" });
     mocks.runtime.setRuntimeApiKey.mockResolvedValue(undefined);
     mocks.runtimeCreate.mockResolvedValue(mocks.runtime);
