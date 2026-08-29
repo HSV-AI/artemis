@@ -25,6 +25,7 @@ import {
   HsvaiKnowledge,
   HsvaiWordPressSource
 } from "./hsvai-knowledge.js";
+import { createModelInfoTool, type RuntimeModelInfo } from "./model-info-tool.js";
 import { createMemoryTools } from "./memory-tools.js";
 import { DEFAULT_BOT_DISPLAY_NAME, type PersonaProfile } from "./persona-profiles.js";
 import {
@@ -126,11 +127,13 @@ export function buildSystemPrompt(
 }
 
 function createCustomTools(
-  config: Partial<Pick<ArtemisConfig, "githubToken" | "githubAllowedRepositories">>,
-  fetchImplementation: typeof fetch
+  config: Partial<Pick<ArtemisConfig, "model" | "githubToken" | "githubAllowedRepositories">>,
+  fetchImplementation: typeof fetch,
+  resolveModelInfo: () => RuntimeModelInfo | undefined
 ) {
   return [
     createWebFetchTool({ fetchImplementation }),
+    createModelInfoTool({ resolveModelInfo }),
     ...createGitHubTools({
       token: config.githubToken ?? "",
       allowedRepositories: config.githubAllowedRepositories ?? [],
@@ -323,11 +326,47 @@ export class PiSdkGateway implements PiGateway {
     return Boolean(apiKey) && !(providerId === "ollama" && apiKey === "ollama");
   }
 
+  /**
+   * Introspect the live PI state for the configured provider and model. The
+   * provider and model are looked up through the registered ModelRuntime so the
+   * answer reflects what Artemis is actually running, and the result is
+   * undefined whenever the runtime is not initialized or the configured model
+   * is not registered. The reasoning effort remains configured metadata because
+   * the registered model does not carry the selected effort.
+   */
+  private resolveModelInfo(): RuntimeModelInfo | undefined {
+    const runtime = this.modelRuntime;
+    if (!runtime) {
+      return undefined;
+    }
+    const model = runtime.getModel(
+      this.config.model.providerId,
+      this.config.model.modelId
+    );
+    if (!model) {
+      return undefined;
+    }
+    const provider = runtime.getProvider(this.config.model.providerId);
+    return {
+      providerId: this.config.model.providerId,
+      providerName: provider?.name,
+      providerEndpoint: provider?.baseUrl,
+      modelId: model.id,
+      modelApi: model.api,
+      reasoning: model.reasoning,
+      reasoningEffort: this.config.model.reasoningEffort,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens
+    };
+  }
+
   private async initialize(): Promise<void> {
     if (this.modelRuntime) {
       return;
     }
-    this.customTools = createCustomTools(this.config, this.fetchImplementation);
+    this.customTools = createCustomTools(this.config, this.fetchImplementation, () =>
+      this.resolveModelInfo()
+    );
     const credentials = new InMemoryCredentialStore();
     const modelRuntime = await ModelRuntime.create({
       credentials,

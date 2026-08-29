@@ -4,7 +4,7 @@ Status: Implemented baseline
 
 Source: [HSV-AI/artemis issue #1](https://github.com/HSV-AI/artemis/issues/1)
 
-Last updated: 2026-08-23
+Last updated: 2026-08-29
 
 ## Summary
 
@@ -14,7 +14,7 @@ The implementation uses PI and the PI SDK as the conversational harness, SQLite 
 
 ## Design document map
 
-Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). [Discord link-embed suppression](discord-link-embeds.md) enforces removal of link-preview cards on every outbound Discord message at the application layer, independent of the model, with a global default and per-channel override. [Persona profiles](persona-profile.md) let deployments vary identity and tone while preserving the common behavioral boundary. [Graph memory](memory.md) defines the Dgraph-backed fact lifecycle and PI tools. [Dgraph access control and namespaces](dgraph-access-control.md) defines authenticated service accounts and database-enforced separation between memory and public knowledge. [HSVAI GraphRAG](hsvai-graphrag.md) defines synchronization, BM25 graph retrieval, and direct read-only DQL over public Huntsville AI transcripts and events. [HSVAI event catalog](hsvai-event-catalog.md) defines the reviewed seed and source validation. [Native PI session persistence](pi-session-persistence.md) preserves PI tool, compaction, tree, and usage entries directly in SQLite across turns and restarts. The complete catalog is maintained in the [design document index](README.md).
+Detailed protocols and major features live in focused subdocuments so this baseline can remain a high-level description. The active governance contract is [Design documentation protocol](documentation-protocol.md). [Discord link-embed suppression](discord-link-embeds.md) enforces removal of link-preview cards on every outbound Discord message at the application layer, independent of the model, with a global default and per-channel override. [Persona profiles](persona-profile.md) let deployments vary identity and tone while preserving the common behavioral boundary. [Graph memory](memory.md) defines the Dgraph-backed fact lifecycle and PI tools. [Dgraph access control and namespaces](dgraph-access-control.md) defines authenticated service accounts and database-enforced separation between memory and public knowledge. [Model self-introspection](model-self-introspection.md) defines the `model_info` tool through which Artemis reports the provider and model it is actually running on from the live harness state. [HSVAI GraphRAG](hsvai-graphrag.md) defines synchronization, BM25 graph retrieval, and direct read-only DQL over public Huntsville AI transcripts and events. [HSVAI event catalog](hsvai-event-catalog.md) defines the reviewed seed and source validation. [Native PI session persistence](pi-session-persistence.md) preserves PI tool, compaction, tree, and usage entries directly in SQLite across turns and restarts. The complete catalog is maintained in the [design document index](README.md).
 
 ## Goals
 
@@ -26,6 +26,7 @@ Detailed protocols and major features live in focused subdocuments so this basel
 - Make the model and runtime settings configurable without code changes.
 - Let deployments select a distinct bot identity and conversational style without forking application code or replacing fixed safety and capability rules.
 - Let the model fetch web pages and, when configured, operate on GitHub through explicitly allowlisted custom tools while keeping built-in coding tools disabled.
+- Let Artemis report the model provider and model it is actually running on through self-introspection instead of guessing.
 - Let Artemis explicitly retain novel facts, correct, forget, recall, rank, query past beliefs, and audit facts without sharing them across Discord conversation keys.
 - Let Artemis search connected, cited evidence and plan arbitrary read-only DQL over Huntsville AI transcripts and calendar events.
 - Project reviewed, source-matched event themes and speakers without running model extraction at runtime.
@@ -180,7 +181,7 @@ An authorized `/clear-session` closes the active session for the same conversati
 
 PI is the base conversational harness and owns interaction with the configured OpenAI-compatible model endpoint. Application code supplies the isolated conversation session and user message, then consumes the assistant response plus any available reasoning or diagnostic metadata. [Configurable model provider](model-provider.md) defines the provider file and startup contract.
 
-Only explicitly registered custom tools are enabled. `web_fetch` and allowlisted GitHub tools sanitize external reads; seven conversation-scoped [memory tools](memory.md) and the shared, read-only tools defined by [HSVAI GraphRAG](hsvai-graphrag.md) use Dgraph. PI's built-in coding tools remain disabled. Novelty refusals are tool data; other tool failures follow the normal generation-failure path and produce no Discord response.
+Only explicitly registered custom tools are enabled. `web_fetch` and allowlisted GitHub tools sanitize external reads; seven conversation-scoped [memory tools](memory.md) and the shared, read-only tools defined by [HSVAI GraphRAG](hsvai-graphrag.md) use Dgraph; the `model_info` tool reports the live registered provider and model from harness state. PI's built-in coding tools remain disabled. Novelty refusals are tool data; other tool failures follow the normal generation-failure path and produce no Discord response.
 
 The system prompt is built from the conversation kind, the bot's Discord-resolved display name, the selected persona profile, the tools that were actually registered, and the current HSVAI corpus revision. A named persona profile (`artemis`, `wartermis`) owns its identity: its `name` is authoritative for self-introduction regardless of the Discord display name. The default `generic` profile defines no fixed name, so the bot's global display name or username is resolved at startup and injected as its authoritative name; `DEFAULT_BOT_DISPLAY_NAME` (`Artemis`) is the fallback. Each profile supplies its complete style from a dedicated file under `src/personas/`. Discord speaker handling, conversation-kind limits, corpus-result freshness, and capability rules remain application-owned. The Capability Gap Protocol tells Artemis to acknowledge an unavailable capability, avoid source exploration or improvised code, and request the missing capability as an issue in `HSV-AI/artemis` through `github_create` when that tool is available. Its Available Tools section is generated from the live custom-tool registry so the prompt does not advertise unregistered tools. A resource loader is reused while its corpus revision remains current and replaced when the revision or resolved display name changes.
 

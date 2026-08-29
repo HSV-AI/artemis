@@ -42,6 +42,9 @@ HTTP GET instead of calling the model provider. HTML responses are reduced to a
 title, readable text, and resolved links; other text responses are passed
 through directly. Content is bounded to 100,000 characters, labeled as
 untrusted, sanitized, and limited to ten displayed links before PI sees it.
+Artemis also registers `model_info`, a self-introspection tool that reports the
+registered provider and model from the live PI state; see
+[Model self-introspection](model-self-introspection.md).
 
 The Discord channel policy is unchanged. A private guild channel works by
 granting the bot Discord access and listing that channel ID in
@@ -134,6 +137,8 @@ and sanitized before entering model context.
   and health failure.
 - `test/web-fetch-tool.test.ts` covers direct HTTP, HTML extraction, link limits,
   sanitization, plain text, invalid schemes, and upstream errors.
+- `test/model-info-tool.test.ts` covers `model_info` rendering from the live
+  registered provider and model, including unknown and unavailable states.
 - `test/application.test.ts` proves provider validation precedes Discord startup.
 - `npm run guardrail` remains the completion gate.
 
