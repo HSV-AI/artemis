@@ -269,7 +269,7 @@ describe("ArtemisRepository", () => {
     const piSessionColumns = database.prepare("PRAGMA table_info(pi_sessions)").all() as { name: string }[];
     database.close();
 
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(tables.map((row) => row.name)).toEqual(
       expect.arrayContaining([
         "conversations",
@@ -293,7 +293,7 @@ describe("ArtemisRepository", () => {
     ]);
   });
 
-  it("applies incremental migrations 6 and 7 to a verified migration-5 database without touching its history", () => {
+  it("applies incremental migrations 6 through 9 to a verified migration-5 database without touching its history", () => {
     const directory = mkdtempSync(join(tmpdir(), "artemis-migration5-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "artemis.sqlite");
@@ -311,11 +311,12 @@ describe("ArtemisRepository", () => {
       }
     ]);
     repository.insertAssistant(session.id, { text: "ack", model: "model" });
-    // Simulate a pre-timezone, pre-scheduler database: drop migrations 6 and 7 and their tables.
+    // Simulate a pre-timezone, pre-scheduler database: drop migrations 6
+    // through 9 and their tables.
     const downgrade = new Database(path);
     downgrade.exec("DROP TABLE channel_timezones;");
     downgrade.exec("DROP TABLE scheduled_prompts;");
-    downgrade.prepare("DELETE FROM schema_migrations WHERE version IN (6, 7, 8)").run();
+    downgrade.prepare("DELETE FROM schema_migrations WHERE version IN (6, 7, 8, 9)").run();
     downgrade.close();
     repository.close();
     repository = undefined;
@@ -354,7 +355,7 @@ describe("ArtemisRepository", () => {
 
     expect(beforeVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
     expect(beforeTables).toEqual([]);
-    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(afterTables.map((row) => row.name)).toEqual(["channel_timezones", "scheduled_prompts"]);
   });
 
@@ -598,8 +599,9 @@ describe("ArtemisRepository", () => {
       name: string;
     }[];
     database.close();
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
     expect(columns.map((column) => column.name)).toContain("scheduled_by_user_id");
+    expect(columns.map((column) => column.name)).toContain("last_run_at");
   });
 
   it("enforces the recurrence shape at the storage layer", () => {
@@ -624,5 +626,259 @@ describe("ArtemisRepository", () => {
         .run()
     ).toThrow();
     database.close();
+  });
+
+  it("lists active scheduled prompts across conversations for the execution engine", () => {
+    repository = new ArtemisRepository(":memory:");
+    const message = repository.createScheduledPrompt("dm:one", {
+      prompt: "dm prompt",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const silent = repository.createScheduledPrompt("guild:g:channel:c", {
+      prompt: "guild digest",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "silent",
+      scheduledByUserId: "user-2"
+    });
+    repository.cancelScheduledPrompt("guild:g:channel:c", silent.id);
+
+    const jobs = repository.listActiveScheduledPrompts();
+    expect(jobs.map((job) => job.id)).toEqual([message.id]);
+    expect(jobs[0]?.conversationKey).toBe("dm:one");
+  });
+
+  it("records a recurring job's last run without changing its status", () => {
+    repository = new ArtemisRepository(":memory:");
+    repository.createScheduledPrompt("dm:one", {
+      prompt: "standup",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+
+    repository.markScheduledPromptFired("missing-id", "2026-08-30T14:20:00.001Z");
+    expect(repository.listScheduledPrompts("dm:one")[0]?.lastRunAt).toBeUndefined();
+  });
+
+  it("persists lastRunAt across a repository reopen", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-rearm-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "rearm",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "silent",
+      scheduledByUserId: "user-1"
+    });
+    repository.markScheduledPromptFired(created.id, "2026-08-30T14:20:00.001Z");
+    repository.close();
+    repository = undefined;
+
+    repository = new ArtemisRepository(path);
+    const listed = repository.listScheduledPrompts("dm:one");
+    expect(listed[0]?.lastRunAt).toBe("2026-08-30T14:20:00.001Z");
+    expect(listed[0]?.status).toBe("active");
+    expect(repository.listActiveScheduledPrompts()).toHaveLength(1);
+  });
+
+  it("completes a one-time job and removes it from active listings", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-complete-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "one-time",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+
+    expect(repository.completeScheduledPrompt(created.id, "2026-08-30T14:30:00.000Z")).toBe(true);
+    expect(repository.listScheduledPrompts("dm:one")).toEqual([]);
+    expect(repository.listActiveScheduledPrompts()).toEqual([]);
+    // Completing again is a safe no-op; the record is retained for audit.
+    expect(repository.completeScheduledPrompt(created.id, "2026-08-30T14:35:00.000Z")).toBe(false);
+
+    repository.close();
+    repository = undefined;
+    repository = new ArtemisRepository(path);
+    expect(repository.listActiveScheduledPrompts()).toEqual([]);
+  });
+
+  it("applies migration 9 to a migration-8 database, preserving jobs, attribution, and history", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-migration9-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const identity = { key: "dm:legacy", kind: "dm" as const, channelId: "legacy" };
+    const session = repository.getOrCreateSession(identity, "model");
+    repository.insertAssistant(session.id, { text: "before", model: "model" });
+    const created = repository.createScheduledPrompt("dm:legacy", {
+      prompt: "legacy prompt",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "legacy-user"
+    });
+    repository.close();
+    repository = undefined;
+
+    // Downgrade the scheduled_prompts table to its migration-8 shape: the
+    // attribution column exists, but no last_run_at column and no completed
+    // status. Only migration 9 is rolled back.
+    const downgrade = new Database(path);
+    const rows = downgrade.prepare("SELECT * FROM scheduled_prompts").all() as Array<Record<string, unknown>>;
+    downgrade.exec("DROP TABLE scheduled_prompts;");
+    downgrade.exec(`
+      CREATE TABLE scheduled_prompts (
+        id TEXT PRIMARY KEY,
+        conversation_key TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        schedule_type TEXT NOT NULL
+          CHECK (schedule_type IN ('once', 'daily', 'weekly', 'monthly')),
+        at_utc TEXT,
+        time_of_day TEXT,
+        day_of_week INTEGER,
+        day_of_month INTEGER,
+        timezone TEXT,
+        response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
+        scheduled_by_user_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK (status IN ('active', 'cancelled')),
+        created_at TEXT NOT NULL,
+        cancelled_at TEXT
+      );
+    `);
+    const insert = downgrade.prepare(
+      `INSERT INTO scheduled_prompts
+       (id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
+        day_of_week, day_of_month, timezone, response_type, scheduled_by_user_id,
+        status, created_at, cancelled_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const row of rows) {
+      insert.run(
+        row.id,
+        row.conversation_key,
+        row.prompt,
+        row.schedule_type,
+        row.at_utc,
+        row.time_of_day,
+        row.day_of_week,
+        row.day_of_month,
+        row.timezone,
+        row.response_type,
+        row.scheduled_by_user_id,
+        row.status,
+        row.created_at,
+        row.cancelled_at
+      );
+    }
+    downgrade.prepare("DELETE FROM schema_migrations WHERE version = 9").run();
+    downgrade.close();
+
+    repository = new ArtemisRepository(path);
+    const listed = repository.listScheduledPrompts("dm:legacy");
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.id).toBe(created.id);
+    expect(listed[0]?.scheduledByUserId).toBe("legacy-user");
+    expect(listed[0]?.lastRunAt).toBeUndefined();
+    expect(repository.listActiveScheduledPrompts().map((job) => job.id)).toEqual([created.id]);
+    expect(repository.getHistory(session.id).map((message) => message.content)).toEqual(["before"]);
+
+    // Re-arm bookkeeping lands in the rebuilt table and survives a reopen.
+    repository.markScheduledPromptFired(created.id, "2026-08-30T14:20:00.001Z");
+    repository.close();
+    repository = undefined;
+    repository = new ArtemisRepository(path);
+    expect(repository.listScheduledPrompts("dm:legacy")[0]?.lastRunAt).toBe("2026-08-30T14:20:00.001Z");
+  });
+
+  it("applies incremental migrations 8 and 9 to a migration-7 database, attributing legacy rows and rebuilding the table", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-migration7-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const identity = { key: "dm:legacy", kind: "dm" as const, channelId: "legacy" };
+    const session = repository.getOrCreateSession(identity, "model");
+    repository.insertAssistant(session.id, { text: "before", model: "model" });
+    const created = repository.createScheduledPrompt("dm:legacy", {
+      prompt: "legacy prompt",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "legacy-user"
+    });
+    repository.close();
+    repository = undefined;
+
+    // Downgrade the scheduled_prompts table to its historical migration-7
+    // shape: no attribution column, no last_run_at column, and no completed
+    // status. Migrations 8 and 9 are rolled back.
+    const downgrade = new Database(path);
+    const rows = downgrade.prepare("SELECT * FROM scheduled_prompts").all() as Array<Record<string, unknown>>;
+    downgrade.exec("DROP TABLE scheduled_prompts;");
+    downgrade.exec(`
+      CREATE TABLE scheduled_prompts (
+        id TEXT PRIMARY KEY,
+        conversation_key TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        schedule_type TEXT NOT NULL,
+        at_utc TEXT,
+        time_of_day TEXT,
+        day_of_week INTEGER,
+        day_of_month INTEGER,
+        timezone TEXT,
+        response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
+        status TEXT NOT NULL CHECK (status IN ('active', 'cancelled')),
+        created_at TEXT NOT NULL,
+        cancelled_at TEXT
+      );
+    `);
+    const insert = downgrade.prepare(
+      `INSERT INTO scheduled_prompts
+       (id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
+        day_of_week, day_of_month, timezone, response_type, status, created_at, cancelled_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const row of rows) {
+      insert.run(
+        row.id,
+        row.conversation_key,
+        row.prompt,
+        row.schedule_type,
+        row.at_utc,
+        row.time_of_day,
+        row.day_of_week,
+        row.day_of_month,
+        row.timezone,
+        row.response_type,
+        row.status,
+        row.created_at,
+        row.cancelled_at
+      );
+    }
+    downgrade.prepare("DELETE FROM schema_migrations WHERE version IN (8, 9)").run();
+    downgrade.close();
+
+    repository = new ArtemisRepository(path);
+    const listed = repository.listScheduledPrompts("dm:legacy");
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.id).toBe(created.id);
+    expect(listed[0]?.lastRunAt).toBeUndefined();
+    expect(repository.listActiveScheduledPrompts().map((job) => job.id)).toEqual([created.id]);
+    expect(repository.getHistory(session.id).map((message) => message.content)).toEqual(["before"]);
+
+    const database = new Database(path, { readonly: true });
+    const versions = database
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all() as { version: number }[];
+    const columns = database.prepare("PRAGMA table_info(scheduled_prompts)").all() as {
+      name: string;
+    }[];
+    database.close();
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(columns.map((column) => column.name)).toContain("scheduled_by_user_id");
+    expect(columns.map((column) => column.name)).toContain("last_run_at");
   });
 });

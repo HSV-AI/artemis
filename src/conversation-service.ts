@@ -14,10 +14,8 @@ import type {
 import { KeyedSerialQueue } from "./keyed-queue.js";
 import { safeError } from "./logger.js";
 import { formatDiscordMessage, formatThreadSnapshot } from "./model-context.js";
-import {
-  authorizeScheduledPrompt,
-  checkScheduledPromptScope
-} from "./scheduler-authorization.js";
+import { buildSchedulerPrompt } from "./scheduler-runner.js";
+import { authorizeScheduledPrompt, checkScheduledPromptScope } from "./scheduler-authorization.js";
 import type { ArtemisRepository } from "./repository.js";
 
 export interface ConversationServiceOptions {
@@ -46,6 +44,15 @@ export function deriveChannelIdentity(ref: ChannelRef): ConversationIdentity {
 export function deriveConversationIdentity(message: InboundMessage): ConversationIdentity {
   return deriveChannelIdentity(message);
 }
+
+/**
+ * Restore a conversation identity from a stable conversation key produced by
+ * {@link deriveChannelIdentity}. Re-exported from the scheduler authorization
+ * module, which owns the strict harness-derived key grammar the fire-time
+ * scope gate enforces; keys the harness could not have derived return
+ * undefined so callers can reject them instead of guessing a scope.
+ */
+export { parseConversationKey } from "./scheduler-authorization.js";
 
 export class ConversationService {
   private readonly authorizedUserIds: ReadonlySet<string>;
@@ -178,6 +185,16 @@ export class ConversationService {
     });
   }
 
+  /**
+   * Run a task exclusively behind the conversation's serialized queue. The
+   * scheduler execution engine uses this to fire scheduled prompts inside the
+   * same queue that serializes Discord messages, so a scheduler-fired turn
+   * can never race a live user turn on the conversation's durable PI session.
+   */
+  public runExclusive<T>(conversationKey: string, task: () => Promise<T>): Promise<T> {
+    return this.queue.run(conversationKey, task);
+  }
+
   public clearSession(ref: ChannelRef): { cleared: boolean } {
     const identity = deriveChannelIdentity(ref);
     const result = this.repository.clearActiveSession(identity.key);
@@ -204,8 +221,9 @@ export class ConversationService {
    * Allowed jobs serialize behind interactive traffic for the same
    * conversation, generate in that conversation's active session with the
    * channel-derived conversation context, and persist the turn like any other
-   * exchange. Posting the result to Discord (and the JSON response contract)
-   * belong to the execution engine; this method returns the generated result.
+   * exchange. The generated turn is framed with the execution engine's strict
+   * JSON response contract, but validating that JSON and posting belong to
+   * the engine; this method returns the generated result untouched.
    *
    * Returns null and records `scheduled_prompt_rejected` when the job is
    * denied; records `scheduled_prompt_failed` on generation errors; records
@@ -296,7 +314,10 @@ export class ConversationService {
         conversationKind: identity.kind,
         sourceMessageId,
         authorId: record.scheduledByUserId,
-        prompt: record.prompt
+        // The stored prompt is the task; the framing carries the execution
+        // engine's strict JSON response contract. The persisted user row
+        // above stays the raw stored prompt.
+        prompt: buildSchedulerPrompt(record.prompt)
       });
       if (!result.text.trim()) {
         throw new Error("PI returned an empty response");

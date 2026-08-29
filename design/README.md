@@ -15,6 +15,7 @@ This directory is the authoritative design record for Artemis. Start with the ba
 - [Model self-introspection](model-self-introspection.md) — the `model_info` tool that reports the live registered provider and model from actual runtime state.
 - [Channel timezone tools](timezone-tools.md) — per-DM/Channel-Group IANA timezone setting and current-datetime tools bound to the harness-injected conversation key, with all times stored as UTC.
 - [Scheduler tools](scheduler-tools.md) — the `schedule_prompt`, `list_scheduled_prompts`, and `cancel_scheduled_prompt` tools for once/daily/weekly/monthly prompt schedules, stored durably in UTC, bound to the harness-injected conversation key and scheduling user, gated by live-Discord membership checks at creation and at fire time, and scoped to run in their channel with that channel's permissions.
+- [Scheduler execution engine](scheduler-execution.md) — the fire-time engine that routes due prompts through the scheduler authorization gate into the full agent in the target conversation's session, validates the strict JSON response, posts it, or stays silent.
 - [Persona profiles](persona-profile.md) — optional deployment-owned identity and style instructions composed with Artemis's fixed system rules.
 - [Graph memory](memory.md) — explicit, conversation-scoped PI memory tools backed by persistent Dgraph facts.
 - [Dgraph access control and namespaces](dgraph-access-control.md) — ACL bootstrap, namespace isolation, service accounts, JWT clients, and migration boundaries.

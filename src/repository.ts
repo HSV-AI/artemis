@@ -14,6 +14,7 @@ import type {
   ScheduledPromptInput,
   ScheduledPromptRecord,
   ScheduledPromptStore,
+  SchedulerExecutionStore,
   SessionRecord,
   SourceMessage,
   StoredMessage
@@ -90,10 +91,11 @@ interface ScheduledPromptRow {
   day_of_month: number | null;
   timezone: string | null;
   response_type: "message" | "silent";
-  status: "active" | "cancelled";
+  status: "active" | "cancelled" | "completed";
   created_at: string;
   cancelled_at: string | null;
   scheduled_by_user_id: string | null;
+  last_run_at: string | null;
 }
 
 function now(): string {
@@ -104,7 +106,7 @@ function optional<T>(value: T | null): T | undefined {
   return value === null ? undefined : value;
 }
 
-export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptStore {
+export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptStore, SchedulerExecutionStore {
   private readonly database: Database.Database;
 
   public constructor(path: string) {
@@ -488,6 +490,38 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
     return result.changes === 1;
   }
 
+  public listActiveScheduledPrompts(): ScheduledPromptRecord[] {
+    const rows = this.database
+      .prepare(
+        `SELECT * FROM scheduled_prompts
+         WHERE status = 'active'
+         ORDER BY created_at ASC, id ASC`
+      )
+      .all() as ScheduledPromptRow[];
+    return rows.map((row) => this.mapScheduledPrompt(row));
+  }
+
+  public markScheduledPromptFired(id: string, firedAtUtc: string): void {
+    this.database
+      .prepare(
+        `UPDATE scheduled_prompts
+         SET last_run_at = ?
+         WHERE id = ? AND status = 'active'`
+      )
+      .run(firedAtUtc, id);
+  }
+
+  public completeScheduledPrompt(id: string, completedAtUtc: string): boolean {
+    const result = this.database
+      .prepare(
+        `UPDATE scheduled_prompts
+         SET status = 'completed', last_run_at = ?
+         WHERE id = ? AND status = 'active'`
+      )
+      .run(completedAtUtc, id);
+    return result.changes === 1;
+  }
+
   private mapScheduledPrompt(row: ScheduledPromptRow): ScheduledPromptRecord {
     let schedule: PromptSchedule;
     if (row.schedule_type === "once") {
@@ -518,6 +552,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       scheduledByUserId: row.scheduled_by_user_id ?? "",
       status: row.status,
       createdAt: row.created_at,
+      ...(row.last_run_at ? { lastRunAt: row.last_run_at } : {}),
       ...(row.cancelled_at ? { cancelledAt: row.cancelled_at } : {})
     };
   }
@@ -610,6 +645,10 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
 
     if (!applied.has(8)) {
       this.applyMigration8();
+    }
+
+    if (!applied.has(9)) {
+      this.applyMigration9();
     }
 
     // A fully migrated database is the steady state. The bootstrap path
@@ -714,6 +753,78 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       this.database
         .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
         .run(8, timestamp);
+    });
+    transaction();
+  }
+
+  /**
+   * Migration 9 extends scheduled prompts for the execution engine: a
+   * `last_run_at` marker re-arms recurring jobs after each fire, and the
+   * `completed` status retires fired one-time jobs while keeping them for
+   * audit. SQLite cannot alter a CHECK constraint, so the table is rebuilt
+   * additively in one transaction with every existing row — including each
+   * row's migration-8 scheduling-user attribution — preserved verbatim.
+   */
+  private applyMigration9(): void {
+    const timestamp = now();
+    const transaction = this.database.transaction(() => {
+      const columns = this.database.prepare("PRAGMA table_info(scheduled_prompts)").all() as {
+        name: string;
+      }[];
+      const hasSchedulingUser = columns.some((column) => column.name === "scheduled_by_user_id");
+      this.database.exec(`
+        CREATE TABLE scheduled_prompts_v9 (
+          id TEXT PRIMARY KEY,
+          conversation_key TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          schedule_type TEXT NOT NULL
+            CHECK (schedule_type IN ('once', 'daily', 'weekly', 'monthly')),
+          at_utc TEXT,
+          time_of_day TEXT,
+          day_of_week INTEGER,
+          day_of_month INTEGER,
+          timezone TEXT,
+          response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
+          scheduled_by_user_id TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL CHECK (status IN ('active', 'cancelled', 'completed')),
+          created_at TEXT NOT NULL,
+          cancelled_at TEXT,
+          last_run_at TEXT,
+          CHECK (
+            (schedule_type = 'once'
+              AND at_utc IS NOT NULL AND time_of_day IS NULL AND day_of_week IS NULL
+              AND day_of_month IS NULL AND timezone IS NULL)
+            OR (schedule_type = 'daily'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
+              AND day_of_month IS NULL AND timezone IS NOT NULL)
+            OR (schedule_type = 'weekly'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NOT NULL
+              AND day_of_month IS NULL AND timezone IS NOT NULL)
+            OR (schedule_type = 'monthly'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
+              AND day_of_month IS NOT NULL AND timezone IS NOT NULL)
+          )
+        );
+
+        INSERT INTO scheduled_prompts_v9
+          (id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
+           day_of_week, day_of_month, timezone, response_type, scheduled_by_user_id,
+           status, created_at, cancelled_at, last_run_at)
+        SELECT id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
+               day_of_week, day_of_month, timezone, response_type,
+               ${hasSchedulingUser ? "scheduled_by_user_id" : "''"},
+               status, created_at, cancelled_at, NULL
+        FROM scheduled_prompts;
+
+        DROP TABLE scheduled_prompts;
+        ALTER TABLE scheduled_prompts_v9 RENAME TO scheduled_prompts;
+
+        CREATE INDEX IF NOT EXISTS scheduled_prompts_by_conversation
+          ON scheduled_prompts(conversation_key, status, created_at);
+      `);
+      this.database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+        .run(9, timestamp);
     });
     transaction();
   }
@@ -846,9 +957,10 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
           timezone TEXT,
           response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
           scheduled_by_user_id TEXT NOT NULL DEFAULT '',
-          status TEXT NOT NULL CHECK (status IN ('active', 'cancelled')),
+          status TEXT NOT NULL CHECK (status IN ('active', 'cancelled', 'completed')),
           created_at TEXT NOT NULL,
           cancelled_at TEXT,
+          last_run_at TEXT,
           CHECK (
             (schedule_type = 'once'
               AND at_utc IS NOT NULL AND time_of_day IS NULL AND day_of_week IS NULL
@@ -871,7 +983,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       const insert = this.database.prepare(
         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)"
       );
-      for (const version of [1, 2, 3, 4, 5, 6, 7, 8]) {
+      for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
         insert.run(version, timestamp);
       }
     });

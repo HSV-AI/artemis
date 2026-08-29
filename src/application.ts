@@ -14,6 +14,7 @@ import {
   resolveChannelMembership,
   type ChannelMembershipEndpoint
 } from "./scheduler-authorization.js";
+import { SchedulerRunner } from "./scheduler-runner.js";
 
 /**
  * Build the Discord gateway client Artemis shares between the Discord gateway
@@ -39,6 +40,7 @@ export interface ApplicationDependencies {
   pi?: PiGateway;
   discord?: DiscordGateway;
   discordClient?: Client;
+  scheduler?: Pick<SchedulerRunner, "start" | "stop">;
 }
 
 export class ArtemisApplication {
@@ -46,6 +48,7 @@ export class ArtemisApplication {
   private readonly repository: ArtemisRepository;
   private readonly pi: PiGateway;
   private readonly discord: DiscordGateway;
+  private readonly scheduler: Pick<SchedulerRunner, "start" | "stop">;
 
   public constructor(
     private readonly config: ArtemisConfig,
@@ -95,6 +98,13 @@ export class ArtemisApplication {
         this.logger,
         dependencies.discordClient ?? discordClient
       );
+    this.scheduler = dependencies.scheduler ??
+      new SchedulerRunner({
+        repository: this.repository,
+        conversations,
+        dispatcher: this.discord,
+        logger: this.logger
+      });
   }
 
   private discordMembership(client: Client): ChannelMembershipChecker {
@@ -119,6 +129,7 @@ export class ArtemisApplication {
     try {
       await this.pi.checkHealth();
       await this.discord.start();
+      this.scheduler.start();
     } catch (error: unknown) {
       this.logger.error("artemis_start_failed", safeError(error));
       throw error;
@@ -126,6 +137,7 @@ export class ArtemisApplication {
   }
 
   public stop(): void {
+    this.scheduler.stop();
     this.discord.stop();
     this.logger.info("artemis_stopped");
     this.repository.close();
