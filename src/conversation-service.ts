@@ -14,7 +14,7 @@ import type {
 import { KeyedSerialQueue } from "./keyed-queue.js";
 import { safeError } from "./logger.js";
 import { formatDiscordMessage, formatThreadSnapshot } from "./model-context.js";
-import { buildSchedulerPrompt } from "./scheduler-runner.js";
+import { buildSchedulerCorrectionPrompt, buildSchedulerPrompt, INVALID_RESPONSE_PREVIEW_LENGTH, parseScheduledResponse, SCHEDULER_RESPONSE_MAX_ATTEMPTS } from "./scheduler-runner.js";
 import { authorizeScheduledPrompt, checkScheduledPromptScope } from "./scheduler-authorization.js";
 import type { ArtemisRepository } from "./repository.js";
 
@@ -222,12 +222,18 @@ export class ConversationService {
    * conversation, generate in that conversation's active session with the
    * channel-derived conversation context, and persist the turn like any other
    * exchange. The generated turn is framed with the execution engine's strict
-   * JSON response contract, but validating that JSON and posting belong to
-   * the engine; this method returns the generated result untouched.
+   * JSON response contract and validated here: an invalid reply triggers up to
+   * two correction prompts inside the same durable session (three generation
+   * attempts total, `silent` always valid) before the final result — valid or
+   * not — is returned untouched. Posting still belongs to the engine, which
+   * re-validates before delivering anything, so broken JSON never reaches a
+   * channel.
    *
    * Returns null and records `scheduled_prompt_rejected` when the job is
    * denied; records `scheduled_prompt_failed` on generation errors; records
-   * `scheduled_prompt_succeeded` otherwise.
+   * `scheduled_prompt_succeeded` otherwise (including when every generation
+   * attempt produced an invalid response — the engine then records
+   * `scheduled_prompt_invalid_response` and posts nothing).
    */
   public async runScheduledPrompt(record: ScheduledPromptRecord): Promise<PiGenerationResult | null> {
     // Layer 1: pure scope gate on the harness-derived key — conversation shape,
@@ -296,31 +302,46 @@ export class ConversationService {
     identity: ConversationIdentity
   ): Promise<PiGenerationResult | null> {
     const session = this.repository.getOrCreateSession(identity, this.options.model);
-    const sourceMessageId = `scheduled:${record.id}:${randomUUID()}`;
+    const firstMessageId = `scheduled:${record.id}:${randomUUID()}`;
     try {
-      this.repository.insertSourceMessages(session.id, [
-        {
-          discordMessageId: sourceMessageId,
-          authorId: record.scheduledByUserId,
-          authorName: record.scheduledByUserId,
-          role: "user",
-          content: record.prompt,
-          createdAt: new Date().toISOString()
-        }
-      ]);
-      const result = await this.pi.generate({
-        logicalSessionId: session.id,
-        conversationKey: identity.key,
-        conversationKind: identity.kind,
-        sourceMessageId,
-        authorId: record.scheduledByUserId,
-        // The stored prompt is the task; the framing carries the execution
-        // engine's strict JSON response contract. The persisted user row
-        // above stays the raw stored prompt.
-        prompt: buildSchedulerPrompt(record.prompt)
-      });
-      if (!result.text.trim()) {
-        throw new Error("PI returned an empty response");
+      let result = await this.generateScheduledTurn(
+        session.id,
+        record,
+        identity,
+        firstMessageId,
+        record.prompt,
+        buildSchedulerPrompt(record.prompt)
+      );
+      let attempts = 1;
+      // Strict JSON response contract: validate every attempt and, while the
+      // reply is invalid and tries remain, turn the failed attempt into a
+      // correction prompt inside the same durable session — the agent can see
+      // its own invalid reply and fix it. Each attempt's assistant reply is
+      // persisted for full history fidelity. After the final invalid try the
+      // last result is returned untouched; the engine refuses to post it and
+      // logs scheduled_prompt_invalid_response, so broken JSON never reaches
+      // the channel.
+      while (
+        parseScheduledResponse(result.text) === undefined &&
+        attempts < SCHEDULER_RESPONSE_MAX_ATTEMPTS
+      ) {
+        this.repository.insertAssistant(session.id, result);
+        this.logger.warn("scheduled_prompt_correction_issued", {
+          jobId: record.id,
+          conversationKey: identity.key,
+          attempt: attempts,
+          responsePreview: result.text.slice(0, INVALID_RESPONSE_PREVIEW_LENGTH)
+        });
+        const correctionPrompt = buildSchedulerCorrectionPrompt();
+        result = await this.generateScheduledTurn(
+          session.id,
+          record,
+          identity,
+          `${firstMessageId}:correction-${attempts}`,
+          correctionPrompt,
+          correctionPrompt
+        );
+        attempts += 1;
       }
       this.repository.insertAssistant(session.id, result);
       this.repository.recordEvent("scheduled_prompt_succeeded", {
@@ -330,13 +351,15 @@ export class ConversationService {
           jobId: record.id,
           scheduledByUserId: record.scheduledByUserId,
           scheduleType: record.schedule.type,
-          model: result.model
+          model: result.model,
+          responseAttempts: attempts
         }
       });
       this.logger.info("scheduled_prompt_succeeded", {
         conversationKey: identity.key,
         jobId: record.id,
-        sessionId: session.id
+        sessionId: session.id,
+        responseAttempts: attempts
       });
       return result;
     } catch (error) {
@@ -354,6 +377,45 @@ export class ConversationService {
       });
       return null;
     }
+  }
+
+  /**
+   * One generation attempt inside the fired job's durable session: persist the
+   * user turn (raw `content` row attributed to the scheduling user), generate
+   * with the model-visible `prompt`, and reject empty output as a generation
+   * failure. The correction retries reuse the same helper so every attempt is
+   * persisted and attributed identically.
+   */
+  private async generateScheduledTurn(
+    sessionId: string,
+    record: ScheduledPromptRecord,
+    identity: ConversationIdentity,
+    sourceMessageId: string,
+    content: string,
+    prompt: string
+  ): Promise<PiGenerationResult> {
+    this.repository.insertSourceMessages(sessionId, [
+      {
+        discordMessageId: sourceMessageId,
+        authorId: record.scheduledByUserId,
+        authorName: record.scheduledByUserId,
+        role: "user",
+        content,
+        createdAt: new Date().toISOString()
+      }
+    ]);
+    const result = await this.pi.generate({
+      logicalSessionId: sessionId,
+      conversationKey: identity.key,
+      conversationKind: identity.kind,
+      sourceMessageId,
+      authorId: record.scheduledByUserId,
+      prompt
+    });
+    if (!result.text.trim()) {
+      throw new Error("PI returned an empty response");
+    }
+    return result;
   }
 
   private schedulerLog(

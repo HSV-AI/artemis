@@ -584,12 +584,12 @@ describe("ConversationService scheduled prompts", () => {
 
   it("runs a scheduled job in the stored conversation's session scope with that channel's permissions", async () => {
     const { service, pi, logger } = createService(
-      createPiMock({ text: "standup summary" }),
+      createPiMock({ text: '{"type":"message","content":"standup summary"}' }),
       membershipMock()
     );
 
     await expect(service.runScheduledPrompt(jobRecord())).resolves.toMatchObject({
-      text: "standup summary"
+      text: '{"type":"message","content":"standup summary"}'
     });
 
     expect(pi.generate).toHaveBeenCalledTimes(1);
@@ -615,7 +615,7 @@ describe("ConversationService scheduled prompts", () => {
         authorId: "603384387685449728",
         content: "Post the weekly standup summary"
       }),
-      expect.objectContaining({ role: "assistant", content: "standup summary" })
+      expect.objectContaining({ role: "assistant", content: '{"type":"message","content":"standup summary"}' })
     ]);
     expect(logger.info).toHaveBeenCalledWith(
       "scheduled_prompt_succeeded",
@@ -740,10 +740,13 @@ describe("ConversationService scheduled prompts", () => {
   });
 
   it("proceeds for allow-listed scopes when no membership checker is wired, with a warning", async () => {
-    const { service, pi, logger } = createService(createPiMock(), null);
+    const { service, pi, logger } = createService(
+      createPiMock({ text: '{"type":"silent"}' }),
+      null
+    );
 
     await expect(service.runScheduledPrompt(jobRecord())).resolves.toMatchObject({
-      text: "assistant response"
+      text: '{"type":"silent"}'
     });
 
     expect(pi.generate).toHaveBeenCalledTimes(1);
@@ -764,7 +767,7 @@ describe("ConversationService scheduled prompts", () => {
       generate: vi
         .fn()
         .mockImplementationOnce(() => firstResult)
-        .mockResolvedValueOnce({ text: "fired", model: "test-model" })
+        .mockResolvedValueOnce({ text: '{"type":"silent"}', model: "test-model" })
     };
     const { service } = createService(pi, membershipMock());
     const interactive = service.handleMessage(inbound({ discordMessageId: "interactive" }));
@@ -775,7 +778,7 @@ describe("ConversationService scheduled prompts", () => {
     release?.({ text: "first", model: "test-model" });
     await expect(Promise.all([interactive, scheduled])).resolves.toEqual([
       "first",
-      { text: "fired", model: "test-model" }
+      { text: '{"type":"silent"}', model: "test-model" }
     ]);
   });
 
@@ -790,5 +793,160 @@ describe("ConversationService scheduled prompts", () => {
       "scheduled_prompt_failed",
       expect.objectContaining({ jobId: "job-1", conversationKey: "guild:guild-1:channel:group-1" })
     );
+  });
+
+  describe("scheduled response correction retries", () => {
+    it("issues one correction prompt and returns the valid second attempt", async () => {
+      const pi = createPiMock({ text: "Good morning everyone, quick reminder!" });
+      vi.mocked(pi.generate)
+        .mockResolvedValueOnce({ text: "Good morning everyone, quick reminder!", model: "test-model" })
+        .mockResolvedValueOnce({ text: '{"type":"message","content":"Standup at 9:15"}', model: "test-model" });
+      const { service, logger } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPrompt(jobRecord())).resolves.toMatchObject({
+        text: '{"type":"message","content":"Standup at 9:15"}'
+      });
+
+      expect(pi.generate).toHaveBeenCalledTimes(2);
+      const first = vi.mocked(pi.generate).mock.calls[0]?.[0];
+      const second = vi.mocked(pi.generate).mock.calls[1]?.[0];
+      // The correction continues the same durable session and the same
+      // scheduler-attributed scope as the original turn.
+      expect(second?.logicalSessionId).toBe(first?.logicalSessionId);
+      expect(second).toMatchObject({
+        conversationKey: "guild:guild-1:channel:group-1",
+        conversationKind: "guild",
+        authorId: "603384387685449728"
+      });
+      expect(second?.sourceMessageId).toMatch(/^scheduled:job-1:.+:correction-1$/);
+      // The correction framing restates both valid shapes and the content
+      // field requirement.
+      expect(second?.prompt).toContain('"type":"message","content":');
+      expect(second?.prompt).toContain('"type":"silent"');
+      expect(second?.prompt).not.toContain("Post the weekly standup summary");
+      expect(logger.warn).toHaveBeenCalledWith(
+        "scheduled_prompt_correction_issued",
+        expect.objectContaining({ jobId: "job-1", attempt: 1 })
+      );
+      const session = repository?.getOrCreateSession(
+        { key: "guild:guild-1:channel:group-1", kind: "guild", guildId: "guild-1", channelId: "group-1" },
+        "test-model"
+      );
+      expect(repository?.getHistory(session?.id ?? "")).toEqual([
+        expect.objectContaining({ role: "user", content: "Post the weekly standup summary" }),
+        expect.objectContaining({ role: "assistant", content: "Good morning everyone, quick reminder!" }),
+        expect.objectContaining({ role: "user", content: second?.prompt }),
+        expect.objectContaining({ role: "assistant", content: '{"type":"message","content":"Standup at 9:15"}' })
+      ]);
+    });
+
+    it("accepts a valid silent response returned in the correction case", async () => {
+      const pi = createPiMock();
+      vi.mocked(pi.generate)
+        .mockResolvedValueOnce({ text: "posting the results now...", model: "test-model" })
+        .mockResolvedValueOnce({ text: '{"type":"silent"}', model: "test-model" });
+      const { service, logger } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPrompt(jobRecord())).resolves.toMatchObject({ text: '{"type":"silent"}' });
+
+      expect(pi.generate).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(pi.generate).mock.calls[1]?.[0].prompt).toContain('"type":"silent"');
+      expect(logger.warn).toHaveBeenCalledWith(
+        "scheduled_prompt_correction_issued",
+        expect.objectContaining({ attempt: 1 })
+      );
+    });
+
+    it("does not issue a correction when the first response is already valid JSON", async () => {
+      const pi = createPiMock({ text: '{"type":"message","content":"On time today"}' });
+      const { service, logger } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPrompt(jobRecord())).resolves.toMatchObject({
+        text: '{"type":"message","content":"On time today"}'
+      });
+
+      expect(pi.generate).toHaveBeenCalledTimes(1);
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        "scheduled_prompt_correction_issued",
+        expect.anything()
+      );
+    });
+
+    it("gives up after three invalid tries and returns the last result untouched for the engine to refuse", async () => {
+      const pi = createPiMock();
+      vi.mocked(pi.generate)
+        .mockResolvedValueOnce({ text: "attempt one", model: "test-model" })
+        .mockResolvedValueOnce({ text: "attempt two", model: "test-model" })
+        .mockResolvedValueOnce({ text: "attempt three", model: "test-model" });
+      const { service, logger } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPrompt(jobRecord())).resolves.toMatchObject({ text: "attempt three" });
+
+      expect(pi.generate).toHaveBeenCalledTimes(3);
+      const correctionIds = vi.mocked(pi.generate).mock.calls.slice(1).map((call) => call[0]?.sourceMessageId);
+      expect(correctionIds[0]).toMatch(/^scheduled:job-1:.+:correction-1$/);
+      expect(correctionIds[1]).toMatch(/^scheduled:job-1:.+:correction-2$/);
+      expect(logger.warn).toHaveBeenCalledWith(
+        "scheduled_prompt_correction_issued",
+        expect.objectContaining({ jobId: "job-1", attempt: 1 })
+      );
+      expect(logger.warn).toHaveBeenCalledWith(
+        "scheduled_prompt_correction_issued",
+        expect.objectContaining({ jobId: "job-1", attempt: 2 })
+      );
+      const session = repository?.getOrCreateSession(
+        { key: "guild:guild-1:channel:group-1", kind: "guild", guildId: "guild-1", channelId: "group-1" },
+        "test-model"
+      );
+      const history = repository?.getHistory(session?.id ?? "") ?? [];
+      expect(history.filter((message) => message.role === "assistant")).toHaveLength(3);
+      expect(history.filter((message) => message.role === "user")).toHaveLength(3);
+      expect(logger.info).toHaveBeenCalledWith(
+        "scheduled_prompt_succeeded",
+        expect.objectContaining({ responseAttempts: 3 })
+      );
+    });
+
+    it("keeps an empty response a generation failure without a correction", async () => {
+      const pi = createPiMock({ text: "   " });
+      const { service, logger } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPrompt(jobRecord())).resolves.toBeNull();
+
+      expect(pi.generate).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        "scheduled_prompt_failed",
+        expect.objectContaining({ jobId: "job-1" })
+      );
+      expect(logger.warn).not.toHaveBeenCalledWith(
+        "scheduled_prompt_correction_issued",
+        expect.anything()
+      );
+    });
+
+    it("returns null with a failure event when a correction retry throws, persisting the invalid attempt", async () => {
+      const pi = createPiMock();
+      vi.mocked(pi.generate)
+        .mockResolvedValueOnce({ text: "prose, not JSON", model: "test-model" })
+        .mockRejectedValueOnce(new Error("model unavailable"));
+      const { service, logger } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPrompt(jobRecord())).resolves.toBeNull();
+
+      expect(pi.generate).toHaveBeenCalledTimes(2);
+      expect(logger.error).toHaveBeenCalledWith(
+        "scheduled_prompt_failed",
+        expect.objectContaining({ jobId: "job-1" })
+      );
+      const session = repository?.getOrCreateSession(
+        { key: "guild:guild-1:channel:group-1", kind: "guild", guildId: "guild-1", channelId: "group-1" },
+        "test-model"
+      );
+      expect(repository?.getHistory(session?.id ?? "")).toEqual([
+        expect.objectContaining({ role: "user" }),
+        expect.objectContaining({ role: "assistant", content: "prose, not JSON" }),
+        expect.objectContaining({ role: "user" })
+      ]);
+    });
   });
 });

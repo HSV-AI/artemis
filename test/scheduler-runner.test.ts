@@ -5,7 +5,9 @@ import type { Logger } from "../src/domain.js";
 import type { ScheduledPromptRecord } from "../src/domain.js";
 import {
   SCHEDULER_POLL_INTERVAL_MS,
+  SCHEDULER_RESPONSE_MAX_ATTEMPTS,
   SchedulerRunner,
+  buildSchedulerCorrectionPrompt,
   buildSchedulerPrompt,
   dueOccurrence,
   parseScheduledResponse
@@ -143,6 +145,28 @@ describe("buildSchedulerPrompt", () => {
     expect(prompt).toContain('"type":"message","content":');
     expect(prompt).toContain('{"type":"silent"}');
     expect(prompt).toContain("No Discord user");
+  });
+});
+
+describe("buildSchedulerCorrectionPrompt", () => {
+  it("names both valid response shapes and the required content field", () => {
+    const prompt = buildSchedulerCorrectionPrompt();
+    expect(prompt).toContain('"type":"message","content":');
+    expect(prompt).toContain('"type":"silent"');
+    expect(prompt).toContain("content");
+  });
+
+  it("demands a JSON-only reply with no prose or code fences", () => {
+    const prompt = buildSchedulerCorrectionPrompt();
+    expect(prompt).toContain("JSON object");
+    expect(prompt).toContain("no code fences");
+    expect(prompt).toContain("no commentary");
+  });
+});
+
+describe("SCHEDULER_RESPONSE_MAX_ATTEMPTS", () => {
+  it("caps the agent at three tries per fired occurrence", () => {
+    expect(SCHEDULER_RESPONSE_MAX_ATTEMPTS).toBe(3);
   });
 });
 
@@ -334,6 +358,8 @@ describe("SchedulerRunner", () => {
 
     expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
     expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
+    // Retry ownership belongs to the gate; the engine submits the job once
+    // and refuses to post whatever invalid result comes back.
     expect(logger.error).toHaveBeenCalledWith(
       "scheduled_prompt_invalid_response",
       expect.objectContaining({ jobId: "job-1", conversationKey: CONVERSATION.key })

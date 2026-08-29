@@ -14,7 +14,15 @@ import { nextOccurrenceUtc } from "./scheduler-tools.js";
 export const SCHEDULER_POLL_INTERVAL_MS = 30_000;
 
 /** Longest stored agent response kept in invalid-response event details. */
-const INVALID_RESPONSE_PREVIEW_LENGTH = 500;
+export const INVALID_RESPONSE_PREVIEW_LENGTH = 500;
+
+/**
+ * Total generation attempts a fired scheduled prompt gets at producing a valid
+ * JSON response: the original framed turn plus at most two correction retries.
+ * Exported because the fire-time gate (ConversationService) owns the retry
+ * loop and the engine's docs reference the same bound.
+ */
+export const SCHEDULER_RESPONSE_MAX_ATTEMPTS = 3;
 
 /**
  * One enclosing markdown code fence is tolerated around the JSON object
@@ -86,6 +94,29 @@ export function buildSchedulerPrompt(storedPrompt: string): string {
     '{"type":"message","content":"<concise text to post in this channel>"}',
     "",
     'Use {"type":"silent"} instead when nothing should be posted this time.',
+    "The reply must be only the JSON object: no code fences, no commentary before or after."
+  ].join("\n");
+}
+
+/**
+ * Correction framing sent to the agent when its reply failed the strict JSON
+ * response validation. The conversation service calls this between generation
+ * attempts so the agent can fix its own previous reply, which it can still see
+ * in the durable session. The correction restates every valid option —
+ * `message` with its required `content` field, and `silent` — and demands a
+ * JSON-only reply with no fences or commentary.
+ */
+export function buildSchedulerCorrectionPrompt(): string {
+  return [
+    "Your previous reply was not a valid response for this scheduled prompt, so nothing was posted.",
+    "Reply again with exactly one JSON object matching one of these shapes and nothing else:",
+    "",
+    '{"type":"message","content":"<text to post in this channel>"}',
+    "  - \"type\" must be the string \"message\" and \"content\" must be a non-empty string.",
+    "",
+    '{"type":"silent"}',
+    '  - Use this instead when nothing should be posted. No "content" field.',
+    "",
     "The reply must be only the JSON object: no code fences, no commentary before or after."
   ].join("\n");
 }
