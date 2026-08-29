@@ -44,8 +44,13 @@ behaviors beyond the new delivery method.
 
 When Artemis starts (after Discord reports ready), the execution engine begins
 polling the scheduled-prompt store on a fixed 30-second interval, with one immediate
-poll to catch up on work missed while the process was down. Each poll lists every
-active job across conversations; for each job it computes the occurrence the job is
+poll to catch up on work missed while the process was down. Firing is gated on the
+Discord gateway's ready handshake, not on a completed `login()`: ticks that arrive
+before the handshake (or while it has not yet happened) are deferred without listing
+or consuming, so a job's occurrence is never spent on a client that cannot yet resolve
+its target channel — the ready handshake guarantees the client's guild and channel
+caches are populated. Each poll lists every active job across conversations; for each
+job it computes the occurrence the job is
 due for, from the job's `last_run_at` (or `created_at` when it has never fired), and
 fires the job when that occurrence is at or before the current time.
 
@@ -83,6 +88,7 @@ model-facing tools never have. Authorization, however, always routes through the
 same gate as interactive traffic:
 
 ```text
+discordReady() gate (Discord gateway ready handshake) ---------------> defer whole ticks while not ready
 repository.listActiveScheduledPrompts() (engine process boundary) ----> due jobs
 dueOccurrence(job, now) from schedule + lastRunAt ?? createdAt -------> due check
 markScheduledPromptFired / completeScheduledPrompt -------------------> consume occurrence
@@ -181,10 +187,17 @@ and never sent anywhere else.
   surrounding prose beyond one code fence): `scheduled_prompt_invalid_response`
   error log with a bounded response preview plus a durable event; nothing is posted;
   the occurrence is consumed.
-- Delivery failure (channel missing, not sendable, or an SDK send error):
-  `scheduler_channel_unavailable` or `discord_channel_not_sendable` logging from
-  the gateway with the conversation key; surfaced by the engine as a
-  `scheduled_prompt_failed` event; the occurrence is consumed.
+- Delivery failure (channel fetch rejection, an unresolved channel, a non-sendable
+  channel, or an SDK send error): `scheduler_channel_unavailable`,
+  `scheduler_channel_unresolved`, or `discord_channel_not_sendable` logging from the
+  gateway with the conversation key and channel id — an unresolved fetch (discord.js
+  resolves to null instead of rejecting when the channel's guild is not cached, e.g.
+  before the ready handshake) is logged as its own failure, never mislabeled as a
+  not-sendable channel; surfaced by the engine as a `scheduled_prompt_failed` event.
+  The occurrence is consumed.
+- Discord not ready (gateway still connecting — login alone is not ready): the tick
+  is deferred with `scheduler_deferred_not_ready` debug logging; jobs are neither
+  listed nor consumed and the next tick fires them once the handshake completes.
 - Unresolvable stored schedule: the job is skipped silently by due detection rather
   than failing the tick.
 - Storage failure while consuming an occurrence (`scheduled_prompt_state_failed`):
@@ -201,8 +214,16 @@ and never sent anywhere else.
   from creation and `last_run_at`, DST-correct weekly re-arms, missed-occurrence
   collapse, consumption before execution (at-most-once), message posting, silent
   completion, posting through `sendToConversation` with the parsed identity, the
-  invalid-response and delivery-failure paths, unroutable keys, and the start/stop
-  interval lifecycle with in-flight tick skipping.
+  invalid-response and delivery-failure paths, unroutable keys, the start/stop
+  interval lifecycle with in-flight tick skipping, deferral of whole ticks until the
+  Discord readiness gate passes (nothing listed or consumed pre-ready, then the full
+  chain fire → valid JSON → posted once ready), and unchanged firing when no gate is
+  wired.
+- `test/discord-gateway.test.ts` covers `sendToConversation`: suppression flags,
+  per-channel embed allowlists, long-content splitting, non-sendable channels,
+  unresolvable channels, a null channel resolution logged as
+  `scheduler_channel_unresolved` (distinct from not-sendable), and readiness
+  reporting via `isDiscordReady` from the ready handshake.
 - `test/conversation-service.test.ts` covers the fire-time gate: scheduled runs
   resolve the conversation session and kind from the stored key, present the stored
   prompt inside the framing that carries the strict JSON contract, persist
@@ -220,7 +241,9 @@ and never sent anywhere else.
   per-channel embed allowlists, long-content splitting, non-sendable channels, and
   unresolvable channels.
 - `test/application.test.ts` covers the scheduler's start/stop lifecycle within the
-  application composition.
+  application composition and the default wiring of the readiness gate: the
+  composed engine defers polling until the Discord gateway reports ready and
+  resumes once it does.
 - `npm run guardrail` remains the completion gate.
 
 ## References

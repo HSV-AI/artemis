@@ -236,6 +236,7 @@ export interface DiscordGatewayOptions {
 
 export class DiscordGateway {
   private bound = false;
+  private ready = false;
   private readonly allowedChannelIds: ReadonlySet<string>;
   private readonly allowedUserIds: ReadonlySet<string>;
   private readonly suppressEmbeds: boolean;
@@ -272,6 +273,18 @@ export class DiscordGateway {
 
   public stop(): void {
     this.client.destroy();
+  }
+
+  /**
+   * Answer whether the Discord client has completed its ready handshake.
+   * `login()` resolves long before ready, and Discord state a fired prompt
+   * depends on — the guild/channel caches — is only guaranteed after the
+   * handshake. The scheduler execution engine gates firing on this so a due
+   * job cannot burn its single at-most-once delivery attempt on a client
+   * that cannot yet resolve the target channel.
+   */
+  public isDiscordReady(): boolean {
+    return this.ready;
   }
 
   /**
@@ -413,7 +426,19 @@ export class DiscordGateway {
       return false;
     }
     const sendable = channel as { isSendable?: () => boolean; send?: unknown } | null;
-    if (!sendable || sendable.isSendable?.() === false || typeof sendable.send !== "function") {
+    if (!sendable) {
+      // discord.js resolves a channel fetch to null (rather than rejecting)
+      // when the channel cannot be built because its guild is not in the
+      // client's cache — e.g. delivery attempted before the ready handshake.
+      // Log this as its own failure instead of mislabeling the channel as
+      // present-but-not-sendable.
+      this.logger.error("scheduler_channel_unresolved", {
+        conversationKey: identity.key,
+        channelId: identity.channelId
+      });
+      return false;
+    }
+    if (sendable.isSendable?.() === false || typeof sendable.send !== "function") {
       this.logger.warn("discord_channel_not_sendable", {
         conversationKey: identity.key,
         channelId: identity.channelId
@@ -455,6 +480,9 @@ export class DiscordGateway {
     }
     this.bound = true;
     this.client.once(Events.ClientReady, (readyClient) => {
+      // The ready handshake guarantees the client's guild and channel caches
+      // are populated; scheduler firing and delivery depend on it.
+      this.ready = true;
       const botDisplayName = resolveBotDisplayName(readyClient.user);
       if (botDisplayName) {
         this.options.onBotIdentity?.(botDisplayName);

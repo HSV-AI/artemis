@@ -4,6 +4,7 @@ import { Collection, Events, type Client } from "discord.js";
 import { ArtemisApplication } from "../src/application.js";
 import type { ArtemisConfig } from "../src/config.js";
 import type { DiscordGateway } from "../src/discord-gateway.js";
+import { SCHEDULER_POLL_INTERVAL_MS } from "../src/scheduler-runner.js";
 import type { ArtemisRepository } from "../src/repository.js";
 import { ARTEMIS_PROFILE } from "../src/personas/artemis.js";
 import { createLoggerMock, createPiMock, modelConfig } from "./helpers.js";
@@ -126,6 +127,45 @@ describe("ArtemisApplication", () => {
       2,
       expect.objectContaining({ level: "info", event: "artemis_stopped" })
     );
+  });
+
+  it("holds the default scheduler until the Discord gateway reports ready", async () => {
+    vi.useFakeTimers();
+    try {
+      const pi = createPiMock();
+      const discord = {
+        start: vi.fn().mockResolvedValue(undefined),
+        stop: vi.fn(),
+        isDiscordReady: vi.fn().mockReturnValue(false)
+      } as unknown as DiscordGateway;
+      const repository = {
+        close: vi.fn(),
+        listActiveScheduledPrompts: vi.fn().mockReturnValue([]),
+        recordEvent: vi.fn()
+      } as unknown as ArtemisRepository;
+      const logger = createLoggerMock();
+      // No scheduler injected: the composition default-wires the runner with
+      // its Discord readiness gate.
+      const application = new ArtemisApplication(config, { pi, discord, repository, logger });
+
+      await application.start();
+      // The immediate catch-up poll defers while Discord is not ready: jobs
+      // are neither listed nor consumed, so nothing can fire pre-ready.
+      expect(discord.isDiscordReady).toHaveBeenCalled();
+      expect(repository.listActiveScheduledPrompts).not.toHaveBeenCalled();
+      expect(logger.debug).toHaveBeenCalledWith(
+        "scheduler_deferred_not_ready",
+        expect.anything()
+      );
+
+      vi.mocked(discord.isDiscordReady).mockReturnValue(true);
+      await vi.advanceTimersByTimeAsync(SCHEDULER_POLL_INTERVAL_MS);
+      expect(repository.listActiveScheduledPrompts).toHaveBeenCalledOnce();
+
+      application.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("wires the Discord bot display name into the PI gateway on ready", async () => {

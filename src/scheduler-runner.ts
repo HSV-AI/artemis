@@ -114,6 +114,14 @@ export interface SchedulerRunnerOptions {
   logger: Logger;
   now?: () => Date;
   intervalMs?: number;
+  /**
+   * Fire-time readiness gate (wired by the composition to the Discord
+   * gateway's ready handshake). When provided and false, the whole tick is
+   * deferred — no listing, no consumption, no generation, no posting — so a
+   * job cannot fire while the client cannot yet resolve its channels. The
+   * job stays due and the next tick picks it up.
+   */
+  ready?: () => boolean;
 }
 
 /**
@@ -128,6 +136,11 @@ export interface SchedulerRunnerOptions {
  * result unposted; the engine then validates the strict JSON response and
  * only posts JSON-conforming `message` content. One-time jobs complete after
  * firing, recurring jobs re-arm until cancelled.
+ *
+ * Ticks are deferred until the optional {@link SchedulerRunnerOptions.ready}
+ * gate passes (wired to the Discord gateway's ready handshake): firing a
+ * scheduled prompt while the Discord client is still connecting resolves to
+ * an unpostable channel and would silently consume the run.
  */
 export class SchedulerRunner {
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -157,7 +170,11 @@ export class SchedulerRunner {
   /**
    * One poll cycle: fire every due job once. A job that is already executing
    * (or whose poll is in flight) is never started twice; long executions
-   * simply finish and leave the next occurrence for a later tick.
+   * simply finish and leave the next occurrence for a later tick. Ticks that
+   * arrive before the ready gate (the Discord gateway's ready handshake) are
+   * deferred without listing or consuming — firing into a client that cannot
+   * yet resolve its target channel would burn the occurrence's single
+   * delivery attempt on an undeliverable response.
    */
   public async runOnce(): Promise<void> {
     if (this.polling) {
@@ -165,6 +182,10 @@ export class SchedulerRunner {
     }
     this.polling = true;
     try {
+      if (this.options.ready && !this.options.ready()) {
+        this.options.logger.debug("scheduler_deferred_not_ready", {});
+        return;
+      }
       const jobs = this.options.repository.listActiveScheduledPrompts();
       const now = (this.options.now ?? (() => new Date()))();
       for (const job of jobs) {

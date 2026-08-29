@@ -103,7 +103,11 @@ export class ArtemisApplication {
         repository: this.repository,
         conversations,
         dispatcher: this.discord,
-        logger: this.logger
+        logger: this.logger,
+        // Scheduled prompts only fire once the Discord gate is ready: firing
+        // into a client that cannot yet resolve channels would consume the
+        // job's one delivery attempt without posting anything.
+        ready: () => this.discord.isDiscordReady()
       });
   }
 
