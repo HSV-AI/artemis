@@ -4,9 +4,12 @@ import {
   deriveConversationIdentity
 } from "../src/conversation-service.js";
 import type {
+  ChannelMembershipChecker,
   InboundMessage,
+  MembershipStatus,
   PiGateway,
   PiGenerationResult,
+  ScheduledPromptRecord,
   SourceMessage
 } from "../src/domain.js";
 import { ArtemisRepository } from "../src/repository.js";
@@ -457,5 +460,245 @@ describe("ConversationService", () => {
     release?.({ text: "first", model: "test-model" });
     await expect(Promise.all([first, second])).resolves.toEqual(["first", "second"]);
     expect(pi.generate).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("ConversationService scheduled prompts", () => {
+  let repository: ArtemisRepository | undefined;
+
+  afterEach(() => repository?.close());
+
+  function jobRecord(overrides: Partial<ScheduledPromptRecord> = {}): ScheduledPromptRecord {
+    return {
+      id: overrides.id ?? "job-1",
+      conversationKey: overrides.conversationKey ?? "guild:guild-1:channel:group-1",
+      prompt: overrides.prompt ?? "Post the weekly standup summary",
+      schedule: overrides.schedule ?? { type: "daily", time: "09:15", timezone: "America/Chicago" },
+      responseType: overrides.responseType ?? "message",
+      scheduledByUserId: overrides.scheduledByUserId ?? "603384387685449728",
+      status: overrides.status ?? "active",
+      createdAt: overrides.createdAt ?? "2026-08-29T14:30:00.000Z",
+      ...(overrides.cancelledAt ? { cancelledAt: overrides.cancelledAt } : {})
+    };
+  }
+
+  function membershipMock(status: MembershipStatus = "member"): ChannelMembershipChecker {
+    return { isChannelMember: vi.fn(async () => status) };
+  }
+
+  function createService(
+    pi = createPiMock(),
+    membership: ChannelMembershipChecker | null = membershipMock()
+  ) {
+    repository = new ArtemisRepository(":memory:");
+    const logger = createLoggerMock();
+    const service = new ConversationService(options, repository, pi, logger, undefined, membership ?? undefined);
+    return { service, pi, logger, membership };
+  }
+
+  it("runs a scheduled job in the stored conversation's session scope with that channel's permissions", async () => {
+    const { service, pi, logger } = createService(
+      createPiMock({ text: "standup summary" }),
+      membershipMock()
+    );
+
+    await expect(service.runScheduledPrompt(jobRecord())).resolves.toMatchObject({
+      text: "standup summary"
+    });
+
+    expect(pi.generate).toHaveBeenCalledTimes(1);
+    const input = vi.mocked(pi.generate).mock.calls[0]?.[0];
+    expect(input).toMatchObject({
+      conversationKey: "guild:guild-1:channel:group-1",
+      conversationKind: "guild",
+      authorId: "603384387685449728",
+      prompt: "Post the weekly standup summary"
+    });
+    expect(input?.sourceMessageId).toMatch(/^scheduled:job-1:/);
+    const session = repository?.getOrCreateSession(
+      { key: "guild:guild-1:channel:group-1", kind: "guild", guildId: "guild-1", channelId: "group-1" },
+      "test-model"
+    );
+    expect(repository?.getHistory(session?.id ?? "")).toEqual([
+      expect.objectContaining({
+        role: "user",
+        authorId: "603384387685449728",
+        content: "Post the weekly standup summary"
+      }),
+      expect.objectContaining({ role: "assistant", content: "standup summary" })
+    ]);
+    expect(logger.info).toHaveBeenCalledWith(
+      "scheduled_prompt_succeeded",
+      expect.objectContaining({ conversationKey: "guild:guild-1:channel:group-1" })
+    );
+  });
+
+  it("runs a DM job in the DM conversation's scope", async () => {
+    const { service, pi } = createService(
+      createPiMock({ text: "dm summary" }),
+      membershipMock()
+    );
+
+    await expect(
+      service.runScheduledPrompt(
+        jobRecord({ conversationKey: "dm:dm-1", scheduledByUserId: "603384387685449728" })
+      )
+    ).resolves.toMatchObject({ text: "dm summary" });
+
+    expect(vi.mocked(pi.generate).mock.calls[0]?.[0]).toMatchObject({
+      conversationKey: "dm:dm-1",
+      conversationKind: "dm",
+      authorId: "603384387685449728"
+    });
+  });
+
+  it("skips a job whose scheduling user is no longer a member of the channel", async () => {
+    const { service, pi, logger } = createService(createPiMock(), membershipMock("not-member"));
+
+    await expect(service.runScheduledPrompt(jobRecord())).resolves.toBeNull();
+
+    expect(pi.generate).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "scheduled_prompt_rejected",
+      expect.objectContaining({ code: "membership-revoked", jobId: "job-1" })
+    );
+  });
+
+  it("denies a job whose scheduled channel left the deployment allow-list", async () => {
+    const membership = membershipMock("member");
+    const { service, pi, logger } = createService(createPiMock(), membership);
+
+    await expect(
+      service.runScheduledPrompt(
+        jobRecord({ conversationKey: "guild:guild-9:channel:not-allowed" })
+      )
+    ).resolves.toBeNull();
+
+    expect(pi.generate).not.toHaveBeenCalled();
+    expect(membership.isChannelMember).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "scheduled_prompt_rejected",
+      expect.objectContaining({ code: "channel-not-allowed", conversationKey: "guild:guild-9:channel:not-allowed" })
+    );
+  });
+
+  it("denies a DM job for a user outside the authorized DM allow-list", async () => {
+    const membership = membershipMock("member");
+    const { service, pi, logger } = createService(createPiMock(), membership);
+
+    await expect(
+      service.runScheduledPrompt(
+        jobRecord({ conversationKey: "dm:dm-1", scheduledByUserId: "stranger" })
+      )
+    ).resolves.toBeNull();
+
+    expect(pi.generate).not.toHaveBeenCalled();
+    expect(membership.isChannelMember).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "scheduled_prompt_rejected",
+      expect.objectContaining({ code: "user-not-authorized" })
+    );
+  });
+
+  it("denies a job whose stored conversation key the harness could not have derived", async () => {
+    const membership = membershipMock("member");
+    const { service, pi, logger } = createService(createPiMock(), membership);
+
+    await expect(
+      service.runScheduledPrompt(jobRecord({ conversationKey: "user:123" }))
+    ).resolves.toBeNull();
+
+    expect(pi.generate).not.toHaveBeenCalled();
+    expect(membership.isChannelMember).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "scheduled_prompt_rejected",
+      expect.objectContaining({ code: "invalid-scope" })
+    );
+  });
+
+  it("denies a legacy job with no recorded scheduling user", async () => {
+    const membership = membershipMock("member");
+    const { service, pi, logger } = createService(createPiMock(), membership);
+
+    await expect(service.runScheduledPrompt(jobRecord({ scheduledByUserId: "" }))).resolves
+      .toBeNull();
+
+    expect(pi.generate).not.toHaveBeenCalled();
+    expect(membership.isChannelMember).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "scheduled_prompt_rejected",
+      expect.objectContaining({ code: "unattributed-scheduler" })
+    );
+  });
+
+  it("proceeds when the fire-time membership check cannot be reached, logging that it was unverified", async () => {
+    const { service, logger } = createService(
+      createPiMock({ text: "still ran" }),
+      membershipMock("unknown")
+    );
+
+    await expect(service.runScheduledPrompt(jobRecord())).resolves.toMatchObject({ text: "still ran" });
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      "scheduled_prompt_membership_unverified",
+      expect.objectContaining({ conversationKey: "guild:guild-1:channel:group-1" })
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      "scheduled_prompt_succeeded",
+      expect.objectContaining({})
+    );
+  });
+
+  it("proceeds for allow-listed scopes when no membership checker is wired, with a warning", async () => {
+    const { service, pi, logger } = createService(createPiMock(), null);
+
+    await expect(service.runScheduledPrompt(jobRecord())).resolves.toMatchObject({
+      text: "assistant response"
+    });
+
+    expect(pi.generate).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      "scheduled_prompt_membership_unverified",
+      expect.any(Object)
+    );
+  });
+
+  it("serializes a scheduled run against interactive traffic in the same conversation", async () => {
+    let release: ((result: PiGenerationResult) => void) | undefined;
+    const firstResult = new Promise<PiGenerationResult>((resolve) => {
+      release = resolve;
+    });
+    const pi: PiGateway = {
+      checkHealth: vi.fn().mockResolvedValue(undefined),
+      setBotDisplayName: vi.fn(),
+      generate: vi
+        .fn()
+        .mockImplementationOnce(() => firstResult)
+        .mockResolvedValueOnce({ text: "fired", model: "test-model" })
+    };
+    const { service } = createService(pi, membershipMock());
+    const interactive = service.handleMessage(inbound({ discordMessageId: "interactive" }));
+    const scheduled = service.runScheduledPrompt(jobRecord());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(pi.generate).toHaveBeenCalledTimes(1);
+    release?.({ text: "first", model: "test-model" });
+    await expect(Promise.all([interactive, scheduled])).resolves.toEqual([
+      "first",
+      { text: "fired", model: "test-model" }
+    ]);
+  });
+
+  it("records a failure event and returns null when the scheduled generation throws", async () => {
+    const pi = createPiMock();
+    vi.mocked(pi.generate).mockRejectedValue(new Error("model unavailable"));
+    const { service, logger } = createService(pi, membershipMock());
+
+    await expect(service.runScheduledPrompt(jobRecord())).resolves.toBeNull();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      "scheduled_prompt_failed",
+      expect.objectContaining({ jobId: "job-1", conversationKey: "guild:guild-1:channel:group-1" })
+    );
   });
 });

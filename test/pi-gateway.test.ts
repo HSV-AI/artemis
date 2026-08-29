@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type {
+  ChannelMembershipChecker,
   ChannelTimezoneStore,
   PiGenerationInput,
   PiSessionEntryRecord,
@@ -741,7 +742,7 @@ describe("PiSdkGateway", () => {
     expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain("get_current_datetime");
   });
 
-  it("registers scheduler tools bound to the harness-injected conversation key", async () => {
+  it("registers scheduler tools bound to the harness-injected conversation key and scheduling user", async () => {
     const settings = new Map<string, string>([["dm:sched-channel", "America/Chicago"]]);
     const timezoneStore: ChannelTimezoneStore = {
       getChannelTimezone: vi.fn((key) => settings.get(key)),
@@ -750,6 +751,9 @@ describe("PiSdkGateway", () => {
       })
     };
     const jobs: ScheduledPromptRecord[] = [];
+    const membership: ChannelMembershipChecker = {
+      isChannelMember: vi.fn(async () => "member" as const)
+    };
     const schedulerStore: ScheduledPromptStore = {
       createScheduledPrompt: vi.fn((key, input) => ({
         id: "job-1",
@@ -767,7 +771,8 @@ describe("PiSdkGateway", () => {
       healthyFetch(),
       undefined,
       timezoneStore,
-      schedulerStore
+      schedulerStore,
+      membership
     );
     await gateway.checkHealth();
     await gateway.generate(generationInput({ conversationKey: "dm:sched-channel", conversationKind: "dm" }));
@@ -814,13 +819,63 @@ describe("PiSdkGateway", () => {
       {} as never
     );
     expect(result.content[0]?.text).toContain("dm:sched-channel");
+    // The scheduling user is the harness-injected author, never model-supplied.
+    expect(membership.isChannelMember).toHaveBeenCalledWith("dm:sched-channel", "user");
     expect(schedulerStore.createScheduledPrompt).toHaveBeenCalledWith(
       "dm:sched-channel",
       expect.objectContaining({
         schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
-        responseType: "silent"
+        responseType: "silent",
+        scheduledByUserId: "user"
       })
     );
+  });
+
+  it("refuses scheduling when no membership checker is wired to the gateway", async () => {
+    const settings = new Map<string, string>();
+    const timezoneStore: ChannelTimezoneStore = {
+      getChannelTimezone: vi.fn((key) => settings.get(key)),
+      setChannelTimezone: vi.fn((key, timezone) => {
+        settings.set(key, timezone);
+      })
+    };
+    const schedulerStore: ScheduledPromptStore = {
+      createScheduledPrompt: vi.fn(),
+      listScheduledPrompts: vi.fn(() => []),
+      cancelScheduledPrompt: vi.fn(() => true)
+    };
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      healthyFetch(),
+      undefined,
+      timezoneStore,
+      schedulerStore
+    );
+    await gateway.checkHealth();
+    await gateway.generate(generationInput({ conversationKey: "dm:sched-channel", conversationKind: "dm" }));
+
+    type CapturedTool = {
+      name: string;
+      execute: (id: string, params: unknown, ...rest: unknown[]) => Promise<{
+        content: ReadonlyArray<{ type: string; text?: string }>;
+      }>;
+    };
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { customTools?: CapturedTool[] }
+      | undefined;
+    const schedulePrompt = sessionOptions?.customTools?.find((tool) => tool.name === "schedule_prompt");
+    expect(schedulePrompt).toBeDefined();
+
+    const result = await schedulePrompt!.execute(
+      "call",
+      { prompt: "Reminder", schedule: { type: "daily", time: "09:15" } },
+      undefined,
+      undefined,
+      {} as never
+    );
+    expect(result.content[0]?.text).toContain("Error:");
+    expect(schedulerStore.createScheduledPrompt).not.toHaveBeenCalled();
   });
 
   it("omits the scheduler tools when no scheduler store is configured", async () => {

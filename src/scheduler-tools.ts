@@ -1,6 +1,7 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type {
+  ChannelMembershipChecker,
   PromptSchedule,
   ScheduledPromptRecord,
   ScheduledPromptStore
@@ -11,7 +12,17 @@ export interface SchedulerToolContext {
   /** Stable conversation key. Injected by the harness from Discord identity. */
   conversationKey: string;
   /** Conversation's stored IANA timezone, also injected by the harness. */
-  defaultTimezone?: string;
+  defaultTimezone?: string | undefined;
+  /**
+   * Discord user id of the scheduling user, injected by the harness from the
+   * message author. Never supplied by the model.
+   */
+  schedulingUserId?: string | undefined;
+  /**
+   * Membership authority used to verify the scheduling user belongs to this
+   * conversation before any job is stored. Also harness-provided.
+   */
+  membership?: ChannelMembershipChecker | undefined;
 }
 
 /** Longest prompt prefix shown by `list_scheduled_prompts`. */
@@ -337,6 +348,60 @@ function invalidResponseTypeError(): string {
   return 'Error: response_type must be "message" or "silent".';
 }
 
+/**
+ * Refusal reasons for scheduling without a verified membership answer. The
+ * check runs before any parameter validation: an unauthorized caller must
+ * learn nothing about schedule validation.
+ */
+function missingSchedulingUserError(): string {
+  return (
+    "Error: prompt scheduling requires a verified scheduling user, which the " +
+    "harness did not provide for this conversation. Nothing was scheduled."
+  );
+}
+
+function missingMembershipCheckerError(): string {
+  return (
+    "Error: prompt scheduling requires channel membership verification, which " +
+    "is not available in this conversation. Nothing was scheduled."
+  );
+}
+
+async function verifySchedulingMembership(
+  context: SchedulerToolContext
+): Promise<string | undefined> {
+  const membership = context.membership;
+  if (!membership) {
+    return missingMembershipCheckerError();
+  }
+  const schedulingUserId = context.schedulingUserId?.trim() ?? "";
+  if (schedulingUserId === "") {
+    return missingSchedulingUserError();
+  }
+  try {
+    const status = await membership.isChannelMember(context.conversationKey, schedulingUserId);
+    if (status === "member") {
+      return undefined;
+    }
+    if (status === "unknown") {
+      return (
+        "Error: membership in this conversation could not be verified right now, so the " +
+        "prompt was not scheduled. Try again shortly."
+      );
+    }
+    return (
+      `Error: scheduling was refused because user ${schedulingUserId} is not a member of ` +
+      `${context.conversationKey}. A prompt can only be scheduled for a conversation ` +
+      "the scheduling user belongs to."
+    );
+  } catch {
+    return (
+      "Error: membership in this conversation could not be verified right now, so the " +
+      "prompt was not scheduled. Try again shortly."
+    );
+  }
+}
+
 function createdPromptText(
   record: ScheduledPromptRecord,
   nextRun: Date,
@@ -347,15 +412,17 @@ function createdPromptText(
     `Scheduled prompt ${record.id}: ${describeSchedule(record.schedule)}\n` +
     `Next run: ${nextRun.toISOString()} (local: ${zoned.local} ${zoned.weekday})\n` +
     `Conversation: ${record.conversationKey} (harness-injected)\n` +
+    `Scheduled by: ${record.scheduledByUserId} (harness-injected)\n` +
     `Response: ${record.responseType}`
   );
 }
 
 /**
- * Create the scheduler tools. The conversation identity comes from the
- * context built by the harness (see {@link SchedulerToolContext}); the tool
- * parameters have no channel-identity surface at all, so the model can only
- * schedule, list, and cancel prompts for the channel it is actually in.
+ * Create the scheduler tools. Both the conversation identity and the
+ * scheduling user come from the context built by the harness (see
+ * {@link SchedulerToolContext}); the tool parameters have no channel-identity
+ * or user-identity surface at all, so the model can only schedule prompts for
+ * the conversation it is in, on behalf of the user actually speaking.
  */
 export function createSchedulerTools(
   store: ScheduledPromptStore,
@@ -373,7 +440,7 @@ export function createSchedulerTools(
       "One-time schedules need schedule.at (ISO-8601 datetime); recurring schedules need schedule.time (HH:MM, 24-hour).",
       "Weekly schedules also need schedule.day_of_week (0-6, 0=Sunday); monthly schedules also need schedule.day_of_month (1-31).",
       "All times are stored as UTC; pass schedule.timezone or rely on this conversation's timezone for local wall-clock times.",
-      "The target is always this conversation; it cannot be supplied or overridden."
+      "The target is always this conversation and the request is always attributed to the verified current user; neither can be supplied or overridden."
     ],
     parameters: Type.Object({
       prompt: Type.String({
@@ -410,6 +477,13 @@ export function createSchedulerTools(
       }))
     }),
     async execute(_toolCallId, params) {
+      // Authorization first: the conversation is the harness-injected key, the
+      // scheduling user is the harness-injected author, and membership must
+      // verify positively before anything else happens.
+      const membershipError = await verifySchedulingMembership(context);
+      if (membershipError) {
+        return textResult(membershipError);
+      }
       const prompt = typeof params.prompt === "string" ? params.prompt.trim() : "";
       if (prompt === "") {
         return textResult("Error: prompt is required.");
@@ -429,6 +503,7 @@ export function createSchedulerTools(
         return textResult(resolvedTimezone.error);
       }
       const { timezone } = resolvedTimezone;
+      const schedulingUserId = context.schedulingUserId?.trim() ?? "";
 
       if (schedule.type === "once") {
         const at = typeof schedule.at === "string" ? schedule.at.trim() : "";
@@ -445,7 +520,8 @@ export function createSchedulerTools(
         const record = store.createScheduledPrompt(context.conversationKey, {
           prompt,
           schedule: { type: "once", atUtc: instant.toISOString() },
-          responseType
+          responseType,
+          scheduledByUserId: schedulingUserId
         });
         return textResult(createdPromptText(record, instant, timezone));
       }
@@ -459,7 +535,8 @@ export function createSchedulerTools(
         const record = store.createScheduledPrompt(context.conversationKey, {
           prompt,
           schedule: toStore,
-          responseType
+          responseType,
+          scheduledByUserId: schedulingUserId
         });
         return textResult(createdPromptText(record, nextRun, resolvedTimezone.timezone));
       };

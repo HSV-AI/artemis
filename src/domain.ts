@@ -120,6 +120,25 @@ export interface ChannelTimezoneStore {
 export type PromptResponseType = "message" | "silent";
 
 /**
+ * Result of a harness-side channel membership check for a DM or Channel Group:
+ * - `member`: the user is verifiably a member of the target conversation.
+ * - `not-member`: Discord confirms the user is not a member.
+ * - `unknown`: the check could not be completed (Discord unreachable or check
+ *   not wired); callers decide their own fail-open or fail-closed policy.
+ */
+export type MembershipStatus = "member" | "not-member" | "unknown";
+
+/**
+ * Harness-side membership authority for scheduler authorization. Backed by
+ * live Discord state (guild member + channel permission, or DM recipient), so
+ * scheduled prompts can only target conversations the scheduling user can
+ * actually see. The AI has no influence over either argument.
+ */
+export interface ChannelMembershipChecker {
+  isChannelMember(conversationKey: string, userId: string): Promise<MembershipStatus>;
+}
+
+/**
  * A validated prompt schedule. One-time schedules carry an absolute UTC
  * instant; recurring schedules carry a zone-local wall-clock time plus the
  * IANA timezone it is interpreted in. Recurring UTC instants are derived at
@@ -137,6 +156,8 @@ export interface ScheduledPromptRecord {
   prompt: string;
   schedule: PromptSchedule;
   responseType: PromptResponseType;
+  /** Harness-injected Discord user id that requested the schedule. */
+  scheduledByUserId: string;
   status: "active" | "cancelled";
   createdAt: string;
   cancelledAt?: string;
@@ -146,12 +167,15 @@ export interface ScheduledPromptInput {
   prompt: string;
   schedule: PromptSchedule;
   responseType: PromptResponseType;
+  /** Harness-injected Discord user who requested the schedule. */
+  scheduledByUserId: string;
 }
 
 /**
  * Durable storage for scheduled prompts, scoped by the stable conversation
- * key. Backed by SQLite so jobs survive restarts. The harness injects the
- * key; the model can only manage schedules for the conversation it is in.
+ * key. Backed by SQLite so jobs survive restarts. The harness injects both
+ * the key and the scheduling user; the model can only manage schedules for
+ * the conversation it is in, on behalf of the user actually speaking.
  */
 export interface ScheduledPromptStore {
   createScheduledPrompt(conversationKey: string, input: ScheduledPromptInput): ScheduledPromptRecord;

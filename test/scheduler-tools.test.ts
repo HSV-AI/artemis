@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
+  ChannelMembershipChecker,
+  MembershipStatus,
   ScheduledPromptInput,
   ScheduledPromptRecord,
   ScheduledPromptStore
@@ -8,8 +10,40 @@ import {
   createSchedulerTools,
   nextOccurrenceUtc,
   parseHhMmTime,
-  resolveOnceInstant
+  resolveOnceInstant,
+  type SchedulerToolContext
 } from "../src/scheduler-tools.js";
+
+/** Discord user id of the scheduling user, injected by the harness in tests. */
+const schedulingUserId = "603384387685449728";
+
+function membershipChecker(
+  status: MembershipStatus = "member"
+): ChannelMembershipChecker & { isChannelMember: ReturnType<typeof vi.fn> } {
+  return { isChannelMember: vi.fn(async () => status) };
+}
+
+function schedulerContext(
+  overrides: Partial<SchedulerToolContext> = {}
+): SchedulerToolContext {
+  // With exactOptionalPropertyTypes, an explicit `undefined` override means
+  // "remove the key" so tests can model a harness that supplies no value.
+  const context = { conversationKey, schedulingUserId, membership: membershipChecker(), ...overrides };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) {
+      delete (context as Record<string, unknown>)[key];
+    }
+  }
+  return context as SchedulerToolContext;
+}
+
+/** Tool factory with the full harness context required by schedule_prompt. */
+function createTools(
+  store: ScheduledPromptStore,
+  context: Partial<SchedulerToolContext> = {}
+) {
+  return createSchedulerTools(store, schedulerContext(context), fixedNow("2026-08-29T14:30:00.000Z"));
+}
 
 const conversationKey = "guild:guild-1:channel:channel-1";
 
@@ -26,6 +60,7 @@ function record(overrides: Partial<ScheduledPromptRecord> = {}): ScheduledPrompt
     prompt: overrides.prompt ?? "Say hello",
     schedule: overrides.schedule ?? { type: "daily", time: "09:15", timezone: "America/Chicago" },
     responseType: overrides.responseType ?? "message",
+    scheduledByUserId: overrides.scheduledByUserId ?? schedulingUserId,
     status: overrides.status ?? "active",
     createdAt: overrides.createdAt ?? "2026-08-29T14:30:00.000Z",
     ...(overrides.cancelledAt ? { cancelledAt: overrides.cancelledAt } : {})
@@ -43,7 +78,8 @@ function storeMock(initial: ScheduledPromptRecord[] = []): ScheduledPromptStore 
         conversationKey: key,
         prompt: input.prompt,
         schedule: input.schedule,
-        responseType: input.responseType
+        responseType: input.responseType,
+        scheduledByUserId: input.scheduledByUserId
       });
       jobs.push(created);
       return created;
@@ -211,7 +247,7 @@ describe("schedule_prompt", () => {
   it("stores a one-time job as a UTC instant from an offset-aware at value", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const text = await executeTool(schedulePrompt, {
       prompt: "Summarize the calendar",
@@ -222,7 +258,8 @@ describe("schedule_prompt", () => {
     expect(store.createScheduledPrompt).toHaveBeenCalledWith(conversationKey, {
       prompt: "Summarize the calendar",
       schedule: { type: "once", atUtc: "2026-09-01T14:15:00.000Z" },
-      responseType: "message"
+      responseType: "message",
+      scheduledByUserId: schedulingUserId
     });
     expect(text).toContain("Scheduled prompt");
     expect(text).toContain("once at 2026-09-01T14:15:00.000Z");
@@ -233,7 +270,7 @@ describe("schedule_prompt", () => {
   it("interprets a naive at value in the explicit schedule timezone", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     await executeTool(schedulePrompt, {
       prompt: "Say hi",
@@ -243,17 +280,14 @@ describe("schedule_prompt", () => {
     expect(store.createScheduledPrompt).toHaveBeenCalledWith(conversationKey, {
       prompt: "Say hi",
       schedule: { type: "once", atUtc: "2026-09-01T14:15:00.000Z" },
-      responseType: "message"
+      responseType: "message",
+      scheduledByUserId: schedulingUserId
     });
   });
 
   it("falls back to the harness-provided channel timezone for naive at values", async () => {
     const store = storeMock();
-    const [schedulePrompt] = createSchedulerTools(
-      store,
-      { conversationKey, defaultTimezone: "Europe/Berlin" },
-      fixedNow("2026-08-29T14:30:00.000Z")
-    );
+    const [schedulePrompt] = createTools(store, { defaultTimezone: "Europe/Berlin" });
 
     await executeTool(schedulePrompt, {
       prompt: "Say hi",
@@ -263,14 +297,15 @@ describe("schedule_prompt", () => {
     expect(store.createScheduledPrompt).toHaveBeenCalledWith(conversationKey, {
       prompt: "Say hi",
       schedule: { type: "once", atUtc: "2026-09-01T07:15:00.000Z" },
-      responseType: "message"
+      responseType: "message",
+      scheduledByUserId: schedulingUserId
     });
   });
 
   it("treats a naive at value as UTC when no channel timezone exists", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     await executeTool(schedulePrompt, {
       prompt: "Say hi",
@@ -280,14 +315,15 @@ describe("schedule_prompt", () => {
     expect(store.createScheduledPrompt).toHaveBeenCalledWith(conversationKey, {
       prompt: "Say hi",
       schedule: { type: "once", atUtc: "2026-09-01T09:15:00.000Z" },
-      responseType: "message"
+      responseType: "message",
+      scheduledByUserId: schedulingUserId
     });
   });
 
   it("stores a daily job with the resolved timezone and reports the next run", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const text = await executeTool(schedulePrompt, {
       prompt: "Daily standup note",
@@ -298,7 +334,8 @@ describe("schedule_prompt", () => {
     expect(store.createScheduledPrompt).toHaveBeenCalledWith(conversationKey, {
       prompt: "Daily standup note",
       schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
-      responseType: "silent"
+      responseType: "silent",
+      scheduledByUserId: schedulingUserId
     });
     expect(text).toContain("daily at 09:15 (America/Chicago)");
     expect(text).toContain("Next run: 2026-08-30T14:15:00.000Z");
@@ -308,11 +345,7 @@ describe("schedule_prompt", () => {
 
   it("defaults the schedule timezone to the harness-provided channel timezone", async () => {
     const store = storeMock();
-    const [schedulePrompt] = createSchedulerTools(
-      store,
-      { conversationKey, defaultTimezone: "America/Chicago" },
-      fixedNow("2026-08-29T14:30:00.000Z")
-    );
+    const [schedulePrompt] = createTools(store, { defaultTimezone: "America/Chicago" });
 
     await executeTool(schedulePrompt, {
       prompt: "Daily standup note",
@@ -322,14 +355,15 @@ describe("schedule_prompt", () => {
     expect(store.createScheduledPrompt).toHaveBeenCalledWith(conversationKey, {
       prompt: "Daily standup note",
       schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
-      responseType: "message"
+      responseType: "message",
+      scheduledByUserId: schedulingUserId
     });
   });
 
   it("falls back to UTC when no channel timezone is stored", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     await executeTool(schedulePrompt, {
       prompt: "Daily standup note",
@@ -343,11 +377,7 @@ describe("schedule_prompt", () => {
 
   it("falls back to UTC when the stored channel timezone is no longer valid", async () => {
     const store = storeMock();
-    const [schedulePrompt] = createSchedulerTools(
-      store,
-      { conversationKey, defaultTimezone: "Mars/Olympus" },
-      fixedNow("2026-08-29T14:30:00.000Z")
-    );
+    const [schedulePrompt] = createTools(store, { defaultTimezone: "Mars/Olympus" });
 
     await executeTool(schedulePrompt, {
       prompt: "Daily standup note",
@@ -362,7 +392,7 @@ describe("schedule_prompt", () => {
   it("stores weekly and monthly fields untouched", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const weekly = await executeTool(schedulePrompt, {
       prompt: "Weekly report reminder",
@@ -386,7 +416,7 @@ describe("schedule_prompt", () => {
   it("requires an at value for one-time schedules and stores nothing", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const missing = await executeTool(schedulePrompt, { prompt: "p", schedule: { type: "once" } });
     expect(store.createScheduledPrompt).not.toHaveBeenCalled();
@@ -405,7 +435,7 @@ describe("schedule_prompt", () => {
   it("refuses a one-time schedule in the past without storing", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const text = await executeTool(schedulePrompt, {
       prompt: "p",
@@ -420,7 +450,7 @@ describe("schedule_prompt", () => {
   it("requires a 24-hour HH:MM time for recurring schedules", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     for (const schedule of [
       { type: "daily" },
@@ -439,7 +469,7 @@ describe("schedule_prompt", () => {
   it("requires day_of_week 0-6 for weekly schedules", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const missing = await executeTool(schedulePrompt, {
       prompt: "p",
@@ -463,7 +493,7 @@ describe("schedule_prompt", () => {
   it("requires day_of_month 1-31 for monthly schedules", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const missing = await executeTool(schedulePrompt, {
       prompt: "p",
@@ -487,7 +517,7 @@ describe("schedule_prompt", () => {
   it("rejects an unknown schedule type without storing", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const text = await executeTool(schedulePrompt, {
       prompt: "p",
@@ -502,7 +532,7 @@ describe("schedule_prompt", () => {
   it("rejects a blank prompt without storing", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const text = await executeTool(schedulePrompt, {
       prompt: "   ",
@@ -516,7 +546,7 @@ describe("schedule_prompt", () => {
   it("rejects an unknown response_type without storing", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const text = await executeTool(schedulePrompt, {
       prompt: "p",
@@ -532,7 +562,7 @@ describe("schedule_prompt", () => {
   it("defaults the response type to message", async () => {
     const store = storeMock();
     const [schedulePrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     await executeTool(schedulePrompt, {
       prompt: "p",
@@ -546,22 +576,143 @@ describe("schedule_prompt", () => {
 
   it("ignores model-supplied channel identity and binds the injected key", async () => {
     const store = storeMock();
-    const [schedulePrompt] = createSchedulerTools(
-      store,
-      { conversationKey, defaultTimezone: "America/Chicago" },
-      fixedNow("2026-08-29T14:30:00.000Z")
-    );
+    const membership = membershipChecker();
+    const [schedulePrompt] = createTools(store, { defaultTimezone: "America/Chicago", membership });
 
     await executeTool(schedulePrompt, {
       prompt: "Say hi",
       schedule: { type: "daily", time: "09:15", timezone: "UTC" },
       channel: "dm:not-my-channel",
       conversationKey: "dm:not-my-channel",
+      scheduled_by_user_id: "someone-else",
       target: { channelId: "123", channelType: "dm" }
     });
 
     expect(store.createScheduledPrompt).toHaveBeenCalledTimes(1);
     expect(store.createScheduledPrompt).toHaveBeenCalledWith(conversationKey, expect.anything());
+    // Membership is verified for the harness-injected pair only - the model's
+    // channel and user parameters are never seen by the authorization check.
+    expect(membership.isChannelMember).toHaveBeenCalledWith(conversationKey, schedulingUserId);
+    expect(membership.isChannelMember).not.toHaveBeenCalledWith("dm:not-my-channel", expect.anything());
+    expect(membership.isChannelMember).not.toHaveBeenCalledWith(conversationKey, "someone-else");
+  });
+});
+
+describe("schedule_prompt membership authorization", () => {
+  it("ignores a model-supplied scheduling user and checks the harness-injected one", async () => {
+    const store = storeMock();
+    const membership = membershipChecker();
+    const [schedulePrompt] = createTools(store, { membership });
+
+    const text = await executeTool(schedulePrompt, {
+      prompt: "p",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      scheduled_by_user_id: "someone-else",
+      schedulingUser: "someone-else"
+    });
+
+    expect(text).toContain("Scheduled prompt");
+    expect(membership.isChannelMember).toHaveBeenCalledTimes(1);
+    expect(membership.isChannelMember).toHaveBeenCalledWith(conversationKey, schedulingUserId);
+    expect(store.createScheduledPrompt).toHaveBeenCalledWith(
+      conversationKey,
+      expect.objectContaining({ scheduledByUserId: schedulingUserId })
+    );
+    expect(text).toContain(`Scheduled by: ${schedulingUserId}`);
+  });
+
+  it("refuses to schedule when the harness provides no scheduling user", async () => {
+    const store = storeMock();
+    const membership = membershipChecker();
+    const [schedulePrompt] = createTools(store, { schedulingUserId: undefined, membership });
+
+    const text = await executeTool(schedulePrompt, {
+      prompt: "Say hi",
+      schedule: { type: "daily", time: "09:15" }
+    });
+
+    expect(membership.isChannelMember).not.toHaveBeenCalled();
+    expect(store.createScheduledPrompt).not.toHaveBeenCalled();
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/scheduling user/i);
+  });
+
+  it("refuses to schedule when the membership check fails outright", async () => {
+    const store = storeMock();
+    const membership = membershipChecker();
+    membership.isChannelMember.mockRejectedValue(new Error("discord unavailable"));
+    const [schedulePrompt] = createTools(store, { membership });
+
+    const text = await executeTool(schedulePrompt, {
+      prompt: "Say hi",
+      schedule: { type: "daily", time: "09:15" }
+    });
+
+    expect(store.createScheduledPrompt).not.toHaveBeenCalled();
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/verif/i);
+  });
+
+  it("refuses to schedule when the membership check cannot reach an answer", async () => {
+    const store = storeMock();
+    const membership = membershipChecker("unknown");
+    const [schedulePrompt] = createTools(store, { membership });
+
+    const text = await executeTool(schedulePrompt, {
+      prompt: "p",
+      schedule: { type: "daily", time: "09:15" }
+    });
+
+    expect(store.createScheduledPrompt).not.toHaveBeenCalled();
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/member/);
+    expect(text).toMatch(/not scheduled|was not scheduled/);
+  });
+
+  it("refuses to schedule for a channel the scheduling user is not in", async () => {
+    const store = storeMock();
+    const [schedulePrompt] = createTools(store, { membership: membershipChecker("not-member") });
+
+    const text = await executeTool(schedulePrompt, {
+      prompt: "p",
+      schedule: { type: "daily", time: "09:15" }
+    });
+
+    expect(store.createScheduledPrompt).not.toHaveBeenCalled();
+    expect(text).toContain("Error:");
+    expect(text).toContain(schedulingUserId);
+    expect(text).toContain(conversationKey);
+  });
+
+  it("answers the membership refusal before validating schedule parameters", async () => {
+    const store = storeMock();
+    const membership = membershipChecker("not-member");
+    const [schedulePrompt] = createTools(store, { membership });
+
+    const text = await executeTool(schedulePrompt, {
+      prompt: "p",
+      schedule: { type: "annually" } as never
+    });
+
+    expect(text).toMatch(/member/);
+    expect(store.createScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("stores only positive membership answers and never schedules without one", async () => {
+    const store = storeMock();
+    const membership = membershipChecker("member");
+    const [schedulePrompt] = createTools(store, { membership });
+
+    await executeTool(schedulePrompt, {
+      prompt: "p",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" }
+    });
+
+    expect(membership.isChannelMember).toHaveBeenCalledTimes(1);
+    expect(store.createScheduledPrompt).toHaveBeenCalledWith(
+      conversationKey,
+      expect.objectContaining({ scheduledByUserId: schedulingUserId })
+    );
   });
 });
 
@@ -576,7 +727,7 @@ describe("list_scheduled_prompts", () => {
       })
     ]);
     const [, listScheduledPrompts] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const text = await executeTool(listScheduledPrompts, {});
 
@@ -593,7 +744,7 @@ describe("list_scheduled_prompts", () => {
   it("reports an empty list for the injected conversation", async () => {
     const store = storeMock();
     const [, listScheduledPrompts] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const text = await executeTool(listScheduledPrompts, {});
 
@@ -603,7 +754,7 @@ describe("list_scheduled_prompts", () => {
   it("ignores a model-supplied channel identity when listing", async () => {
     const store = storeMock();
     const [, listScheduledPrompts] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     await executeTool(listScheduledPrompts, {
       channel: "dm:not-my-channel",
@@ -618,7 +769,7 @@ describe("cancel_scheduled_prompt", () => {
   it("cancels an active job of the injected conversation", async () => {
     const store = storeMock([record({ id: "job-1" })]);
     const [, , cancelScheduledPrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const text = await executeTool(cancelScheduledPrompt, { id: "job-1" });
 
@@ -630,7 +781,7 @@ describe("cancel_scheduled_prompt", () => {
   it("returns an error when the id is not an active job of this conversation", async () => {
     const store = storeMock();
     const [, , cancelScheduledPrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     const text = await executeTool(cancelScheduledPrompt, { id: "missing-job" });
 
@@ -642,7 +793,7 @@ describe("cancel_scheduled_prompt", () => {
   it("ignores a model-supplied channel identity when cancelling", async () => {
     const store = storeMock();
     const [, , cancelScheduledPrompt] =
-      createSchedulerTools(store, { conversationKey }, fixedNow("2026-08-29T14:30:00.000Z"));
+      createTools(store);
 
     await executeTool(cancelScheduledPrompt, {
       id: "job-x",
@@ -658,7 +809,7 @@ describe("tool registry metadata", () => {
   it("advertises the three scheduler tools with trust-boundary guidelines", () => {
     const store = storeMock();
     const [schedulePrompt, listScheduledPrompts, cancelScheduledPrompt] =
-      createSchedulerTools(store, { conversationKey });
+      createTools(store);
 
     expect(schedulePrompt.name).toBe("schedule_prompt");
     expect(schedulePrompt.promptSnippet).toBeTruthy();

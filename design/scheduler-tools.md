@@ -2,9 +2,8 @@
 
 ## Status
 
-Implemented.
-
-Source: [HSV-AI/artemis issue #51](https://github.com/HSV-AI/artemis/issues/51).
+Source: [HSV-AI/artemis issue #51](https://github.com/HSV-AI/artemis/issues/51);
+authorization and channel scoping follow [issue #52](https://github.com/HSV-AI/artemis/issues/52).
 
 ## Problem
 
@@ -25,16 +24,73 @@ This protocol owns:
   PI custom tools
 - the `PromptSchedule`, `ScheduledPromptRecord`, and `ScheduledPromptStore`
   domain contracts
-- the `scheduled_prompts` SQLite table (schema migration 7)
+- the `scheduled_prompts` SQLite table (schema migrations 7 and 8)
+- recurrence-resolution helpers: strict `HH:MM` parsing, ISO-8601 `at`
+  resolution, and DST-correct next-occurrence computation
+- the `scheduled_prompts` SQLite table (schema migrations 7 and 8)
 - recurrence-resolution helpers: strict `HH:MM` parsing, ISO-8601 `at`
   resolution, and DST-correct next-occurrence computation
 - the trust boundary that binds all three tools to the harness-injected
   conversation key
+- the scheduler authorization model: creation-time membership verification for
+  the harness-injected scheduling user, and the fire-time authorization gate
+  (`ConversationService.runScheduledPrompt`) that re-checks scope allow-lists
+  and live membership before a job runs in its channel's session
+- the `ChannelMembershipChecker` contract and its Discord-backed resolution
+  (guild membership + View Channel permission, DM/group recipient match)
 
-It does not define the execution engine that fires jobs, posts agent responses
-to Discord, or any additional authorization beyond conversation scoping; those
-belong to the separate execution issue. It does not change memory, timezone,
-or knowledge-tool contracts.
+It does not define the execution loop that polls due jobs, wraps them for a
+JSON response, validates that JSON, or posts output to Discord; the execution
+engine (issue #53) must run every job through the authorization gate defined
+here (`ConversationService.runScheduledPrompt`). It does not change memory,
+timezone, or knowledge-tool contracts.
+
+## Trust boundary and authorization (issue #52)
+
+Both scheduler identities are harness-injected; the model has no surface for
+either:
+
+- **Conversation**: the conversation key comes from the harness exactly as for
+  the timezone tools. Tool parameters cannot supply or override it.
+- **Scheduling user**: the Discord user id comes from the harness
+  (`PiGenerationInput.authorId`) and is stored with every job
+  (`scheduled_by_user_id`). Tool parameters have no user field; the model
+  cannot schedule on behalf of, or as, anyone else.
+
+`schedule_prompt` verifies — before any parameter validation or storage — that
+the scheduling user is positively a member of the injected conversation via a
+harness-provided `ChannelMembershipChecker` backed by live Discord state:
+
+- DM (`dm:*`): the DM channel's recipient (or group recipient list) must
+  include the user.
+- Channel Group (`guild:*:channel:*`): the user must be a guild member with
+  the View Channel permission on the conversation's parent channel.
+- API answers that definitively identify a missing resource deny membership;
+  transient failures resolve to "unknown".
+
+A definitive "not a member" answer, an unreachable check, a missing checker, or
+a missing user id refuses the call without touching the store, with refusal
+text that carries no schedule-validation detail. Model-supplied channel, user,
+or scheduling-user parameters are ignored entirely.
+
+At fire time a stored job runs through `ConversationService.runScheduledPrompt`
+with the same effective permissions as its channel:
+
+1. **Scope gate** (pure, no Discord traffic): the stored key must parse as a
+   harness-derived `dm:*` or `guild:*:channel:*` key; a Channel Group job must
+   still target a deployment-allowlisted parent channel; a DM job's scheduling
+   user must still be DM-authorized; the job must carry a scheduling user.
+2. **Membership re-check**: where feasible the checker answers from live
+   Discord state. A definitive "not a member" answer revokes the job for that
+   run; an unreachable check keeps only the allow-list gates and logs
+   `scheduled_prompt_membership_unverified`.
+
+Allowed runs enqueue on the conversation key (serializing behind interactive
+traffic), generate inside that conversation's active session with the
+channel-derived `conversationKind` and the scheduling user as `authorId`, and
+persist the turn like any other exchange. Posting the result and the JSON
+response contract belong to issue #53; allowed runs return the generated
+result to the engine without posting anything.
 
 ## Observable behavior
 
@@ -112,7 +168,7 @@ store is provided (for example in narrow unit tests).
 
 ## Persistence
 
-A `scheduled_prompts` SQLite table (schema migration 7) stores every job
+A `scheduled_prompts` SQLite table (schema migrations 7 and 8) stores every job
 scoped by the stable conversation key:
 
 - `id`: primary key, a random UUID.
@@ -124,32 +180,51 @@ scoped by the stable conversation key:
   table CHECK constraint (for example, a weekly row requires `time_of_day`,
   `day_of_week`, and `timezone` and forbids `at_utc`).
 - `response_type`: `message` or `silent`.
+- `scheduled_by_user_id`: the harness-injected Discord user id that requested
+  the schedule (migration 8, `NOT NULL DEFAULT ''`). Pre-authorization rows are
+  backfilled with an empty id, which the fire-time gate treats as unattributed
+  and refuses to run.
 - `status`: `active` or `cancelled`; `created_at`, `cancelled_at`.
 
 Cancelling is a soft delete: status flips to `cancelled` with `cancelled_at`,
 keeping the row for audit; listings return only active jobs ordered by
 creation time. Cancellation is keyed by both `id` and `conversation_key`, so
 one conversation can never cancel another's job. Times are stored as UTC
-everywhere. A fresh empty database creates the table during bootstrap
-(migrations 1 through 7); a verified migration-5 database receives the table
-through incremental migrations 6 and 7 without touching its history. Jobs
-survive restarts, container recreation, and `/clear-session`; there is no
-expiration.
+everywhere. A fresh empty database bootstraps migrations 1 through 8 in one
+transaction; a verified migration-5 database receives the timezone table and
+the scheduler table (migrations 6, 7, 8) incrementally without touching its
+history, and a verified migration-7 database receives migration 8's attribution
+column additively with legacy rows backfilled to `''`. Jobs survive restarts,
+container recreation, and `/clear-session`; there is no expiration.
 
 ## Security and privacy
 
-The DM or Channel Group identity is passed by the harness from derived Discord
-context, never supplied by the model. The tool parameter surface contains
-only the prompt, schedule, and response type — no channel, target, or
-conversation field exists, so the model cannot schedule, list, or cancel a
-job for a conversation it is not actually in. The list tool's output is fenced
-as stored data so prompt text cannot masquerade as new instructions, and the
-system prompt's tool guidelines tell the model to schedule and cancel only on
-explicit user requests. No network access or external data is involved; stored
-schedules contain the prompt text the user wrote and nothing else.
+Both the DM or Channel Group identity and the scheduling-user identity are
+passed by the harness from derived Discord context, never supplied by the
+model. The tool parameter surface contains only the prompt, schedule, and
+response type — no channel, target, conversation, or user field exists, so the
+model cannot schedule, list, or cancel a job for a conversation it is not
+actually in, nor attribute a job to anyone other than the verified author.
+Creation-time membership is verified against live Discord state before any
+parameter validation, so an unauthorized or unverifiable caller learns nothing
+about schedule semantics. At fire time the pure scope gate re-applies the
+interactive pipeline's allow-list rules to the stored scope before any
+Discord or generation work, and the membership re-check drops jobs whose user
+has provably lost access. The list tool's output is fenced as stored data so
+prompt text cannot masquerade as new instructions, and the system prompt's
+tool guidelines tell the model to schedule and cancel only on explicit user
+requests. No network access beyond the Discord API membership lookups and no
+external data is involved; stored schedules contain the prompt text the user
+wrote, the harness-derived identities, and nothing else.
 
 ## Failure handling
 
+- Scheduling without a harness-provided scheduling user, without a membership
+  checker, on a checker failure, or on an "unknown" membership answer:
+  authorization refusal naming nothing about schedule semantics; no store
+  mutation, no generation failure.
+- Scheduling user definitively not a member of the conversation: authorization
+  refusal naming the user and conversation; no mutation.
 - Missing, blank, or malformed prompt, schedule type, `at`, `time`,
   `day_of_week`, `day_of_month`, or `response_type`: descriptive error text,
   no mutation, no generation failure.
@@ -162,27 +237,55 @@ schedules contain the prompt text the user wrote and nothing else.
   mutation.
 - An unparseable stored schedule surfaces as `next run unresolved` in listings
   rather than failing the turn.
+- At fire time: unparseable stored scope, non-allowlisted channel,
+  unauthorized DM user, or missing scheduling user records
+  `scheduled_prompt_rejected` and runs nothing. A definitive fire-time
+  "not member" is rejected as `membership-revoked`. Generation failures (or an
+  empty answer) record `scheduled_prompt_failed` and return null to the engine
+  without posting; the job's lifecycle (retry, cancel) belongs to issue #53.
 - Store failures surface as normal tool errors following the PI
   generation-failure path.
 
 ## Verification
 
+- `test/scheduler-authorization.test.ts` covers conversation-key parsing
+  (DM, Channel Group, and every malformed rejection), Discord membership
+  resolution (guild member with/without View Channel, unknown member/guild,
+  transient failures, DM and group recipients, blank users, unparseable
+  keys), the fire-time decision matrix (allow-list denials,
+  membership revocation, unverified fallback, unattributed scheduler, invalid
+  scope), and the `DiscordGateway.isChannelMember` adapter against a fake
+  client for guild, DM, and transient answers.
 - `test/scheduler-tools.test.ts` covers `HH:MM` parsing, ISO-8601 `at`
   resolution (offsets, naive-in-zone, channel defaults, UTC fallbacks, strict
   validation), next-occurrence resolution across DST transitions and short
   months, create/list/cancel behavior for every recurrence type, all
   validation errors, the past-instant refusal, response-type defaulting, the
-  trust-boundary tests that model-supplied channel identity is ignored, and
-  tool-registry metadata.
+  creation-time membership gate (missing user, unwired checker, unknown
+  answer, non-member refusal with no schedule-validation leak, membership
+  precedence over parameter validation, harness-injected user storage,
+  ignored model-supplied identities), the trust-boundary tests that
+  model-supplied channel identity is ignored, and tool-registry metadata.
 - `test/repository.test.ts` covers create/list/cancel round-trips for every
-  recurrence shape, per-conversation isolation, durable cancel across a
-  repository reopen, the storage-layer shape constraint, the fresh-database
-  bootstrap including migrations 1 through 7, and the incremental
-  migration-6+7 path for a verified migration-5 database.
+  recurrence shape, the scheduling-user round-trip, per-conversation
+  isolation, durable cancel across a repository reopen, the storage-layer
+  shape constraint, the fresh-database bootstrap including migrations 1
+  through 8, the incremental migration-6+7+8 path for a verified migration-5
+  database, and the additive migration-8 upgrade of a migration-7 database
+  with legacy rows backfilled to an unattributed scheduler.
+- `test/conversation-service.test.ts` covers the fire-time gate: scheduled
+  runs resolve the conversation session and kind from the stored key, persist
+  scheduler-attributed history and events, skip revoked members, enforce the
+  channel and DM allow-lists before any membership lookup, refuse unparseable
+  scopes and unattributed jobs, proceed logged-unverified on unreachable
+  checks, serialize behind interactive traffic on the same conversation key,
+  and record failures without posting.
 - `test/pi-gateway.test.ts` proves the three tools are registered for a
-  generation call, bound to the harness-injected conversation key with the
+  generation call, bound to the harness-injected conversation key, scheduling
+  user (from the generation-input author), and membership checker, with the
   stored channel timezone as the default, advertised in the system-prompt
-  tool registry, and omitted when no store is configured.
+  tool registry, refused closed when no checker is wired, and omitted when no
+  store is configured.
 - `npm run guardrail` remains the completion gate.
 
 ## References

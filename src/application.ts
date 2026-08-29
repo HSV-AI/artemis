@@ -1,11 +1,37 @@
-import type { Client } from "discord.js";
+import {
+  Client,
+  GatewayIntentBits,
+  Partials
+} from "discord.js";
 import type { ArtemisConfig } from "./config.js";
 import { ConversationService } from "./conversation-service.js";
 import { DiscordGateway } from "./discord-gateway.js";
-import type { Logger, PiGateway } from "./domain.js";
+import type { ChannelMembershipChecker, Logger, PiGateway } from "./domain.js";
 import { JsonLogger, safeError } from "./logger.js";
 import { PiSdkGateway } from "./pi-gateway.js";
 import { ArtemisRepository } from "./repository.js";
+import {
+  resolveChannelMembership,
+  type ChannelMembershipEndpoint
+} from "./scheduler-authorization.js";
+
+/**
+ * Build the Discord gateway client Artemis shares between the Discord gateway
+ * and the scheduler membership checker: the checker needs live Discord state
+ * (guild membership, channel permissions, DM recipients) to authorize
+ * scheduled prompts for the conversations users are actually in.
+ */
+function createSharedDiscordClient(): Client {
+  return new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.DirectMessages,
+      GatewayIntentBits.MessageContent
+    ],
+    partials: [Partials.Channel]
+  });
+}
 
 export interface ApplicationDependencies {
   logger?: Logger;
@@ -29,6 +55,7 @@ export class ArtemisApplication {
     this.logger =
       dependencies.logger ??
       new JsonLogger(config.logLevel, console.log, (entry) => this.repository.recordLog(entry));
+    const discordClient = dependencies.discordClient ?? createSharedDiscordClient();
     this.pi = dependencies.pi ??
       new PiSdkGateway(
         config,
@@ -36,7 +63,10 @@ export class ArtemisApplication {
         fetch,
         this.logger,
         this.repository,
-        this.repository
+        this.repository,
+        // Scheduler authorization runs against the same live Discord state the
+        // gateway itself uses, so the harness answer is always authoritative.
+        this.discordMembership(discordClient)
       );
     const conversations = new ConversationService(
       {
@@ -46,7 +76,9 @@ export class ArtemisApplication {
       },
       this.repository,
       this.pi,
-      this.logger
+      this.logger,
+      undefined,
+      this.discordMembership(discordClient)
     );
     this.discord =
       dependencies.discord ??
@@ -61,8 +93,20 @@ export class ArtemisApplication {
         },
         conversations,
         this.logger,
-        dependencies.discordClient
+        dependencies.discordClient ?? discordClient
       );
+  }
+
+  private discordMembership(client: Client): ChannelMembershipChecker {
+    return {
+      isChannelMember: (conversationKey, userId) => {
+        const endpoint: ChannelMembershipEndpoint = {
+          fetchChannel: async (channelId) => client.channels.fetch(channelId),
+          fetchGuild: async (guildId) => client.guilds.fetch(guildId)
+        };
+        return resolveChannelMembership(endpoint, conversationKey, userId);
+      }
+    };
   }
 
   public async start(): Promise<void> {
