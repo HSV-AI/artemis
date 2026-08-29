@@ -12,7 +12,10 @@ import type {
   PiSessionEntryRecord,
   PromptSchedule,
   ScheduledPromptInput,
+  ScheduledPromptPruneFilter,
+  ScheduledPromptPruneResult,
   ScheduledPromptRecord,
+  ScheduledPromptStatus,
   ScheduledPromptStore,
   SchedulerExecutionStore,
   SessionRecord,
@@ -91,7 +94,7 @@ interface ScheduledPromptRow {
   day_of_month: number | null;
   timezone: string | null;
   response_type: "message" | "silent";
-  status: "active" | "cancelled" | "completed";
+  status: ScheduledPromptStatus;
   created_at: string;
   cancelled_at: string | null;
   scheduled_by_user_id: string | null;
@@ -479,6 +482,17 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
     return rows.map((row) => this.mapScheduledPrompt(row));
   }
 
+  public listScheduledPromptHistory(conversationKey: string): ScheduledPromptRecord[] {
+    const rows = this.database
+      .prepare(
+        `SELECT * FROM scheduled_prompts
+         WHERE conversation_key = ?
+         ORDER BY created_at ASC, id ASC`
+      )
+      .all(conversationKey) as ScheduledPromptRow[];
+    return rows.map((row) => this.mapScheduledPrompt(row));
+  }
+
   public cancelScheduledPrompt(conversationKey: string, id: string): boolean {
     const result = this.database
       .prepare(
@@ -488,6 +502,87 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       )
       .run(now(), id, conversationKey);
     return result.changes === 1;
+  }
+
+  public pruneScheduledPrompts(
+    conversationKey: string,
+    filter: ScheduledPromptPruneFilter
+  ): ScheduledPromptPruneResult {
+    const transaction = this.database.transaction(() => {
+      let ids: string[];
+      if (filter.kind === "id") {
+        ids = (this.database
+          .prepare(
+            "SELECT id FROM scheduled_prompts WHERE id = ? AND conversation_key = ?"
+          )
+          .all(filter.id, conversationKey) as { id: string }[]).map((row) => row.id);
+      } else {
+        const clauses = [
+          "conversation_key = ?",
+          `status IN (${filter.statuses.map(() => "?").join(", ")})`
+        ];
+        const params: unknown[] = [conversationKey, ...filter.statuses];
+        if (filter.before !== undefined) {
+          clauses.push("created_at < ?");
+          params.push(filter.before);
+        }
+        ids = (this.database
+          .prepare(
+            `SELECT id FROM scheduled_prompts WHERE ${clauses.join(" AND ")}
+             ORDER BY created_at ASC, id ASC`
+          )
+          .all(...params) as { id: string }[]).map((row) => row.id);
+      }
+      for (const id of ids) {
+        this.database
+          .prepare("DELETE FROM scheduled_prompts WHERE id = ? AND conversation_key = ?")
+          .run(id, conversationKey);
+      }
+      const remaining = this.database
+        .prepare("SELECT COUNT(*) AS count FROM scheduled_prompts WHERE conversation_key = ?")
+        .get(conversationKey) as { count: number };
+      return { removedIds: ids, remainingCount: remaining.count };
+    });
+    return transaction();
+  }
+
+  public resumeScheduledPrompt(
+    conversationKey: string,
+    id: string,
+    schedule: PromptSchedule
+  ): ScheduledPromptRecord | undefined {
+    // Resume is a single-row repair of a canceled record: the schedule
+    // columns are rewritten as a set so the row-shape CHECK constraint stays
+    // satisfied, the cancel bookkeeping and fire marker are cleared (so the
+    // next occurrence derives from the resume instant), and created_at moves
+    // to the resume instant — the moment the event was re-scheduled.
+    const resumedAt = now();
+    const result = this.database
+      .prepare(
+        `UPDATE scheduled_prompts
+         SET schedule_type = ?, at_utc = ?, time_of_day = ?, day_of_week = ?,
+             day_of_month = ?, timezone = ?, status = 'active',
+             cancelled_at = NULL, last_run_at = NULL, created_at = ?
+         WHERE id = ? AND conversation_key = ? AND status = 'cancelled'`
+      )
+      .run(
+        schedule.type,
+        schedule.type === "once" ? schedule.atUtc : null,
+        schedule.type === "once" ? null : schedule.time,
+        schedule.type === "weekly" ? schedule.dayOfWeek : null,
+        schedule.type === "monthly" ? schedule.dayOfMonth : null,
+        schedule.type === "once" ? null : schedule.timezone,
+        resumedAt,
+        id,
+        conversationKey
+      );
+    if (result.changes !== 1) {
+      return undefined;
+    }
+    const row = this.database
+      .prepare("SELECT * FROM scheduled_prompts WHERE id = ? AND conversation_key = ?")
+      .get(id, conversationKey) as ScheduledPromptRow;
+    return this.mapScheduledPrompt(row);
   }
 
   public listActiveScheduledPrompts(): ScheduledPromptRecord[] {
@@ -553,7 +648,12 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       status: row.status,
       createdAt: row.created_at,
       ...(row.last_run_at ? { lastRunAt: row.last_run_at } : {}),
-      ...(row.cancelled_at ? { cancelledAt: row.cancelled_at } : {})
+      ...(row.cancelled_at ? { cancelledAt: row.cancelled_at } : {}),
+      // For completed one-time jobs the storage-level last_run_at is by
+      // construction the instant the job fired and retired.
+      ...(row.status === "completed" && row.last_run_at
+        ? { completedAt: row.last_run_at }
+        : {})
     };
   }
 

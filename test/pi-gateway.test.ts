@@ -763,7 +763,10 @@ describe("PiSdkGateway", () => {
         ...input
       })),
       listScheduledPrompts: vi.fn(() => jobs),
-      cancelScheduledPrompt: vi.fn(() => true)
+      listScheduledPromptHistory: vi.fn(() => jobs),
+      cancelScheduledPrompt: vi.fn(() => true),
+      pruneScheduledPrompts: vi.fn(() => ({ removedIds: [], remainingCount: 0 })),
+      resumeScheduledPrompt: vi.fn(() => undefined)
     };
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
@@ -781,12 +784,16 @@ describe("PiSdkGateway", () => {
       tools: expect.arrayContaining([
         "schedule_prompt",
         "list_scheduled_prompts",
-        "cancel_scheduled_prompt"
+        "cancel_scheduled_prompt",
+        "prune_scheduled_prompt",
+        "resume_scheduled_prompt"
       ]),
       customTools: expect.arrayContaining([
         expect.objectContaining({ name: "schedule_prompt" }),
         expect.objectContaining({ name: "list_scheduled_prompts" }),
-        expect.objectContaining({ name: "cancel_scheduled_prompt" })
+        expect.objectContaining({ name: "cancel_scheduled_prompt" }),
+        expect.objectContaining({ name: "prune_scheduled_prompt" }),
+        expect.objectContaining({ name: "resume_scheduled_prompt" })
       ])
     }));
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
@@ -842,7 +849,10 @@ describe("PiSdkGateway", () => {
     const schedulerStore: ScheduledPromptStore = {
       createScheduledPrompt: vi.fn(),
       listScheduledPrompts: vi.fn(() => []),
-      cancelScheduledPrompt: vi.fn(() => true)
+      listScheduledPromptHistory: vi.fn(() => []),
+      cancelScheduledPrompt: vi.fn(() => true),
+      pruneScheduledPrompts: vi.fn(() => ({ removedIds: [], remainingCount: 0 })),
+      resumeScheduledPrompt: vi.fn(() => undefined)
     };
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),

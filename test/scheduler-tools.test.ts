@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   ChannelMembershipChecker,
   MembershipStatus,
+  PromptSchedule,
   ScheduledPromptInput,
+  ScheduledPromptPruneFilter,
   ScheduledPromptRecord,
   ScheduledPromptStore
 } from "../src/domain.js";
@@ -10,6 +12,7 @@ import {
   createSchedulerTools,
   nextOccurrenceUtc,
   parseHhMmTime,
+  parseRfc3339Timestamp,
   resolveOnceInstant,
   type SchedulerToolContext
 } from "../src/scheduler-tools.js";
@@ -63,7 +66,8 @@ function record(overrides: Partial<ScheduledPromptRecord> = {}): ScheduledPrompt
     scheduledByUserId: overrides.scheduledByUserId ?? schedulingUserId,
     status: overrides.status ?? "active",
     createdAt: overrides.createdAt ?? "2026-08-29T14:30:00.000Z",
-    ...(overrides.cancelledAt ? { cancelledAt: overrides.cancelledAt } : {})
+    ...(overrides.cancelledAt ? { cancelledAt: overrides.cancelledAt } : {}),
+    ...(overrides.completedAt ? { completedAt: overrides.completedAt } : {})
   };
 }
 
@@ -87,6 +91,9 @@ function storeMock(initial: ScheduledPromptRecord[] = []): ScheduledPromptStore 
     listScheduledPrompts: vi.fn(
       (key: string) => jobs.filter((job) => job.conversationKey === key && job.status === "active")
     ),
+    listScheduledPromptHistory: vi.fn(
+      (key: string) => jobs.filter((job) => job.conversationKey === key)
+    ),
     cancelScheduledPrompt: vi.fn((key: string, id: string) => {
       const job = jobs.find((entry) => entry.id === id && entry.conversationKey === key);
       if (!job || job.status !== "active") {
@@ -95,6 +102,46 @@ function storeMock(initial: ScheduledPromptRecord[] = []): ScheduledPromptStore 
       job.status = "cancelled";
       job.cancelledAt = "2026-08-29T15:00:00.000Z";
       return true;
+    }),
+    // Mirrors the real store's prune contract: hard-delete matching records,
+    // report removed ids and the conversation's remaining record count.
+    pruneScheduledPrompts: vi.fn((key: string, filter: ScheduledPromptPruneFilter) => {
+      const matches = jobs.filter((job) => {
+        if (job.conversationKey !== key) {
+          return false;
+        }
+        if (filter.kind === "id") {
+          return job.id === filter.id;
+        }
+        if (!filter.statuses.includes(job.status)) {
+          return false;
+        }
+        if (filter.before !== undefined && !(job.createdAt < filter.before)) {
+          return false;
+        }
+        return true;
+      });
+      const removedIds = matches.map((job) => job.id);
+      for (const job of matches) {
+        jobs.splice(jobs.indexOf(job), 1);
+      }
+      return {
+        removedIds,
+        remainingCount: jobs.filter((job) => job.conversationKey === key).length
+      };
+    }),
+    resumeScheduledPrompt: vi.fn((key: string, id: string, schedule: PromptSchedule) => {
+      const job = jobs.find(
+        (entry) => entry.id === id && entry.conversationKey === key && entry.status === "cancelled"
+      );
+      if (!job) {
+        return undefined;
+      }
+      job.status = "active";
+      job.schedule = schedule;
+      delete job.cancelledAt;
+      job.createdAt = "2026-08-29T16:00:00.000Z";
+      return job;
     })
   };
 }
@@ -134,6 +181,37 @@ describe("parseHhMmTime", () => {
     expect(parseHhMmTime("")).toBeUndefined();
     expect(parseHhMmTime(undefined)).toBeUndefined();
     expect(parseHhMmTime(" 09:15")).toBeUndefined();
+  });
+});
+
+describe("parseRfc3339Timestamp", () => {
+  it("accepts offset-ful instants and normalizes to UTC", () => {
+    expect(parseRfc3339Timestamp("2026-08-20T00:00:00Z")?.toISOString())
+      .toBe("2026-08-20T00:00:00.000Z");
+    expect(parseRfc3339Timestamp("2026-08-20t00:00:00.250z")?.toISOString())
+      .toBe("2026-08-20T00:00:00.250Z");
+    expect(parseRfc3339Timestamp(" 2026-08-20T00:00:00-05:00 ")?.toISOString())
+      .toBe("2026-08-20T05:00:00.000Z");
+    expect(parseRfc3339Timestamp("2026-08-20T00:00:00+05:30")?.toISOString())
+      .toBe("2026-08-19T18:30:00.000Z");
+  });
+
+  it("rejects date-only, offset-less, malformed, and out-of-range values", () => {
+    for (const value of [
+      "2026-08-01",
+      "2026-08-01T00:00:00",
+      "not-a-date",
+      "2026-13-01T00:00:00Z",
+      "2026-02-30T00:00:00Z",
+      "2026-08-20T24:00:00Z",
+      "2026-08-20T00:60:00Z",
+      "2026-08-20T00:00:60Z",
+      "2026-08-20T00:00:00+24:00",
+      "",
+      undefined
+    ]) {
+      expect(parseRfc3339Timestamp(value)).toBeUndefined();
+    }
   });
 });
 
@@ -763,6 +841,81 @@ describe("list_scheduled_prompts", () => {
 
     expect(store.listScheduledPrompts).toHaveBeenCalledWith(conversationKey);
   });
+
+  it("defaults to ongoing jobs only, excluding completed and canceled records", async () => {
+    const store = storeMock([
+      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" }),
+      record({ id: "job-done", status: "completed", completedAt: "2026-08-29T13:00:00.000Z" }),
+      record({ id: "job-live" })
+    ]);
+    const [, listScheduledPrompts] =
+      createTools(store);
+
+    const text = await executeTool(listScheduledPrompts, {});
+
+    expect(store.listScheduledPrompts).toHaveBeenCalledWith(conversationKey);
+    expect(store.listScheduledPromptHistory).not.toHaveBeenCalled();
+    expect(text).toContain("job-live");
+    expect(text).not.toContain("job-past");
+    expect(text).not.toContain("job-done");
+  });
+
+  it("includes completed and canceled records with status and timestamps on request", async () => {
+    const store = storeMock([
+      record({
+        id: "job-done",
+        status: "completed",
+        completedAt: "2026-08-29T13:00:00.000Z",
+        createdAt: "2026-08-25T10:00:00.000Z",
+        schedule: { type: "once", atUtc: "2026-08-29T13:00:00.000Z" },
+        prompt: "One-time news"
+      }),
+      record({
+        id: "job-past",
+        status: "cancelled",
+        cancelledAt: "2026-08-29T15:00:00.000Z",
+        createdAt: "2026-08-25T11:00:00.000Z"
+      }),
+      record({ id: "job-live" })
+    ]);
+    const [, listScheduledPrompts] =
+      createTools(store);
+
+    const text = await executeTool(listScheduledPrompts, { include_history: true });
+
+    expect(store.listScheduledPromptHistory).toHaveBeenCalledWith(conversationKey);
+    expect(text).toContain("job-done | completed");
+    expect(text).toContain("scheduled_at: 2026-08-25T10:00:00.000Z");
+    expect(text).toContain("completed_at: 2026-08-29T13:00:00.000Z");
+    expect(text).toContain("job-past | canceled");
+    expect(text).toContain("canceled_at: 2026-08-29T15:00:00.000Z");
+    expect(text).toContain("job-live | ongoing");
+    const doneRow = text.split("\n").find((line) => line.includes("job-done"));
+    expect(doneRow).toBeDefined();
+    // Past rows carry no next run: only ongoing rows resolve one.
+    expect(doneRow).not.toContain("next run");
+  });
+
+  it("reports an empty history distinctly", async () => {
+    const store = storeMock();
+    const [, listScheduledPrompts] =
+      createTools(store);
+
+    const text = await executeTool(listScheduledPrompts, { include_history: true });
+
+    expect(text).toMatch(/No scheduled prompts/i);
+  });
+
+  it("rejects a non-boolean include_history", async () => {
+    const store = storeMock([record({ id: "job-live" })]);
+    const [, listScheduledPrompts] =
+      createTools(store);
+
+    const text = await executeTool(listScheduledPrompts, { include_history: "yes" });
+
+    expect(text).toContain("Error:");
+    expect(store.listScheduledPromptHistory).not.toHaveBeenCalled();
+  });
 });
 
 describe("cancel_scheduled_prompt", () => {
@@ -803,12 +956,387 @@ describe("cancel_scheduled_prompt", () => {
 
     expect(store.cancelScheduledPrompt).toHaveBeenCalledWith(conversationKey, "job-x");
   });
+
+  it("states that the canceled record is retained in history, not deleted", async () => {
+    const store = storeMock([record({ id: "job-1" })]);
+    const [, listScheduledPrompts, cancelScheduledPrompt] =
+      createTools(store);
+
+    const text = await executeTool(cancelScheduledPrompt, { id: "job-1" });
+
+    expect(store.cancelScheduledPrompt).toHaveBeenCalledWith(conversationKey, "job-1");
+    expect(text).toContain("Cancelled");
+    expect(text).toContain("job-1");
+    expect(text).toMatch(/history/i);
+
+    // The record becomes queryable as canceled through the history option,
+    // while the default ongoing listing excludes it.
+    const withHistory = await executeTool(listScheduledPrompts, { include_history: true });
+    expect(withHistory).toContain("job-1 | canceled");
+    expect(withHistory).toContain("canceled_at: 2026-08-29T15:00:00.000Z");
+    const defaultListing = await executeTool(listScheduledPrompts, {});
+    expect(defaultListing).not.toContain("job-1");
+  });
+});
+
+describe("prune_scheduled_prompt", () => {
+  it("hard-prunes one record by id and reports removed ids and the remaining count", async () => {
+    const store = storeMock([
+      record({ id: "job-gone", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" }),
+      record({ id: "job-kept" })
+    ]);
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(pruneScheduledPrompt, { id: "job-gone" });
+
+    expect(store.pruneScheduledPrompts).toHaveBeenCalledWith(conversationKey, {
+      kind: "id",
+      id: "job-gone"
+    });
+    expect(text).toContain("Pruned 1");
+    expect(text).toContain("job-gone");
+    expect(text).toContain("Remaining in this conversation: 1");
+    expect(store.jobs.some((job) => job.id === "job-gone")).toBe(false);
+  });
+
+  it("reports a non-existent id without mutating", async () => {
+    const store = storeMock([record({ id: "job-kept" })]);
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(pruneScheduledPrompt, { id: "missing" });
+
+    expect(store.pruneScheduledPrompts).toHaveBeenCalledWith(conversationKey, {
+      kind: "id",
+      id: "missing"
+    });
+    expect(store.jobs).toHaveLength(1);
+    expect(text).toContain("No scheduled prompt with id");
+    expect(text).toContain("missing");
+  });
+
+  it("bulk-prunes by status and normalizes the canceled spelling", async () => {
+    const store = storeMock([
+      record({ id: "job-old", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" }),
+      record({ id: "job-live" })
+    ]);
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(pruneScheduledPrompt, { status: "canceled" });
+
+    expect(store.pruneScheduledPrompts).toHaveBeenCalledWith(conversationKey, {
+      kind: "bulk",
+      statuses: ["cancelled"]
+    });
+    expect(text).toContain("Pruned 1");
+    expect(text).toContain("job-old");
+  });
+
+  it("bulk-prunes by a before cutoff normalized to UTC", async () => {
+    const store = storeMock();
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    await executeTool(pruneScheduledPrompt, { before: "2026-08-20T00:00:00-05:00" });
+
+    expect(store.pruneScheduledPrompts).toHaveBeenCalledWith(conversationKey, {
+      kind: "bulk",
+      statuses: ["active", "cancelled", "completed"],
+      before: "2026-08-20T05:00:00.000Z"
+    });
+  });
+
+  it("bulk-prunes by status and before together", async () => {
+    const store = storeMock();
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    await executeTool(pruneScheduledPrompt, {
+      status: "completed",
+      before: "2026-08-01T00:00:00Z"
+    });
+
+    expect(store.pruneScheduledPrompts).toHaveBeenCalledWith(conversationKey, {
+      kind: "bulk",
+      statuses: ["completed"],
+      before: "2026-08-01T00:00:00.000Z"
+    });
+  });
+
+  it("previews a bulk prune with dry_run without deleting", async () => {
+    const store = storeMock([
+      record({ id: "job-done", status: "completed", completedAt: "2026-08-29T13:00:00.000Z" }),
+      record({ id: "job-live" })
+    ]);
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(pruneScheduledPrompt, { status: "completed", dry_run: true });
+
+    expect(store.listScheduledPromptHistory).toHaveBeenCalledWith(conversationKey);
+    expect(store.pruneScheduledPrompts).not.toHaveBeenCalled();
+    expect(text).toContain("Dry run");
+    expect(text).toContain("job-done");
+    expect(text).toContain("Nothing was deleted");
+    expect(text).toContain("Remaining after prune: 1");
+    expect(store.jobs).toHaveLength(2);
+  });
+
+  it("rejects id combined with a bulk filter", async () => {
+    const store = storeMock();
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    const status = await executeTool(pruneScheduledPrompt, { id: "job-1", status: "completed" });
+    const before = await executeTool(pruneScheduledPrompt, {
+      id: "job-1",
+      before: "2026-08-01T00:00:00Z"
+    });
+
+    expect(status).toContain("Error:");
+    expect(status).toMatch(/mutually exclusive/i);
+    expect(before).toContain("Error:");
+    expect(before).toMatch(/mutually exclusive/i);
+    expect(store.pruneScheduledPrompts).not.toHaveBeenCalled();
+  });
+
+  it("requires an id or at least one bulk filter", async () => {
+    const store = storeMock();
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(pruneScheduledPrompt, {});
+
+    expect(text).toContain("Error:");
+    expect(store.pruneScheduledPrompts).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed before timestamp without mutating", async () => {
+    const store = storeMock();
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    for (const before of ["2026-08-01", "not-a-date", "2026-08-01T00:00:00"]) {
+      const text = await executeTool(pruneScheduledPrompt, { before });
+      expect(text).toContain("Error:");
+      expect(text).toMatch(/RFC3339/);
+    }
+    expect(store.pruneScheduledPrompts).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown bulk status without mutating", async () => {
+    const store = storeMock();
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(pruneScheduledPrompt, { status: "archived" });
+
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/ongoing, completed, canceled/);
+    expect(store.pruneScheduledPrompts).not.toHaveBeenCalled();
+  });
+
+  it("rejects cross-conversation scope without touching the store", async () => {
+    const store = storeMock([record({ id: "job-gone" })]);
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(pruneScheduledPrompt, { id: "job-gone", scope: "dm:other" });
+
+    expect(text).toContain("Error:");
+    expect(text).toContain("dm:other");
+    expect(store.pruneScheduledPrompts).not.toHaveBeenCalled();
+    expect(store.listScheduledPromptHistory).not.toHaveBeenCalled();
+  });
+
+  it("accepts a scope that matches the injected conversation", async () => {
+    const store = storeMock([
+      record({ id: "job-gone", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
+    ]);
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(pruneScheduledPrompt, {
+      id: "job-gone",
+      scope: conversationKey
+    });
+
+    expect(store.pruneScheduledPrompts).toHaveBeenCalledWith(conversationKey, {
+      kind: "id",
+      id: "job-gone"
+    });
+    expect(text).toContain("Pruned 1");
+  });
+
+  it("reports an empty bulk prune as a no-op", async () => {
+    const store = storeMock([record({ id: "job-live" })]);
+    const [, , , pruneScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(pruneScheduledPrompt, { status: "completed" });
+
+    expect(store.pruneScheduledPrompts).toHaveBeenCalled();
+    expect(text).toContain("No matching scheduled prompts");
+    expect(text).toMatch(/nothing was removed/i);
+  });
+});
+
+describe("resume_scheduled_prompt", () => {
+  it("resumes a canceled record with a new daily schedule and preserves the prompt", async () => {
+    const store = storeMock([
+      record({
+        id: "job-past",
+        status: "cancelled",
+        cancelledAt: "2026-08-29T15:00:00.000Z",
+        prompt: "Standup summary"
+      })
+    ]);
+    const [schedulePrompt, , , , resumeScheduledPrompt] = createTools(store);
+    expect(schedulePrompt).toBeDefined();
+
+    const text = await executeTool(resumeScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "daily", time: "08:30", timezone: "America/Chicago" }
+    });
+
+    expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
+      conversationKey,
+      "job-past",
+      { type: "daily", time: "08:30", timezone: "America/Chicago" }
+    );
+    expect(text).toContain("Resumed scheduled prompt job-past");
+    expect(text).toContain("daily at 08:30 (America/Chicago)");
+    expect(text).toContain("Standup summary");
+    expect(text).toContain(conversationKey);
+  });
+
+  it("resumes with a one-time schedule resolved in the channel timezone", async () => {
+    const store = storeMock([
+      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
+    ]);
+    const [, , , , resumeScheduledPrompt] = createTools(store, { defaultTimezone: "America/Chicago" });
+
+    await executeTool(resumeScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "once", at: "2026-09-01T09:15:00" }
+    });
+
+    expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
+      conversationKey,
+      "job-past",
+      { type: "once", atUtc: "2026-09-01T14:15:00.000Z" }
+    );
+  });
+
+  it("refuses to resume an ongoing record", async () => {
+    const store = storeMock([record({ id: "job-live" })]);
+    const [, , , , resumeScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(resumeScheduledPrompt, {
+      id: "job-live",
+      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
+    });
+
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/only canceled/i);
+    expect(text).toContain("ongoing");
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("refuses to resume a completed record", async () => {
+    const store = storeMock([
+      record({ id: "job-done", status: "completed", completedAt: "2026-08-29T13:00:00.000Z" })
+    ]);
+    const [, , , , resumeScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(resumeScheduledPrompt, {
+      id: "job-done",
+      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
+    });
+
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/only canceled/i);
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("refuses an unknown or pruned id without mutating", async () => {
+    const store = storeMock([record({ id: "job-live" })]);
+    const [, , , , resumeScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(resumeScheduledPrompt, {
+      id: "job-pruned",
+      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
+    });
+
+    expect(text).toContain("Error:");
+    expect(text).toContain("job-pruned");
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("refuses a past one-time schedule without resuming", async () => {
+    const store = storeMock([
+      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
+    ]);
+    const [, , , , resumeScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(resumeScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "once", at: "2026-08-01T00:00:00Z" }
+    });
+
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/past/i);
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("validates the new schedule exactly like schedule_prompt", async () => {
+    const store = storeMock([
+      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
+    ]);
+    const [, , , , resumeScheduledPrompt] = createTools(store);
+
+    const missingTime = await executeTool(resumeScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "daily" }
+    });
+    expect(missingTime).toMatch(/HH:MM/);
+
+    const missingDay = await executeTool(resumeScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "weekly", time: "08:30", timezone: "UTC" }
+    });
+    expect(missingDay).toMatch(/day_of_week/);
+
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("rejects cross-conversation scope without touching the store", async () => {
+    const store = storeMock();
+    const [, , , , resumeScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(resumeScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "daily", time: "08:30", timezone: "UTC" },
+      scope: "dm:other"
+    });
+
+    expect(text).toContain("Error:");
+    expect(text).toContain("dm:other");
+    expect(store.listScheduledPromptHistory).not.toHaveBeenCalled();
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("requires an id", async () => {
+    const store = storeMock();
+    const [, , , , resumeScheduledPrompt] = createTools(store);
+
+    const blank = await executeTool(resumeScheduledPrompt, {
+      id: "  ",
+      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
+    });
+    const missing = await executeTool(resumeScheduledPrompt, {
+      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
+    });
+
+    expect(blank).toContain("Error:");
+    expect(missing).toContain("Error:");
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
+  });
 });
 
 describe("tool registry metadata", () => {
-  it("advertises the three scheduler tools with trust-boundary guidelines", () => {
+  it("advertises the five scheduler tools with trust-boundary guidelines", () => {
     const store = storeMock();
-    const [schedulePrompt, listScheduledPrompts, cancelScheduledPrompt] =
+    const [schedulePrompt, listScheduledPrompts, cancelScheduledPrompt, pruneScheduledPrompt, resumeScheduledPrompt] =
       createTools(store);
 
     expect(schedulePrompt.name).toBe("schedule_prompt");
@@ -817,8 +1345,20 @@ describe("tool registry metadata", () => {
 
     expect(listScheduledPrompts.name).toBe("list_scheduled_prompts");
     expect(listScheduledPrompts.promptSnippet).toBeTruthy();
+    expect(listScheduledPrompts.promptGuidelines?.join("\n")).toMatch(/include_history|history/i);
 
     expect(cancelScheduledPrompt.name).toBe("cancel_scheduled_prompt");
     expect(cancelScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/id/i);
+    expect(cancelScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/prune|history/i);
+
+    expect(pruneScheduledPrompt.name).toBe("prune_scheduled_prompt");
+    expect(pruneScheduledPrompt.promptSnippet).toBeTruthy();
+    expect(pruneScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/explicitly/i);
+    expect(pruneScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/recoverable/i);
+
+    expect(resumeScheduledPrompt.name).toBe("resume_scheduled_prompt");
+    expect(resumeScheduledPrompt.promptSnippet).toBeTruthy();
+    expect(resumeScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/explicitly/i);
+    expect(resumeScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/canceled/i);
   });
 });
