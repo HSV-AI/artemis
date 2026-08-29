@@ -138,6 +138,9 @@ export interface ChannelMembershipChecker {
   isChannelMember(conversationKey: string, userId: string): Promise<MembershipStatus>;
 }
 
+/** Storage-level lifecycle of a scheduled prompt record. */
+export type ScheduledPromptStatus = "active" | "cancelled" | "completed";
+
 /**
  * A validated prompt schedule. One-time schedules carry an absolute UTC
  * instant; recurring schedules carry a zone-local wall-clock time plus the
@@ -160,16 +163,24 @@ export interface ScheduledPromptRecord {
   scheduledByUserId: string;
   /**
    * `active` until the execution engine consumes it: one-time jobs end as
-   * `completed` after firing, user cancellations become `cancelled`.
+   * `completed` after firing, user cancellations become `cancelled`. Cancel
+   * and resume keep the record for audit; only pruning removes it.
    */
-  status: "active" | "cancelled" | "completed";
+  status: ScheduledPromptStatus;
   createdAt: string;
   /**
    * Instant the execution engine last armed this job, set just after each
-   * fire. Absent until the job has fired at least once.
+   * fire. Absent until the job has fired at least once; resume clears it so
+   * the next occurrence is derived from the resume instant.
    */
   lastRunAt?: string;
   cancelledAt?: string;
+  /**
+   * Instant a completed one-time job fired and retired. Derived from the
+   * storage-level `last_run_at`, which for completed jobs is always the
+   * completion instant.
+   */
+  completedAt?: string;
 }
 
 export interface ScheduledPromptInput {
@@ -181,6 +192,34 @@ export interface ScheduledPromptInput {
 }
 
 /**
+ * Selection of scheduled prompt records to hard-delete. Exactly one form:
+ * a single record by id, or a bulk selection by status with an optional
+ * cutoff. The model-facing prune tool enforces the mutual exclusion between
+ * the id form and bulk filters before building a filter.
+ */
+export type ScheduledPromptPruneFilter =
+  | { kind: "id"; id: string }
+  | {
+      kind: "bulk";
+      /** Only records in these statuses are removed. Never empty. */
+      statuses: readonly ScheduledPromptStatus[];
+      /**
+       * Canonical UTC ISO-8601 cutoff: only records scheduled strictly
+       * before this instant are removed. Absent means no cutoff.
+       */
+      before?: string;
+    };
+
+/**
+ * Outcome of a hard prune: the ids actually removed (destructive, not
+ * recoverable) and how many of the conversation's records remain.
+ */
+export interface ScheduledPromptPruneResult {
+  removedIds: string[];
+  remainingCount: number;
+}
+
+/**
  * Durable storage for scheduled prompts, scoped by the stable conversation
  * key. Backed by SQLite so jobs survive restarts. The harness injects both
  * the key and the scheduling user; the model can only manage schedules for
@@ -189,7 +228,32 @@ export interface ScheduledPromptInput {
 export interface ScheduledPromptStore {
   createScheduledPrompt(conversationKey: string, input: ScheduledPromptInput): ScheduledPromptRecord;
   listScheduledPrompts(conversationKey: string): ScheduledPromptRecord[];
+  /**
+   * Every record of the conversation across the full lifecycle (active,
+   * canceled, and completed), the audit view behind the list tool's
+   * `include_history` option.
+   */
+  listScheduledPromptHistory(conversationKey: string): ScheduledPromptRecord[];
   cancelScheduledPrompt(conversationKey: string, id: string): boolean;
+  /**
+   * Hard-deletes the selected records from the database. Not recoverable:
+   * a pruned record can never be listed or resumed again. Scoped to the
+   * conversation key, so no other conversation's records are ever touched.
+   */
+  pruneScheduledPrompts(
+    conversationKey: string,
+    filter: ScheduledPromptPruneFilter
+  ): ScheduledPromptPruneResult;
+  /**
+   * Restores a canceled record to `active` with a new schedule, preserving
+   * its original prompt. Returns the updated record, or undefined when the
+   * id does not exist in this conversation or is not canceled.
+   */
+  resumeScheduledPrompt(
+    conversationKey: string,
+    id: string,
+    schedule: PromptSchedule
+  ): ScheduledPromptRecord | undefined;
 }
 
 /**

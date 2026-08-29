@@ -708,6 +708,296 @@ describe("ArtemisRepository", () => {
     expect(repository.listActiveScheduledPrompts()).toEqual([]);
   });
 
+  it("lists completed and canceled prompts in history while active listings stay active-only", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-history-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const done = repository.createScheduledPrompt("dm:one", {
+      prompt: "once",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const cancelled = repository.createScheduledPrompt("dm:one", {
+      prompt: "cancelled",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const live = repository.createScheduledPrompt("dm:one", {
+      prompt: "live",
+      schedule: { type: "weekly", time: "08:00", dayOfWeek: 1, timezone: "UTC" },
+      responseType: "silent",
+      scheduledByUserId: "user-1"
+    });
+    // Pin distinct creation instants so the history order is deterministic.
+    repository.close();
+    const raw = new Database(path);
+    raw.prepare("UPDATE scheduled_prompts SET created_at = ? WHERE id = ?")
+      .run("2026-08-01T00:00:00.000Z", done.id);
+    raw.prepare("UPDATE scheduled_prompts SET created_at = ? WHERE id = ?")
+      .run("2026-08-02T00:00:00.000Z", cancelled.id);
+    raw.prepare("UPDATE scheduled_prompts SET created_at = ? WHERE id = ?")
+      .run("2026-08-03T00:00:00.000Z", live.id);
+    raw.close();
+    repository = new ArtemisRepository(path);
+    repository.completeScheduledPrompt(done.id, "2026-08-30T14:30:00.000Z");
+    expect(repository.cancelScheduledPrompt("dm:one", cancelled.id)).toBe(true);
+
+    const history = repository.listScheduledPromptHistory("dm:one");
+    expect(history.map((job) => job.id)).toEqual([done.id, cancelled.id, live.id]);
+    expect(history.map((job) => job.status)).toEqual(["completed", "cancelled", "active"]);
+    expect(history[0]?.completedAt).toBe("2026-08-30T14:30:00.000Z");
+    expect(history[1]?.cancelledAt).toBeDefined();
+    // The default listing stays active-only, and other conversations see nothing.
+    expect(repository.listScheduledPrompts("dm:one").map((job) => job.id)).toEqual([live.id]);
+    expect(repository.listScheduledPromptHistory("dm:two")).toEqual([]);
+  });
+
+  it("hard-prunes one scheduled prompt by id and reports what remains", () => {
+    repository = new ArtemisRepository(":memory:");
+    const done = repository.createScheduledPrompt("dm:one", {
+      prompt: "done",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const cancelled = repository.createScheduledPrompt("dm:one", {
+      prompt: "cancelled",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const live = repository.createScheduledPrompt("dm:one", {
+      prompt: "live",
+      schedule: { type: "daily", time: "10:00", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    repository.completeScheduledPrompt(done.id, "2026-08-30T14:30:00.000Z");
+    repository.cancelScheduledPrompt("dm:one", cancelled.id);
+
+    const result = repository.pruneScheduledPrompts("dm:one", { kind: "id", id: cancelled.id });
+
+    expect(result.removedIds).toEqual([cancelled.id]);
+    expect(result.remainingCount).toBe(2);
+    expect(repository.listScheduledPromptHistory("dm:one").map((job) => job.id).sort())
+      .toEqual([done.id, live.id].sort());
+  });
+
+  it("never prunes another conversation's record or an unknown id", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "mine",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+
+    expect(repository.pruneScheduledPrompts("dm:two", { kind: "id", id: created.id }).removedIds)
+      .toEqual([]);
+    expect(repository.pruneScheduledPrompts("dm:one", { kind: "id", id: "missing" }).removedIds)
+      .toEqual([]);
+    expect(repository.listScheduledPromptHistory("dm:one")).toHaveLength(1);
+  });
+
+  it("bulk-prunes records by status", () => {
+    repository = new ArtemisRepository(":memory:");
+    const done = repository.createScheduledPrompt("dm:one", {
+      prompt: "done",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const cancelled = repository.createScheduledPrompt("dm:one", {
+      prompt: "cancelled",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const live = repository.createScheduledPrompt("dm:one", {
+      prompt: "live",
+      schedule: { type: "daily", time: "10:00", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    repository.completeScheduledPrompt(done.id, "2026-08-30T14:30:00.000Z");
+    repository.cancelScheduledPrompt("dm:one", cancelled.id);
+
+    const result = repository.pruneScheduledPrompts("dm:one", {
+      kind: "bulk",
+      statuses: ["cancelled", "completed"]
+    });
+
+    expect([...result.removedIds].sort()).toEqual([done.id, cancelled.id].sort());
+    expect(result.remainingCount).toBe(1);
+    expect(repository.listScheduledPromptHistory("dm:one").map((job) => job.id))
+      .toEqual([live.id]);
+    // The active record keeps running for the execution engine.
+    expect(repository.listActiveScheduledPrompts().map((job) => job.id)).toEqual([live.id]);
+  });
+
+  it("bulk-prunes only records scheduled before the cutoff instant", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-prune-before-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const older = repository.createScheduledPrompt("dm:one", {
+      prompt: "older",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const newer = repository.createScheduledPrompt("dm:one", {
+      prompt: "newer",
+      schedule: { type: "daily", time: "10:00", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    // Pin distinct creation instants so the cutoff lands strictly between them.
+    repository.close();
+    const raw = new Database(path);
+    raw.prepare("UPDATE scheduled_prompts SET created_at = ? WHERE id = ?")
+      .run("2026-08-01T00:00:00.000Z", older.id);
+    raw.prepare("UPDATE scheduled_prompts SET created_at = ? WHERE id = ?")
+      .run("2026-08-02T00:00:00.000Z", newer.id);
+    raw.close();
+    repository = new ArtemisRepository(path);
+
+    const result = repository.pruneScheduledPrompts("dm:one", {
+      kind: "bulk",
+      statuses: ["active", "cancelled", "completed"],
+      before: "2026-08-01T12:00:00.000Z"
+    });
+
+    expect(result.removedIds).toEqual([older.id]);
+    expect(result.remainingCount).toBe(1);
+    expect(repository.listScheduledPromptHistory("dm:one").map((job) => job.id))
+      .toEqual([newer.id]);
+  });
+
+  it("resumes a canceled recurring job with a new schedule and clears cancel bookkeeping", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "standup",
+      schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
+      responseType: "silent",
+      scheduledByUserId: "user-1"
+    });
+    repository.markScheduledPromptFired(created.id, "2026-08-30T14:20:00.001Z");
+    expect(repository.cancelScheduledPrompt("dm:one", created.id)).toBe(true);
+    const originalCreatedAt =
+      repository.listScheduledPromptHistory("dm:one").find((job) => job.id === created.id)?.createdAt ?? "";
+
+    const resumed = repository.resumeScheduledPrompt("dm:one", created.id, {
+      type: "weekly",
+      time: "10:00",
+      dayOfWeek: 1,
+      timezone: "UTC"
+    });
+
+    expect(resumed).toBeDefined();
+    expect(resumed?.status).toBe("active");
+    expect(resumed?.cancelledAt).toBeUndefined();
+    expect(resumed?.lastRunAt).toBeUndefined();
+    expect(resumed?.prompt).toBe("standup");
+    expect(resumed?.responseType).toBe("silent");
+    expect(resumed?.scheduledByUserId).toBe("user-1");
+    expect(resumed?.schedule).toEqual({ type: "weekly", time: "10:00", dayOfWeek: 1, timezone: "UTC" });
+    expect((resumed?.createdAt ?? "") >= originalCreatedAt).toBe(true);
+    // The resumed job is live again in both listings.
+    expect(repository.listScheduledPrompts("dm:one").map((job) => job.id)).toEqual([created.id]);
+    expect(repository.listActiveScheduledPrompts().map((job) => job.id)).toEqual([created.id]);
+  });
+
+  it("resumes with a one-time schedule stored as the UTC shape", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "comeback",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    repository.cancelScheduledPrompt("dm:one", created.id);
+
+    const resumed = repository.resumeScheduledPrompt("dm:one", created.id, {
+      type: "once",
+      atUtc: "2026-09-01T14:15:00.000Z"
+    });
+
+    expect(resumed?.schedule).toEqual({ type: "once", atUtc: "2026-09-01T14:15:00.000Z" });
+    expect(resumed?.status).toBe("active");
+    const history = repository.listScheduledPromptHistory("dm:one");
+    expect(history).toHaveLength(1);
+    expect(history[0]?.status).toBe("active");
+  });
+
+  it("refuses to resume records that are not canceled or belong to another conversation", () => {
+    repository = new ArtemisRepository(":memory:");
+    const live = repository.createScheduledPrompt("dm:one", {
+      prompt: "live",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const done = repository.createScheduledPrompt("dm:one", {
+      prompt: "done",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    repository.completeScheduledPrompt(done.id, "2026-08-30T14:30:00.000Z");
+
+    expect(repository.resumeScheduledPrompt("dm:one", live.id, { type: "daily", time: "11:00", timezone: "UTC" }))
+      .toBeUndefined();
+    expect(repository.resumeScheduledPrompt("dm:one", done.id, { type: "daily", time: "11:00", timezone: "UTC" }))
+      .toBeUndefined();
+    expect(repository.resumeScheduledPrompt("dm:one", "missing-id", { type: "daily", time: "11:00", timezone: "UTC" }))
+      .toBeUndefined();
+    expect(repository.resumeScheduledPrompt("dm:two", done.id, { type: "daily", time: "11:00", timezone: "UTC" }))
+      .toBeUndefined();
+
+    expect(repository.listScheduledPrompts("dm:one").map((job) => job.id)).toEqual([live.id]);
+    expect(repository.listScheduledPromptHistory("dm:one").map((job) => job.status).sort())
+      .toEqual(["active", "completed"]);
+  });
+
+  it("persists a resumed job across a repository reopen", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-resume-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "durable",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    repository.cancelScheduledPrompt("dm:one", created.id);
+    const resumed = repository.resumeScheduledPrompt("dm:one", created.id, {
+      type: "monthly",
+      time: "07:30",
+      dayOfMonth: 15,
+      timezone: "Europe/Berlin"
+    });
+    expect(resumed).toBeDefined();
+    repository.close();
+    repository = undefined;
+
+    repository = new ArtemisRepository(path);
+    const listed = repository.listScheduledPrompts("dm:one");
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.status).toBe("active");
+    expect(listed[0]?.schedule).toEqual({
+      type: "monthly",
+      time: "07:30",
+      dayOfMonth: 15,
+      timezone: "Europe/Berlin"
+    });
+    expect(listed[0]?.cancelledAt).toBeUndefined();
+  });
+
   it("applies migration 9 to a migration-8 database, preserving jobs, attribution, and history", () => {
     const directory = mkdtempSync(join(tmpdir(), "artemis-migration9-"));
     temporaryDirectories.push(directory);
