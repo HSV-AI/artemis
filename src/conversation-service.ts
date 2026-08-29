@@ -9,7 +9,8 @@ import type {
   MembershipStatus,
   PiGateway,
   PiGenerationResult,
-  ScheduledPromptRecord
+  ScheduledPromptRecord,
+  ScheduledPromptTrigger
 } from "./domain.js";
 import { KeyedSerialQueue } from "./keyed-queue.js";
 import { safeError } from "./logger.js";
@@ -233,34 +234,17 @@ export class ConversationService {
    * denied; records `scheduled_prompt_failed` on generation errors; records
    * `scheduled_prompt_succeeded` otherwise (including when every generation
    * attempt produced an invalid response — the engine then records
-   * `scheduled_prompt_invalid_response` and posts nothing).
+   * `scheduled_prompt_invalid_response` and posts nothing). Events name the
+   * run's `trigger`: `scheduled` for engine fires (the default) or
+   * `on-demand` for tool runs.
    */
-  public async runScheduledPrompt(record: ScheduledPromptRecord): Promise<PiGenerationResult | null> {
-    // Layer 1: pure scope gate on the harness-derived key — conversation shape,
-    // deployment allow-lists, scheduling-user attribution. No Discord traffic,
-    // so an allow-list denial never reaches the membership endpoint.
-    const scope = checkScheduledPromptScope(
-      record,
-      [...this.allowedChannelIds],
-      [...this.authorizedUserIds]
-    );
-    if (!scope.ok) {
-      this.schedulerLog("scheduled_prompt_rejected", record, {
-        code: scope.code,
-        reason: scope.detail
-      });
-      return null;
-    }
-    // Layer 2: re-check live membership where feasible.
-    const membership = await this.resolveMembership(record.conversationKey, record.scheduledByUserId);
-    const decision = authorizeScheduledPrompt(
-      record,
-      membership,
-      [...this.allowedChannelIds],
-      [...this.authorizedUserIds]
-    );
+  public async runScheduledPrompt(
+    record: ScheduledPromptRecord,
+    trigger: ScheduledPromptTrigger = "scheduled"
+  ): Promise<PiGenerationResult | null> {
+    const decision = await this.authorizeScheduledRun(record);
     if (!decision.allowed) {
-      this.schedulerLog("scheduled_prompt_rejected", record, {
+      this.schedulerLog("scheduled_prompt_rejected", record, trigger, {
         code: decision.code,
         reason: decision.detail
       });
@@ -275,8 +259,71 @@ export class ConversationService {
     }
 
     return this.queue.run(record.conversationKey, () =>
-      this.executeScheduledPrompt(record, decision.identity)
+      this.executeScheduledPrompt(record, decision.identity, trigger)
     );
+  }
+
+  /**
+   * Run one scheduled prompt immediately for a caller that already holds the
+   * conversation's queue slot — the `run_scheduled_task` tool executes inside
+   * a live turn on this conversation, and re-entering the keyed queue would
+   * deadlock that turn. Every other behavior matches
+   * {@link ConversationService.runScheduledPrompt}: the same scope and
+   * membership gates, the same durable session, the same persistence, and the
+   * same JSON response contract; the generation is flagged
+   * `scheduledRun` so the gateway omits the run tool and scheduled execution
+   * never recurses, and events carry the `on-demand` trigger.
+   */
+  public async runScheduledPromptInline(
+    record: ScheduledPromptRecord
+  ): Promise<PiGenerationResult | null> {
+    const decision = await this.authorizeScheduledRun(record);
+    if (!decision.allowed) {
+      this.schedulerLog("scheduled_prompt_rejected", record, "on-demand", {
+        code: decision.code,
+        reason: decision.detail
+      });
+      return null;
+    }
+    if (!decision.membershipVerified) {
+      this.logger.warn("scheduled_prompt_membership_unverified", {
+        conversationKey: record.conversationKey,
+        jobId: record.id,
+        scheduledByUserId: record.scheduledByUserId
+      });
+    }
+    return this.executeScheduledPrompt(record, decision.identity, "on-demand");
+  }
+
+  /**
+   * Shared fire-time authorization: the pure scope gate first (no Discord
+   * traffic, so an allow-list denial never reaches the membership endpoint),
+   * then the live membership re-check where feasible.
+   */
+  private async authorizeScheduledRun(record: ScheduledPromptRecord) {
+    // Layer 1: pure scope gate on the harness-derived key — conversation shape,
+    // deployment allow-lists, scheduling-user attribution.
+    const scope = checkScheduledPromptScope(
+      record,
+      [...this.allowedChannelIds],
+      [...this.authorizedUserIds]
+    );
+    if (!scope.ok) {
+      return {
+        allowed: false as const,
+        code: scope.code,
+        detail: scope.detail
+      };
+    }
+    // Layer 2: re-check live membership where feasible.
+    const membership = await this.resolveMembership(record.conversationKey, record.scheduledByUserId);
+    const decision = authorizeScheduledPrompt(
+      record,
+      membership,
+      [...this.allowedChannelIds],
+      [...this.authorizedUserIds]
+    );
+    return decision;
   }
 
   private async resolveMembership(
@@ -299,7 +346,8 @@ export class ConversationService {
 
   private async executeScheduledPrompt(
     record: ScheduledPromptRecord,
-    identity: ConversationIdentity
+    identity: ConversationIdentity,
+    trigger: ScheduledPromptTrigger
   ): Promise<PiGenerationResult | null> {
     const session = this.repository.getOrCreateSession(identity, this.options.model);
     const firstMessageId = `scheduled:${record.id}:${randomUUID()}`;
@@ -351,6 +399,7 @@ export class ConversationService {
           jobId: record.id,
           scheduledByUserId: record.scheduledByUserId,
           scheduleType: record.schedule.type,
+          trigger,
           model: result.model,
           responseAttempts: attempts
         }
@@ -359,6 +408,7 @@ export class ConversationService {
         conversationKey: identity.key,
         jobId: record.id,
         sessionId: session.id,
+        trigger,
         responseAttempts: attempts
       });
       return result;
@@ -367,12 +417,13 @@ export class ConversationService {
       this.repository.recordEvent("scheduled_prompt_failed", {
         sessionId: session.id,
         conversationKey: identity.key,
-        details: { jobId: record.id, ...details }
+        details: { jobId: record.id, trigger, ...details }
       });
       this.logger.error("scheduled_prompt_failed", {
         jobId: record.id,
         conversationKey: identity.key,
         sessionId: session.id,
+        trigger,
         ...details
       });
       return null;
@@ -410,6 +461,10 @@ export class ConversationService {
       conversationKind: identity.kind,
       sourceMessageId,
       authorId: record.scheduledByUserId,
+      // Every scheduler-fired generation — first attempt and correction
+      // retries alike — is marked as such so the gateway omits
+      // run_scheduled_task: scheduled execution never recurses.
+      scheduledRun: true,
       prompt
     });
     if (!result.text.trim()) {
@@ -421,12 +476,14 @@ export class ConversationService {
   private schedulerLog(
     event: "scheduled_prompt_rejected",
     record: ScheduledPromptRecord,
+    trigger: ScheduledPromptTrigger,
     fields: { code?: string; [key: string]: unknown }
   ): void {
     const payload = {
       jobId: record.id,
       conversationKey: record.conversationKey,
       scheduledByUserId: record.scheduledByUserId,
+      trigger,
       ...fields
     };
     this.logger.warn(event, payload);

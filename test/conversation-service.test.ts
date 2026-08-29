@@ -795,6 +795,7 @@ describe("ConversationService scheduled prompts", () => {
     );
   });
 
+
   describe("scheduled response correction retries", () => {
     it("issues one correction prompt and returns the valid second attempt", async () => {
       const pi = createPiMock({ text: "Good morning everyone, quick reminder!" });
@@ -947,6 +948,86 @@ describe("ConversationService scheduled prompts", () => {
         expect.objectContaining({ role: "assistant", content: "prose, not JSON" }),
         expect.objectContaining({ role: "user" })
       ]);
+    });
+  });
+
+  describe("runScheduledPromptInline (on-demand execution)", () => {
+    it("applies the same authorization gate without queueing", async () => {
+      const pi = createPiMock({ text: "on demand" });
+      const { service } = createService(pi, membershipMock("not-member"));
+
+      await expect(service.runScheduledPromptInline(jobRecord())).resolves.toBeNull();
+
+      expect(pi.generate).not.toHaveBeenCalled();
+    });
+
+    it("generates in the task conversation's session, flags the run as scheduler-fired, and records the on-demand trigger", async () => {
+      const pi = createPiMock({ text: "on demand summary" });
+      const { service, logger } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPromptInline(jobRecord())).resolves.toMatchObject({
+        text: "on demand summary"
+      });
+
+      const input = vi.mocked(pi.generate).mock.calls[0]?.[0];
+      expect(input).toMatchObject({
+        conversationKey: "guild:guild-1:channel:group-1",
+        conversationKind: "guild",
+        authorId: "603384387685449728",
+        scheduledRun: true
+      });
+      expect(input?.sourceMessageId).toMatch(/^scheduled:job-1:/);
+      expect(input?.prompt).toContain("Post the weekly standup summary");
+      expect(input?.prompt).toContain('{"type":"message","content":');
+      expect(logger.info).toHaveBeenCalledWith(
+        "scheduled_prompt_succeeded",
+        expect.objectContaining({ trigger: "on-demand" })
+      );
+    });
+
+    it("runs without waiting for an in-flight interactive turn on the same conversation", async () => {
+      let release: ((result: PiGenerationResult) => void) | undefined;
+      const blocked = new Promise<PiGenerationResult>((resolve) => {
+        release = resolve;
+      });
+      const pi: PiGateway = {
+        checkHealth: vi.fn().mockResolvedValue(undefined),
+        setBotDisplayName: vi.fn(),
+        generate: vi
+          .fn()
+          .mockImplementationOnce(() => blocked)
+          .mockResolvedValueOnce({ text: '{"type":"message","content":"inline result"}', model: "test-model" })
+      };
+      const { service } = createService(pi, membershipMock());
+      const interactive = service.handleMessage(inbound({ discordMessageId: "interactive" }));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(pi.generate).toHaveBeenCalledTimes(1);
+
+      // The inline run executes while the interactive turn still holds the
+      // queue: re-entering the queue here would deadlock the live turn.
+      await expect(service.runScheduledPromptInline(jobRecord())).resolves.toMatchObject({
+        text: '{"type":"message","content":"inline result"}'
+      });
+      expect(pi.generate).toHaveBeenCalledTimes(2);
+
+      release?.({ text: "first", model: "test-model" });
+      await expect(interactive).resolves.toBe("first");
+    });
+
+    it("keeps the queued engine path marked as trigger scheduled", async () => {
+      const pi = createPiMock({ text: "fired by engine" });
+      const { service, logger } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPrompt(jobRecord())).resolves.toMatchObject({
+        text: "fired by engine"
+      });
+
+      expect(vi.mocked(pi.generate).mock.calls[0]?.[0]).toMatchObject({ scheduledRun: true });
+      expect(logger.info).toHaveBeenCalledWith(
+        "scheduled_prompt_succeeded",
+        expect.objectContaining({ trigger: "scheduled" })
+      );
     });
   });
 });

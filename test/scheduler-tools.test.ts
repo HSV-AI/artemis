@@ -7,7 +7,9 @@ import type {
   ScheduledPromptPruneFilter,
   ScheduledPromptRecord,
   ScheduledPromptStore,
-  ScheduledPromptUpdate
+  ScheduledPromptUpdate,
+  ScheduledTaskRunResult,
+  ScheduledTaskRunner
 } from "../src/domain.js";
 import {
   createSchedulerTools,
@@ -17,6 +19,16 @@ import {
   resolveOnceInstant,
   type SchedulerToolContext
 } from "../src/scheduler-tools.js";
+
+/**
+ * Immediate-run executor fake wired by the harness in tests; records the
+ * record it was handed so trust-boundary tests can assert the lookup scope.
+ */
+function runnerMock(
+  result: ScheduledTaskRunResult = { status: "posted", content: "Good morning!" }
+): ScheduledTaskRunner & { runScheduledTaskNow: ReturnType<typeof vi.fn> } {
+  return { runScheduledTaskNow: vi.fn(async () => result) };
+}
 
 /** Discord user id of the scheduling user, injected by the harness in tests. */
 const schedulingUserId = "603384387685449728";
@@ -1598,5 +1610,175 @@ describe("tool registry metadata", () => {
     expect(updateScheduledPrompt.promptSnippet).toBeTruthy();
     expect(updateScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/explicitly/i);
     expect(updateScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/ongoing/i);
+  });
+
+  it("appends run_scheduled_task with guidelines when a runner is wired", () => {
+    const tools = createTools(storeMock(), { runner: runnerMock() });
+    const runTool = tools.find((tool) => tool.name === "run_scheduled_task");
+    expect(runTool).toBeDefined();
+    expect(runTool?.promptSnippet).toBeTruthy();
+    expect(runTool?.promptGuidelines?.join("\n")).toMatch(/explicitly/i);
+    expect(runTool?.promptGuidelines?.join("\n")).toMatch(/ongoing/i);
+    // The other scheduler tools are unaffected by the added runner.
+    expect(tools.map((tool) => tool.name)).toContain("schedule_prompt");
+    expect(tools).toHaveLength(7);
+  });
+
+  it("registers only the six management tools when no runner is wired", () => {
+    const tools = createTools(storeMock(), { runner: undefined });
+    expect(tools.map((tool) => tool.name)).not.toContain("run_scheduled_task");
+    expect(tools).toHaveLength(6);
+  });
+});
+
+describe("run_scheduled_task", () => {
+  function activeJob(overrides: Partial<ScheduledPromptRecord> = {}): ScheduledPromptRecord {
+    return record({ status: "active", ...overrides });
+  }
+
+  function runToolOf(store: ScheduledPromptStore, runner?: ScheduledTaskRunner) {
+    const tools = createTools(store, runner ? { runner } : { runner: undefined });
+    const runTool = tools.find((tool) => tool.name === "run_scheduled_task");
+    if (!runTool) {
+      throw new Error("run_scheduled_task was not registered");
+    }
+    return runTool;
+  }
+
+  it("hands the conversation's active record to the runner and reports the posted content", async () => {
+    const target = activeJob({ id: "job-run" });
+    const store = storeMock([
+      target,
+      activeJob({ id: "job-other" })
+    ]);
+    const runner = runnerMock({ status: "posted", content: "Standup posted on demand" });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-run" });
+
+    expect(runner.runScheduledTaskNow).toHaveBeenCalledTimes(1);
+    expect(runner.runScheduledTaskNow).toHaveBeenCalledWith(target);
+    expect(text).toContain("Ran scheduled prompt job-run");
+    expect(text).toContain("Standup posted on demand");
+    expect(text).toContain(conversationKey);
+  });
+
+  it("notes lifecycle consumption for one-time and recurring schedules", async () => {
+    const store = storeMock([
+      activeJob({ id: "job-once", schedule: { type: "once", atUtc: "2026-09-01T14:00:00.000Z" } }),
+      activeJob({ id: "job-daily" })
+    ]);
+    const runner = runnerMock();
+    const runTool = runToolOf(store, runner);
+
+    const onceText = await executeTool(runTool, { id: "job-once" });
+    expect(onceText).toContain("completed and will not fire again");
+
+    const dailyText = await executeTool(runTool, { id: "job-daily" });
+    expect(dailyText).toContain("schedule continues");
+  });
+
+  it("reports a silent outcome without posting", async () => {
+    const store = storeMock([activeJob({ id: "job-silent" })]);
+    const runner = runnerMock({ status: "silent" });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-silent" });
+
+    expect(text).toContain("Ran scheduled prompt job-silent");
+    expect(text).toMatch(/silent/i);
+    expect(text).toMatch(/nothing was posted/i);
+  });
+
+  it("reports an invalid agent response and includes a bounded preview", async () => {
+    const store = storeMock([activeJob({ id: "job-bad" })]);
+    const preview = "x".repeat(500);
+    const runner = runnerMock({ status: "invalid-response", responsePreview: preview });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-bad" });
+
+    expect(text).toMatch(/not a valid scheduled-task JSON reply/i);
+    expect(text).toMatch(/nothing was posted/i);
+    expect(text).toContain("x".repeat(200));
+  });
+
+  it("reports a delivery failure distinctly", async () => {
+    const store = storeMock([activeJob({ id: "job-undelivered" })]);
+    const runner = runnerMock({ status: "undelivered" });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-undelivered" });
+
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/could not be delivered/i);
+  });
+
+  it("reports a denied or failed gate run as an error with nothing posted", async () => {
+    const store = storeMock([activeJob({ id: "job-denied" })]);
+    const runner = runnerMock({ status: "not-run" });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-denied" });
+
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/could not be executed/i);
+    expect(text).toMatch(/nothing was posted/i);
+  });
+
+  it("errors on an unknown or foreign id without touching the runner", async () => {
+    const store = storeMock([activeJob({ id: "job-mine" })]);
+    const runner = runnerMock();
+    const runTool = runToolOf(store, runner);
+
+    const unknownText = await executeTool(runTool, { id: "no-such-job" });
+    expect(unknownText).toContain('no scheduled prompt with id "no-such-job"');
+    expect(unknownText).toContain(conversationKey);
+
+    const foreignText = await executeTool(runTool, { id: "foreign" });
+    expect(foreignText).toContain('no scheduled prompt with id "foreign"');
+    expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+  });
+
+  it("requires an id", async () => {
+    const runner = runnerMock();
+    const runTool = runToolOf(storeMock([activeJob()]), runner);
+
+    const text = await executeTool(runTool, { id: "   " });
+    expect(text).toContain("Error:");
+    expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+  });
+
+  it("refuses canceled records and points at resume", async () => {
+    const store = storeMock([record({ id: "job-cancelled", status: "cancelled" })]);
+    const runner = runnerMock();
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-cancelled" });
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/resume_scheduled_prompt/i);
+    expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+  });
+
+  it("refuses completed records as retired history", async () => {
+    const store = storeMock([record({ id: "job-completed", status: "completed" })]);
+    const runner = runnerMock();
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-completed" });
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/retired history/i);
+    expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+  });
+
+  it("is not registered when no runner is wired, leaving the store untouched", () => {
+    const store = storeMock([activeJob({ id: "job-nowhere" })]);
+    const tools = createTools(store, { runner: undefined });
+    expect(tools.find((tool) => tool.name === "run_scheduled_task")).toBeUndefined();
+    expect(store.listScheduledPromptHistory).not.toHaveBeenCalled();
+  });
+
+  it("scopes the lookup to the harness-injected conversation key", async () => {
+    const foreign = record({ id: "foreign-job", conversationKey: "guild:other:channel:other" });
+    const store = storeMock([foreign]);
+    const runner = runnerMock();
+
+    const text = await executeTool(runToolOf(store, runner), { id: "foreign-job" });
+    expect(text).toContain('no scheduled prompt with id "foreign-job"');
+    expect(text).toContain(conversationKey);
+    expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
   });
 });
