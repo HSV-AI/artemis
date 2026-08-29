@@ -1094,4 +1094,40 @@ describe("DiscordGateway.sendToConversation", () => {
       expect.objectContaining({ conversationKey: "dm:dm-channel", errorMessage: "unknown channel" })
     );
   });
+
+  it("logs scheduler_channel_unresolved and reports failure when the channel fetch resolves null", async () => {
+    // discord.js resolves a channel fetch to null (instead of rejecting) when
+    // the channel cannot be built because its guild is not in the client's
+    // cache — e.g. delivery attempted before the ready handshake.
+    const raw = new FakeClient();
+    Object.assign(raw, { channels: { fetch: vi.fn().mockResolvedValue(null) } });
+    const logger = createLoggerMock();
+    const gateway = createGateway(raw as unknown as Client, logger);
+
+    await expect(gateway.sendToConversation(guildIdentity, "hello")).resolves.toBe(false);
+    expect(logger.error).toHaveBeenCalledWith(
+      "scheduler_channel_unresolved",
+      expect.objectContaining({
+        conversationKey: "guild:g1:channel:channel",
+        channelId: "channel"
+      })
+    );
+    // Null resolution is not a "not sendable" channel; it must not be
+    // mislabeled as one.
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      "discord_channel_not_sendable",
+      expect.anything()
+    );
+  });
+
+  it("reports readiness only after the client completes its ready handshake", async () => {
+    const raw = new FakeClient();
+    const gateway = createGateway(raw as unknown as Client);
+
+    expect(gateway.isDiscordReady()).toBe(false);
+    await gateway.start();
+    expect(gateway.isDiscordReady()).toBe(false);
+    raw.emit(Events.ClientReady, raw);
+    expect(gateway.isDiscordReady()).toBe(true);
+  });
 });

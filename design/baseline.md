@@ -236,7 +236,7 @@ Base Docker Compose contains `ollama`, the one-shot `ollama-model` pull job, ACL
 4. Apply the Dgraph memory schema and fail if Dgraph is unavailable.
 5. Load a fresh normalized HSVAI source cache or refresh it through bounded requests, then synchronize the transcript and event corpus and apply its Dgraph schema.
 6. Connect the Discord client and register the three global slash commands when Discord reports ready. Resolve the bot's global display name or username and forward it to the PI gateway for self-introduction.
-7. Start the scheduler execution engine, which polls due scheduled prompts on a fixed interval and fires them through the full agent; see [Scheduler execution engine](scheduler-execution.md).
+7. Start the scheduler execution engine, which polls due scheduled prompts on a fixed interval once the Discord gateway completes its ready handshake — ticks before the handshake are deferred without consuming — and fires them through the full agent; see [Scheduler execution engine](scheduler-execution.md).
 8. Log a successful ready event including the connected bot identity, resolved display name, and allowed channel IDs, but no secrets.
 
 If configuration, migration, or required model setup fails, startup exits with a clear error instead of connecting in a partially working state.
@@ -288,7 +288,7 @@ If generation fails, Artemis records the failed attempt with the error name and 
 
 ### Scheduled prompt
 
-The execution engine polls the scheduled-prompt store on a fixed interval and runs each due job in the conversation's serialized queue, so a fired turn can never race a live user turn; see [Scheduler execution engine](scheduler-execution.md) for the authoritative contract. The engine submits the stored prompt framed with a strict JSON response contract to PI with full tool access, validates the agent's entire reply as one JSON object before anything is posted, posts `message` content to the target channel through the ordinary outbound path (embed suppression and Discord-safe splitting included), and honors `silent` by posting nothing. One-time jobs end `completed` after firing; recurring jobs record `last_run_at` and re-arm, so a fired occurrence can never double-post and occurrences missed while Artemis was down collapse into a single late run.
+The execution engine polls the scheduled-prompt store on a fixed interval — deferring every poll until the Discord gateway's ready handshake completes, so no job fires into a client that cannot yet resolve its channels — and runs each due job in the conversation's serialized queue, so a fired turn can never race a live user turn; see [Scheduler execution engine](scheduler-execution.md) for the authoritative contract. The engine submits the stored prompt framed with a strict JSON response contract to PI with full tool access, validates the agent's entire reply as one JSON object before anything is posted, posts `message` content to the target channel through the ordinary outbound path (embed suppression and Discord-safe splitting included), and honors `silent` by posting nothing. One-time jobs end `completed` after firing; recurring jobs record `last_run_at` and re-arm, so a fired occurrence can never double-post and occurrences missed while Artemis was down collapse into a single late run.
 
 ### Reconnection and restart
 

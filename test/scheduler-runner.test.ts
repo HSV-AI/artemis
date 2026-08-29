@@ -435,6 +435,78 @@ describe("SchedulerRunner", () => {
     expect(repository.markScheduledPromptFired).toHaveBeenCalledWith("job-bad", "2026-08-30T14:20:00.001Z");
   });
 
+  it("defers firing while Discord is not ready and leaves the occurrence unconsumed", async () => {
+    const scheduled = job({ schedule: { type: "once", atUtc: "2026-08-30T14:00:00.000Z" } });
+    const repository = repositoryMock([scheduled]);
+    const conversations = {
+      runExclusive: vi.fn(),
+      runScheduledPrompt: vi.fn().mockResolvedValue(null)
+    };
+    const dispatcher = { sendToConversation: vi.fn().mockResolvedValue(true) };
+    const logger = createLoggerMock();
+    const ready = () => false;
+    const runner = new SchedulerRunner({
+      repository: repository as unknown as ArtemisRepository,
+      conversations: conversations as never,
+      dispatcher: dispatcher as never,
+      logger,
+      now: () => new Date("2026-08-30T14:30:00.000Z"),
+      ready
+    });
+
+    await runner.runOnce();
+    await runner.runOnce(); // repeated ticks stay deferred
+
+    // Nothing runs pre-ready: no listing, no consumption, no generation, no
+    // post. The occurrence is still due and the next ready tick takes it.
+    expect(repository.listActiveScheduledPrompts).not.toHaveBeenCalled();
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+    expect(conversations.runScheduledPrompt).not.toHaveBeenCalled();
+    expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(
+      "scheduler_deferred_not_ready",
+      expect.anything()
+    );
+  });
+
+  it("fires a due one-time job and posts its valid JSON response once Discord becomes ready", async () => {
+    const scheduled = job({ schedule: { type: "once", atUtc: "2026-08-30T14:00:00.000Z" } });
+    const repository = repositoryMock([scheduled]);
+    const conversations = {
+      runExclusive: vi.fn(),
+      runScheduledPrompt: vi.fn().mockResolvedValue({
+        text: '{"type":"message","content":"Good morning!"}',
+        model: "test-model"
+      })
+    };
+    const dispatcher = { sendToConversation: vi.fn().mockResolvedValue(true) };
+    const logger = createLoggerMock();
+    let ready = false;
+    const runner = new SchedulerRunner({
+      repository: repository as unknown as ArtemisRepository,
+      conversations: conversations as never,
+      dispatcher: dispatcher as never,
+      logger,
+      now: () => new Date("2026-08-30T14:30:00.000Z"),
+      ready: () => ready
+    });
+
+    await runner.runOnce(); // still deferred pre-ready
+    ready = true;
+    await runner.runOnce(); // ready tick runs the full chained regression
+
+    expect(repository.completeScheduledPrompt).toHaveBeenCalledTimes(1);
+    expect(conversations.runScheduledPrompt).toHaveBeenCalledWith(scheduled);
+    expect(dispatcher.sendToConversation).toHaveBeenCalledWith(CONVERSATION, "Good morning!");
+    expect(repository.recordEvent).toHaveBeenCalledWith(
+      "scheduled_prompt_fired",
+      expect.objectContaining({
+        conversationKey: CONVERSATION.key,
+        details: expect.objectContaining({ jobId: "job-1", outcome: "posted" })
+      })
+    );
+  });
+
   it("leaves the job due when consuming the occurrence fails in storage", async () => {
     const repository = repositoryMock([job({ createdAt: "2026-08-30T14:00:00.000Z" })]);
     repository.markScheduledPromptFired.mockImplementation(() => {
