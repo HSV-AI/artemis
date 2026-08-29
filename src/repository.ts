@@ -477,7 +477,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       .prepare(
         `SELECT * FROM scheduled_prompts
          WHERE conversation_key = ? AND status = 'active'
-         ORDER BY created_at ASC, id ASC`
+         ORDER BY created_at ASC, rowid ASC`
       )
       .all(conversationKey) as ScheduledPromptRow[];
     return rows.map((row) => this.mapScheduledPrompt(row));
@@ -488,7 +488,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       .prepare(
         `SELECT * FROM scheduled_prompts
          WHERE conversation_key = ?
-         ORDER BY created_at ASC, id ASC`
+         ORDER BY created_at ASC, rowid ASC`
       )
       .all(conversationKey) as ScheduledPromptRow[];
     return rows.map((row) => this.mapScheduledPrompt(row));
@@ -530,7 +530,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
         ids = (this.database
           .prepare(
             `SELECT id FROM scheduled_prompts WHERE ${clauses.join(" AND ")}
-             ORDER BY created_at ASC, id ASC`
+             ORDER BY created_at ASC, rowid ASC`
           )
           .all(...params) as { id: string }[]).map((row) => row.id);
       }
@@ -640,7 +640,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       .prepare(
         `SELECT * FROM scheduled_prompts
          WHERE status = 'active'
-         ORDER BY created_at ASC, id ASC`
+         ORDER BY created_at ASC, rowid ASC`
       )
       .all() as ScheduledPromptRow[];
     return rows.map((row) => this.mapScheduledPrompt(row));

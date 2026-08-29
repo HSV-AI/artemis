@@ -4,7 +4,8 @@
 
 Implemented.
 
-Source: [HSV-AI/artemis issue #53](https://github.com/HSV-AI/artemis/issues/53).
+Source: [HSV-AI/artemis issue #53](https://github.com/HSV-AI/artemis/issues/53); invalid-response
+correction retries from [issue #65](https://github.com/HSV-AI/artemis/issues/65).
 
 ## Problem
 
@@ -14,8 +15,10 @@ an execution engine that polls stored schedules, runs each due prompt through th
 full Artemis agent inside the target DM or Channel Group's own session, validates the
 agent's response as JSON before anyone sees it, and posts the result — or says
 nothing on purpose. Without strict validation, untrusted agent output would flow
-straight into a channel; without durable fire bookkeeping, restarts would re-fire or
-miss runs. And without reusing the fire-time authorization gate from
+straight into a channel; without a correction path, a model that answers in prose
+instead of the required JSON would waste the whole run; without durable fire
+bookkeeping, restarts would re-fire or miss runs. And without reusing the fire-time
+authorization gate from
 [issue #52](scheduler-tools.md), a fired job would bypass the allow-list and
 membership checks the interactive pipeline enforces.
 
@@ -27,7 +30,8 @@ This protocol owns:
   and submits every job through the fire-time authorization gate
   (`ConversationService.runScheduledPrompt`)
 - the scheduler-fired prompt framing and its strict JSON response contract
-- response validation (`message` posts, `silent` stays silent) before any posting
+- response validation (`message` posts, `silent` stays silent) before any posting,
+  with correction prompts re-asking the agent when a reply is invalid
 - the Discord delivery path for scheduler output (`sendToConversation`)
 - the execution-store operations that cross conversations inside the process
   boundary (`listActiveScheduledPrompts`, `markScheduledPromptFired`,
@@ -70,10 +74,21 @@ agent as the task; the gate wraps it in the engine's response-contract framing:
 - `{ "type": "message", "content": "…" }` posts `content` to the target channel;
 - `{ "type": "silent" }` completes the run and posts nothing.
 
-The engine validates the JSON before posting anything. One enclosing markdown code
-fence is tolerated (models emit ` ```json ` fences habitually); anything else —
-prose, partial JSON, arrays, null, unknown or missing types, empty message content —
-is invalid. An invalid response results in no post and an error log.
+The fire-time gate validates every generation attempt against this contract before
+returning. One enclosing markdown code fence is tolerated (models emit ` ```json `
+fences habitually); anything else — prose, partial JSON, arrays, null, unknown or
+missing types, empty message content — is invalid. While the reply is invalid and
+tries remain, the gate issues a **correction prompt** to the agent inside the same
+durable session, so the model can see its own invalid reply and fix it. The
+correction restates every valid option: exactly one JSON object, either
+`{ "type": "message", "content": "…" }` (with a required non-empty string
+`content`) or `{ "type": "silent" }` (no `content`), with no fences or commentary.
+The agent gets at most **three tries** per fired occurrence — the original framed
+turn plus at most two corrections; each attempt's assistant reply is persisted for
+full history fidelity. A valid `silent` ends the run silently at any attempt, in the
+normal and correction cases alike. After the third invalid try the gate returns the
+final result untouched; the engine re-validates it, refuses to post anything that
+fails, and finishes the run with no post — broken JSON never reaches a channel.
 
 A valid `message` response is posted to the target channel through the same outbound
 Discord path as ordinary answers (link-embed suppression, Discord-safe splitting at
@@ -97,7 +112,8 @@ ConversationService.runScheduledPrompt(job) --------------------------> authoriz
   ChannelMembershipChecker against live Discord state ----------------> membership decision
   KeyedSerialQueue on the conversation key ---------------------------> serialized turn
   PiGateway.generate( framing + stored prompt ) ----------------------> agent result (persisted)
-parseScheduledResponse(agent text) ------------------------------------> message | silent | invalid
+  gate-side reply validation + correction prompts -------------------> up to 3 tries in the durable session
+parseScheduledResponse(agent text) ------------------------------------> message | silent | invalid (engine re-validates before posting)
 DiscordGateway.sendToConversation(identity, content) ------------------> Discord post
 ```
 
@@ -147,14 +163,17 @@ to an unattributed scheduler, which the gate refuses to run), then rebuilt by
 migration 9. Cancelled jobs stay cancelled with
 their rows intact; the engine never touches them.
 
-A scheduler-fired turn reuses the conversation's active durable session (creating
+A scheduler-fired run reuses the conversation's active durable session (creating
 one when the conversation has none, for example after `/clear-session` or before the
 first message). The gate persists the turn like any other exchange: one user row
-carrying the raw stored prompt attributed to the scheduling user, and — after
-successful generation — one assistant row containing the agent's full JSON reply
-plus reasoning, diagnostics, and model. Only the parsed `message` content is posted
-to Discord, so history keeps full fidelity while the channel sees only validated
-text.
+carrying the raw stored prompt attributed to the scheduling user, and — after each
+generation attempt — one assistant row containing that attempt's full reply plus
+reasoning, diagnostics, and model. Correction retries add one user row per
+correction (the correction framing, attributed to the scheduling user with a
+`scheduled:<job id>:<run id>:correction-<n>` source message id) and one assistant
+row per follow-up attempt, so history keeps full fidelity with what the model
+actually received. Only parsed `message` content is posted
+to Discord, so the channel sees only validated text.
 
 ## Security and privacy
 
@@ -182,10 +201,16 @@ and never sent anywhere else.
   retry-storm.
 - Generation failure (provider, harness, or empty output): the gate records
   `scheduled_prompt_failed` and returns null; the engine posts nothing; the
-  occurrence is consumed.
+  occurrence is consumed. Empty output is a generation failure, not a correction
+  trigger; a correction turn that produces empty output fails the run the same way
+  (already-issued corrections stay persisted for the audit history).
 - Invalid agent JSON (including missing, unknown, or empty-message types, and any
-  surrounding prose beyond one code fence): `scheduled_prompt_invalid_response`
-  error log with a bounded response preview plus a durable event; nothing is posted;
+  surrounding prose beyond one code fence): the gate persists the invalid reply,
+  logs `scheduled_prompt_correction_issued` at warn level (with the attempt number
+  and a bounded preview), and issues a correction prompt — up to two corrections
+  after the original attempt. On exhaustion (three invalid tries) the gate returns
+  the final result untouched; the engine logs `scheduled_prompt_invalid_response`
+  (error) with a bounded response preview plus a durable event; nothing is posted;
   the occurrence is consumed.
 - Delivery failure (channel fetch rejection, an unresolved channel, a non-sendable
   channel, or an SDK send error): `scheduler_channel_unavailable`,
@@ -210,11 +235,14 @@ and never sent anywhere else.
 ## Verification
 
 - `test/scheduler-runner.test.ts` covers JSON validation (message, silent, fences,
-  and every invalid shape), the fired-prompt framing, due-occurrence resolution
+  and every invalid shape), the fired-prompt framing, the three-attempt
+  `SCHEDULER_RESPONSE_MAX_ATTEMPTS` bound and the correction framing (both valid
+  shapes, the required `content` field, JSON-only output), due-occurrence resolution
   from creation and `last_run_at`, DST-correct weekly re-arms, missed-occurrence
   collapse, consumption before execution (at-most-once), message posting, silent
   completion, posting through `sendToConversation` with the parsed identity, the
-  invalid-response and delivery-failure paths, unroutable keys, the start/stop
+  invalid-response and delivery-failure paths (the engine submits the job once and
+  never retries it itself), unroutable keys, the start/stop
   interval lifecycle with in-flight tick skipping, deferral of whole ticks until the
   Discord readiness gate passes (nothing listed or consumed pre-ready, then the full
   chain fire → valid JSON → posted once ready), and unchanged firing when no gate is
@@ -231,12 +259,21 @@ and never sent anywhere else.
   channel and DM allow-lists before any membership lookup, refuse unparseable
   scopes and unattributed jobs, proceed logged-unverified on unreachable checks,
   serialize behind interactive traffic on the same conversation key, and record
-  failures without posting.
+  failures without posting. The correction-retry suite covers: one correction
+  prompt issued on invalid JSON with the valid second attempt returned in the same
+  durable session and scope; a valid `silent` accepted in the correction case; no
+  correction when the first reply is already valid; exhaustion after three invalid
+  tries (exactly two corrections, `responseAttempts: 3`, final result returned
+  untouched for the engine to refuse); empty output remaining a generation failure
+  without a correction; and a thrown correction retry returning null with
+  `scheduled_prompt_failed` while the invalid attempt stays persisted.
 - `test/repository.test.ts` covers the execution-store operations (cross-conversation
   listing, re-arm persistence across reopen, completion), the fresh-bootstrap schema
   including `last_run_at` and `scheduled_by_user_id`, the incremental
-  migration-6-through-9 path, the additive migration-8 attribution upgrade, and the
-  migration-9 rebuild that preserves jobs and history from a migration-8 database.
+  migration-6-through-9 path, the additive migration-8 attribution upgrade, the
+  migration-9 rebuild that preserves jobs and history from a migration-8 database,
+  and deterministic creation-order listing (a `rowid` tiebreak keeps same-millisecond
+  records in insertion order).
 - `test/discord-gateway.test.ts` covers `sendToConversation`: suppression flags,
   per-channel embed allowlists, long-content splitting, non-sendable channels, and
   unresolvable channels.
