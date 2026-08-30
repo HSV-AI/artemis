@@ -1234,7 +1234,11 @@ export function createSchedulerTools(
         case "not-run":
           return textResult(
             `Error: scheduled prompt ${id} could not be executed — the fire-time authorization ` +
-            "gate denied the run or generation failed, and nothing was posted."
+            "gate denied the run or generation failed, and nothing was posted.\n" +
+            // The executor consumed the occurrence before the gate ran (issue
+            // #70), so the reply must not leave a consumed one-time task
+            // sounding like it will still fire later.
+            lifecycleNote
           );
       }
     }

@@ -1721,6 +1721,24 @@ describe("run_scheduled_task", () => {
     expect(text).toMatch(/nothing was posted/i);
   });
 
+  it("notes the consumed occurrence on a not-run outcome for one-time and recurring schedules", async () => {
+    const store = storeMock([
+      activeJob({ id: "job-once-denied", schedule: { type: "once", atUtc: "2026-09-01T14:00:00.000Z" } }),
+      activeJob({ id: "job-daily-denied" })
+    ]);
+    const runTool = runToolOf(store, runnerMock({ status: "not-run" }));
+
+    // The executor consumed the occurrence before denying the run, so the
+    // one-time task must not be left sounding like it will still fire later.
+    const onceText = await executeTool(runTool, { id: "job-once-denied" });
+    expect(onceText).toContain("Error:");
+    expect(onceText).toContain("completed and will not fire again");
+
+    const dailyText = await executeTool(runTool, { id: "job-daily-denied" });
+    expect(dailyText).toContain("Error:");
+    expect(dailyText).toContain("schedule continues");
+  });
+
   it("errors on an unknown or foreign id without touching the runner", async () => {
     const store = storeMock([activeJob({ id: "job-mine" })]);
     const runner = runnerMock();
