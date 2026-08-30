@@ -18,7 +18,8 @@ import type {
   PiGenerationInput,
   PiGenerationResult,
   PiSessionStore,
-  ScheduledPromptStore
+  ScheduledPromptStore,
+  ScheduledTaskRunner
 } from "./domain.js";
 import { createGitHubTools } from "./github-tools.js";
 import { loadHsvaiEventCatalog } from "./hsvai-event-catalog.js";
@@ -179,6 +180,7 @@ export class PiSdkGateway implements PiGateway {
   private readonly knowledge: HsvaiKnowledge;
   private readonly timezoneStore: ChannelTimezoneStore | undefined;
   private readonly schedulerStore: ScheduledPromptStore | undefined;
+  private readonly scheduledTaskRunner: (() => ScheduledTaskRunner | undefined) | undefined;
 
   public constructor(
     private readonly config: Pick<ArtemisConfig, "model" | "persona"> &
@@ -197,7 +199,15 @@ export class PiSdkGateway implements PiGateway {
     logger?: Pick<Logger, "info" | "warn">,
     timezoneStore?: ChannelTimezoneStore,
     schedulerStore?: ScheduledPromptStore,
-    private readonly membership?: ChannelMembershipChecker
+    private readonly membership?: ChannelMembershipChecker,
+    /**
+     * Lazy handle on the scheduler execution engine, resolving to the engine's
+     * on-demand executor once the composition has built it (the engine is
+     * constructed after this gateway). The run_scheduled_task tool is only
+     * registered when this resolves, and never for scheduler-fired
+     * generations, so scheduled execution cannot recurse.
+     */
+    scheduledTaskRunner?: () => ScheduledTaskRunner | undefined
   ) {
     const dgraph = new DgraphClient(
       config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
@@ -217,6 +227,7 @@ export class PiSdkGateway implements PiGateway {
     this.memory = new GraphMemory(dgraph);
     this.timezoneStore = timezoneStore;
     this.schedulerStore = schedulerStore;
+    this.scheduledTaskRunner = scheduledTaskRunner;
     const sourceCachePath = config.sqlitePath && config.sqlitePath !== ":memory:"
       ? join(dirname(config.sqlitePath), "hsvai-source-cache.json")
       : undefined;
@@ -274,6 +285,12 @@ export class PiSdkGateway implements PiGateway {
     // The conversation's stored timezone is resolved by the harness and
     // injected into the scheduler tools; the model cannot set it per call.
     const defaultTimezone = this.timezoneStore?.getChannelTimezone(input.conversationKey);
+    // Scheduler-fired generations (engine polls and on-demand runs alike) are
+    // flagged by the conversation service: they never receive the
+    // run_scheduled_task tool, so scheduled execution cannot recurse.
+    const scheduledTaskRunner = !input.scheduledRun
+      ? this.scheduledTaskRunner?.()
+      : undefined;
     const customTools = [
       ...this.customTools,
       createHsvaiKnowledgeTool(this.knowledge, hsvaiCorpusRevision),
@@ -292,13 +309,15 @@ export class PiSdkGateway implements PiGateway {
       // Scheduler tools are bound to the harness-injected conversation key,
       // scheduling user, and membership authority, plus the conversation's
       // stored timezone. Model parameters cannot supply or override the
-      // channel identity, the scheduling user, or the default timezone.
+      // channel identity, the scheduling user, or the default timezone. The
+      // run tool joins only when the composition wired the engine's executor.
       ...(this.schedulerStore
         ? createSchedulerTools(this.schedulerStore, {
             conversationKey: input.conversationKey,
             schedulingUserId: input.authorId,
             ...(defaultTimezone === undefined ? {} : { defaultTimezone }),
-            ...(this.membership === undefined ? {} : { membership: this.membership })
+            ...(this.membership === undefined ? {} : { membership: this.membership }),
+            ...(scheduledTaskRunner === undefined ? {} : { runner: scheduledTaskRunner })
           })
         : [])
     ];
@@ -443,7 +462,10 @@ export class PiSdkGateway implements PiGateway {
     tools: readonly ToolRegistryEntry[],
     hsvaiCorpusRevision: string
   ): Promise<DefaultResourceLoader> {
-    const cacheKey = input.conversationKind;
+    // Scheduler-fired generations register a different tool set (no
+    // run_scheduled_task), so each conversation kind keeps a loader per
+    // flavor instead of sharing one whose prompt registry could go stale.
+    const cacheKey = `${input.conversationKind}:${input.scheduledRun ? "scheduled" : "interactive"}`;
     const existing = this.resourceLoaders.get(cacheKey);
     if (existing?.hsvaiCorpusRevision === hsvaiCorpusRevision) {
       return existing.loader;

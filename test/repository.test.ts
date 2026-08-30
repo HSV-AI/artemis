@@ -1024,7 +1024,7 @@ describe("ArtemisRepository", () => {
     expect(repository.listScheduledPromptHistory("dm:one")).toHaveLength(1);
   });
 
-  it("updates an ongoing job's schedule for every recurrence shape and preserves the prompt", () => {
+  it("updates an ongoing job's schedule for every recurrence shape and preserves the prompt", async () => {
     repository = new ArtemisRepository(":memory:");
     const recurring = repository.createScheduledPrompt("dm:one", {
       prompt: "standup",
@@ -1032,6 +1032,10 @@ describe("ArtemisRepository", () => {
       responseType: "message",
       scheduledByUserId: "user-1"
     });
+    // created_at carries millisecond precision and equal timestamps tie-break
+    // randomly by UUID in the listing order; force distinct creation instants
+    // so the creation-order assertion below stays deterministic.
+    await new Promise((resolve) => setTimeout(resolve, 2));
     const once = repository.createScheduledPrompt("dm:one", {
       prompt: "one-time",
       schedule: { type: "once", atUtc: "2026-09-01T14:15:00.000Z" },

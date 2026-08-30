@@ -6,7 +6,9 @@ Source: [HSV-AI/artemis issue #51](https://github.com/HSV-AI/artemis/issues/51);
 authorization and channel scoping follow [issue #52](https://github.com/HSV-AI/artemis/issues/52);
 the audit-log history, pruning, and resume surface follow
 [issue #60](https://github.com/HSV-AI/artemis/issues/60); in-place editing of
-ongoing jobs follows [issue #64](https://github.com/HSV-AI/artemis/issues/64).
+ongoing jobs follows [issue #64](https://github.com/HSV-AI/artemis/issues/64);
+immediate on-demand execution through the engine follows
+[issue #67](https://github.com/HSV-AI/artemis/issues/67).
 
 ## Problem
 
@@ -32,8 +34,8 @@ recreating it, which discarded the job's id and creation history.
 This protocol owns:
 
 - the `schedule_prompt`, `list_scheduled_prompts`, `cancel_scheduled_prompt`,
-  `prune_scheduled_prompt`, `resume_scheduled_prompt`, and
-  `update_scheduled_prompt` PI custom tools
+  `prune_scheduled_prompt`, `resume_scheduled_prompt`, `update_scheduled_prompt`,
+  and `run_scheduled_task` PI custom tools
 - the `PromptSchedule`, `ScheduledPromptRecord`, `ScheduledPromptStatus`,
   `ScheduledPromptPruneFilter`, `ScheduledPromptPruneResult`,
   `ScheduledPromptUpdate`, and `ScheduledPromptStore` domain contracts
@@ -41,7 +43,7 @@ This protocol owns:
 - recurrence-resolution helpers: strict `HH:MM` parsing, ISO-8601 `at`
   resolution, strict RFC3339 cutoff parsing, and DST-correct
   next-occurrence computation
-- the trust boundary that binds all six tools to the harness-injected
+- the trust boundary that binds all seven tools to the harness-injected
   conversation key
 - the scheduler authorization model: creation-time membership verification for
   the harness-injected scheduling user, and the fire-time authorization gate
@@ -54,8 +56,12 @@ It does not define the execution loop that polls due jobs, wraps them for a
 JSON response, validates that JSON, or posts output to Discord; the execution
 engine (issue #53) must run every job through the authorization gate defined
 here (`ConversationService.runScheduledPrompt`) and is specified by
-[scheduler-execution.md](scheduler-execution.md). It does not change memory,
-timezone, or knowledge-tool contracts.
+[scheduler-execution.md](scheduler-execution.md). The engine also owns the
+immediate-run executor behind `run_scheduled_task`, which runs a stored job
+through the same gate, validation, and delivery on demand; that path is
+specified in [scheduler-execution.md](scheduler-execution.md), while this
+document defines the tool's parameters, scoping, and error cases.
+It does not change memory, timezone, or knowledge-tool contracts.
 
 ## Trust boundary and authorization (issue #52)
 
@@ -106,8 +112,10 @@ result to the engine without posting anything.
 
 ## Observable behavior
 
-Artemis registers the six scheduler tools for every conversation kind (DM
-and guild) whenever a scheduled-prompt store is configured.
+Artemis registers the scheduler tools for every conversation kind (DM and
+guild) whenever a scheduled-prompt store is configured. The six management
+tools are always registered; `run_scheduled_task` joins them only when the
+composition wired the execution engine's immediate-run executor.
 
 `schedule_prompt` takes `prompt`, `schedule`, and optional `response_type`
 (default `message`). The schedule is exactly one of:
@@ -247,6 +255,37 @@ edit and a schedule change can never re-fire an already-consumed
 occurrence. The next run in the answer is derived from the new schedule
 (or recomputed from the stored one when only the prompt changed).
 
+`run_scheduled_task` executes one of this conversation's scheduled prompts
+**immediately**, through the same executor and framework that fire scheduled
+prompts (see [scheduler-execution.md](scheduler-execution.md)). Parameters:
+
+- `id` (required): schedule ID of an `ongoing` record, from
+  `schedule_prompt` or `list_scheduled_prompts`.
+
+The run behaves exactly like a real scheduled fire: the occurrence is consumed
+first (a one-time task is marked `completed` and will not fire again; a
+recurring task re-arms via `last_run_at` and its recurring schedule
+continues), the [fire-time authorization gate](#trust-boundary-and-authorization)
+re-checks the stored scope and the scheduling user's live membership before
+any generation, the task generates inside its conversation's durable session
+with the same permissions, and the strict JSON response contract is applied
+identically — `message` content posts to the channel, `silent` posts nothing,
+invalid JSON posts nothing and records `scheduled_prompt_invalid_response`.
+The tool's answer reports the outcome: the posted content for `message`, the
+silent completion, a bounded response preview for invalid responses, or a
+clear error when the authorization gate denied the run or generation failed.
+The tool is only registered when the composition wired the engine's
+immediate-run executor, and it is never registered for scheduler-fired
+generations themselves — a scheduled fire cannot trigger further on-demand
+runs, so scheduled execution cannot recurse.
+
+Error cases mirror the other scoped tools: an unknown or foreign `id`
+(partly another conversation's record, or already pruned) answers with an
+error naming the id and the harness-injected conversation and runs nothing;
+a blank id is refused; a canceled record is refused with a pointer at
+`resume_scheduled_prompt`; a completed record is refused as retired history.
+Only `active` records can run on demand.
+
 ## Contracts and data flow
 
 The harness injects the conversation context at generation time, exactly like
@@ -261,6 +300,7 @@ listScheduledPromptHistory(key) -------------------------> audit view (all statu
 pruneScheduledPrompts(key, filter) ----------------------> hard delete + summary
 resumeScheduledPrompt(key, id, schedule) ----------------> canceled row -> ongoing
 updateScheduledPrompt(key, id, changes) -----------------> in-place edit of an ongoing row
+runScheduledTaskNow(record) (engine, composition-wired) -> immediate on-demand fire
 ```
 
 Tool parameters have no channel-identity surface at all. Extra unknown
@@ -275,7 +315,11 @@ normalized-UTC `before` cutoff over `created_at`); resume locates a
 in one update; update takes a `ScheduledPromptUpdate` object (optional
 `prompt`, optional `schedule`) and rewrites only the supplied fields of an
 `active` row, leaving the id, `created_at`, response type, attribution,
-and `last_run_at` untouched.
+and `last_run_at` untouched. The run tool takes only an `id` and delegates
+to the engine's `ScheduledTaskRunner` (the `SchedulerRunner`
+`runScheduledTaskNow` method, wired lazily by the composition because the
+engine is constructed after the PI gateway); it holds no dispatch, storage,
+or authorization logic of its own.
 
 A validated schedule is stored as either an absolute UTC instant (`once`,
 `atUtc`) or a zone-local wall-clock time (`time`, `HH:MM` 24-hour) plus the
@@ -293,10 +337,13 @@ channel; `silent` suppresses posting).
 
 ## Configuration
 
-No new settings. The tools register whenever a repository-backed
+No new settings. The management tools register whenever a repository-backed
 `ScheduledPromptStore` is wired into the PI gateway, which the application
 composition does unconditionally; the gateway omits the tools only when no
-store is provided (for example in narrow unit tests).
+store is provided (for example in narrow unit tests). `run_scheduled_task`
+additionally requires the composition's `ScheduledTaskRunner` handle on the
+scheduler execution engine (provided unconditionally by the composition;
+absent in narrow unit tests that inject only a partial scheduler stub).
 
 ## Persistence
 
@@ -364,10 +411,10 @@ Pruned records are unrecoverable; there is no undo and no tombstone.
 Both the DM or Channel Group identity and the scheduling-user identity are
 passed by the harness from derived Discord context, never supplied by the
 model. The mutation parameters contain no channel identity: the model cannot
-schedule, list, cancel, prune, resume, or update a job for a conversation it
-is not actually in, nor attribute a job to anyone other than the verified
-author. The prune, resume, and update tools accept an explicit `scope`
-parameter only as an authorization statement — a scope that does not
+schedule, list, cancel, prune, resume, update, or run a job for a
+conversation it is not actually in, nor attribute a job to anyone other than
+the verified author. The prune, resume, and update tools accept an explicit
+`scope` parameter only as an authorization statement — a scope that does not
 exactly match the harness-injected conversation key is refused before any
 store call, so cross-conversation pruning, resuming, and updating are
 impossible regardless of what the model supplies. Prune, resume, and update
@@ -375,18 +422,26 @@ do not re-run the creation-time membership check (matching
 `cancel_scheduled_prompt`): record management is bound to the injected
 conversation, and the fire-time gate re-checks the scheduling user's
 membership before any resumed or edited job actually runs.
-Creation-time membership is verified against live Discord state before any
-parameter validation, so an unauthorized or unverifiable caller learns nothing
-about schedule semantics. At fire time the pure scope gate re-applies the
-interactive pipeline's allow-list rules to the stored scope before any
-Discord or generation work, and the membership re-check drops jobs whose user
-has provably lost access. The list tool's output — ongoing and, with
-`include_history`, historical records alike — is fenced as stored data so
-prompt text cannot masquerade as new instructions, and the system prompt's
-tool guidelines tell the model to schedule, cancel, prune, resume, and
-update only on explicit user requests. Prune is destructive to records: it
-is validated to require an explicit selection (an ID or at least one
-filter), reports removed IDs, and refuses blanket deletes of an entire
+`run_scheduled_task` takes no scope or identity parameter at all: its lookup
+is scoped to the injected key (a foreign id is simply not found), and the
+gate re-authorizes the stored scheduling user before anything runs, so a
+run never exceeds the permissions of the conversation it belongs to. The
+immediate-run executor is wired only by the composition and only for
+interactive generations — scheduler-fired generations never see the tool
+(the gateway strips it when the generation is flagged `scheduledRun`), so a
+fired task cannot trigger further runs and on-demand execution cannot
+recurse. Creation-time membership is verified against live Discord state
+before any parameter validation, so an unauthorized or unverifiable caller
+learns nothing about schedule semantics. At fire time the pure scope gate
+re-applies the interactive pipeline's allow-list rules to the stored scope
+before any Discord or generation work, and the membership re-check drops
+jobs whose user has provably lost access. The list tool's output — ongoing
+and, with `include_history`, historical records alike — is fenced as stored
+data so prompt text cannot masquerade as new instructions, and the system
+prompt's tool guidelines tell the model to schedule, cancel, prune, resume,
+update, and run only on explicit user requests. Prune is destructive to
+records: it is validated to require an explicit selection (an ID or at least
+one filter), reports removed IDs, and refuses blanket deletes of an entire
 conversation. Update is intentionally non-destructive to both the record
 and its history: it only rewrites an ongoing row's prompt and schedule
 columns, so ids and creation instants never move and the fire marker's
@@ -413,6 +468,16 @@ the harness-derived identities, and nothing else.
   mutation.
 - Unknown or foreign `id` on cancel: error naming the id and conversation; no
   mutation.
+- `run_scheduled_task` with a blank `id`, an unknown or foreign `id`, a
+  canceled record (points at `resume_scheduled_prompt`), or a completed
+  record (retired history): descriptive error naming the id and conversation;
+  the runner is never invoked and nothing is consumed or generated.
+- `run_scheduled_task` when no immediate-run executor is wired: refusal
+  naming the unavailability; nothing runs (the tool is not registered when
+  no executor is configured, so this path only guards a misconfiguration).
+- A stale non-active record reaching the executor (between lookup and run):
+  the engine refuses inactive records with `scheduled_task_run_refused_inactive`
+  and reports `not-run`; nothing is consumed or generated.
 - `include_history` that is not a boolean: descriptive error; no mutation;
   the default listing path is never taken.
 - `prune_scheduled_prompt` with both an `id` and a bulk filter, or with
@@ -481,6 +546,10 @@ the harness-derived identities, and nothing else.
   canceled/completed/unknown refusals, blank-prompt and no-change
   refusals, cross-scope refusal, no-op reporting when the row is no longer
   active, and the registry metadata now advertising six scheduler tools), the
+  run tool (registration only with a wired executor, posted content and
+  lifecycle notes in the answer, silent/invalid/undelivered/not-run
+  reporting, unknown/foreign/blank/canceled/completed refusals without
+  runner invocations, injected-key scoping, and registry metadata), the
   creation-time membership gate (missing user, unwired checker, unknown
   answer, non-member refusal with no schedule-validation leak, membership
   precedence over parameter validation, harness-injected user storage,
@@ -513,7 +582,7 @@ the harness-derived identities, and nothing else.
   scopes and unattributed jobs, proceed logged-unverified on unreachable
   checks, serialize behind interactive traffic on the same conversation key,
   and record failures without posting.
-- `test/pi-gateway.test.ts` proves the six tools are registered for a
+- `test/pi-gateway.test.ts` proves the scheduler tools are registered for a
   generation call, bound to the harness-injected conversation key, scheduling
   user (from the generation-input author), and membership checker, with the
   stored channel timezone as the default, advertised in the system-prompt

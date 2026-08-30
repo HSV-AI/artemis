@@ -40,7 +40,7 @@ export interface ApplicationDependencies {
   pi?: PiGateway;
   discord?: DiscordGateway;
   discordClient?: Client;
-  scheduler?: Pick<SchedulerRunner, "start" | "stop">;
+  scheduler?: Pick<SchedulerRunner, "start" | "stop" | "runScheduledTaskNow">;
 }
 
 export class ArtemisApplication {
@@ -48,7 +48,7 @@ export class ArtemisApplication {
   private readonly repository: ArtemisRepository;
   private readonly pi: PiGateway;
   private readonly discord: DiscordGateway;
-  private readonly scheduler: Pick<SchedulerRunner, "start" | "stop">;
+  private readonly scheduler: Pick<SchedulerRunner, "start" | "stop" | "runScheduledTaskNow">;
 
   public constructor(
     private readonly config: ArtemisConfig,
@@ -69,7 +69,11 @@ export class ArtemisApplication {
         this.repository,
         // Scheduler authorization runs against the same live Discord state the
         // gateway itself uses, so the harness answer is always authoritative.
-        this.discordMembership(discordClient)
+        this.discordMembership(discordClient),
+        // The scheduler execution engine is built below, after this gateway;
+        // the lazy handle resolves once it exists, giving run_scheduled_task
+        // the same immediate-run executor that fires due occurrences.
+        () => this.scheduler
       );
     const conversations = new ConversationService(
       {

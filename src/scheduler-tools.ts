@@ -7,7 +7,8 @@ import type {
   ScheduledPromptRecord,
   ScheduledPromptStatus,
   ScheduledPromptStore,
-  ScheduledPromptUpdate
+  ScheduledPromptUpdate,
+  ScheduledTaskRunner
 } from "./domain.js";
 import { formatZonedInstant, isValidTimezone } from "./timezone-tools.js";
 
@@ -26,10 +27,19 @@ export interface SchedulerToolContext {
    * conversation before any job is stored. Also harness-provided.
    */
   membership?: ChannelMembershipChecker | undefined;
+  /**
+   * Immediate-run executor wired by the composition (the scheduler execution
+   * engine). When absent the run_scheduled_task tool is not registered at all;
+   * the other scheduler tools are unaffected.
+   */
+  runner?: ScheduledTaskRunner | undefined;
 }
 
 /** Longest prompt prefix shown by `list_scheduled_prompts`. */
 const PROMPT_PREVIEW_LENGTH = 200;
+
+/** Longest agent-response preview echoed by `run_scheduled_task`. */
+const TOOL_RESPONSE_PREVIEW_LENGTH = 200;
 
 /** Every storage-level status, as accepted by a bulk prune without a status filter. */
 const ALL_PROMPT_STATUSES = [
@@ -1139,12 +1149,113 @@ export function createSchedulerTools(
     }
   });
 
-  return [
-    schedulePrompt,
-    listScheduledPrompts,
-    cancelScheduledPrompt,
-    pruneScheduledPrompt,
-    resumeScheduledPrompt,
-    updateScheduledPrompt
-  ] as const;
+  const runScheduledTask = defineTool({
+    name: "run_scheduled_task",
+    label: "Run Scheduled Task",
+    description:
+      "Execute one of this conversation's ongoing scheduled prompts immediately through the same scheduler executor that fires scheduled prompts, posting its validated response exactly like a normal fire.",
+    promptSnippet: "Run one of this conversation's scheduled prompts immediately",
+    promptGuidelines: [
+      "Only run when the current Discord user explicitly asks to execute a scheduled prompt now.",
+      "Use an id from schedule_prompt or list_scheduled_prompts; only this conversation's scheduled prompts can run.",
+      "Only ongoing records can run immediately; canceled records need resume_scheduled_prompt first and completed records are retired history.",
+      "The run consumes the task's next occurrence like a scheduled fire: a one-time task completes and will not fire again, a recurring task continues at its next occurrence.",
+      "Response handling is identical to a scheduled fire: JSON-validated message content is posted, silent posts nothing, invalid responses post nothing."
+    ],
+    parameters: Type.Object({
+      id: Type.String({
+        description: "ID of the scheduled prompt to run immediately, from schedule_prompt or list_scheduled_prompts"
+      })
+    }),
+    async execute(_toolCallId, params) {
+      const runner = context.runner;
+      if (!runner) {
+        return textResult(
+          "Error: immediate scheduled-task execution is not available in this conversation. " +
+          "Nothing was run."
+        );
+      }
+      const id = typeof params.id === "string" ? params.id.trim() : "";
+      if (id === "") {
+        return textResult("Error: id of the scheduled prompt to run is required.");
+      }
+      // Locate the target in the conversation's audit history first, so an
+      // unknown id (pruned or foreign) is named precisely before any run work
+      // happens. The lookup is scoped to the harness-injected key, so another
+      // conversation's job is just "not found" here.
+      const target = store
+        .listScheduledPromptHistory(context.conversationKey)
+        .find((record) => record.id === id);
+      if (!target) {
+        return textResult(
+          `Error: no scheduled prompt with id "${id}" in ${context.conversationKey}. ` +
+          "It may have been pruned (pruned records no longer exist), or it belongs to another conversation."
+        );
+      }
+      if (target.status !== "active") {
+        const suffix = target.status === "cancelled"
+          ? "Use resume_scheduled_prompt to restore it with a new schedule first."
+          : "Completed one-time records are retired history and cannot run again.";
+        return textResult(
+          `Error: only ongoing scheduled prompts can run immediately; ${id} is currently ` +
+          `${describePromptStatus(target.status)}. ${suffix}`
+        );
+      }
+      const outcome = await runner.runScheduledTaskNow(target);
+      const lifecycleNote = target.schedule.type === "once"
+        ? "The one-time task is now completed and will not fire again."
+        : "The run consumed the occurrence like any scheduled fire; the recurring schedule continues.";
+      switch (outcome.status) {
+        case "posted":
+          return textResult(
+            `Ran scheduled prompt ${id} immediately through the scheduler executor.\n` +
+            `Posted to ${target.conversationKey} (harness-injected):\n${outcome.content}\n` +
+            lifecycleNote
+          );
+        case "silent":
+          return textResult(
+            `Ran scheduled prompt ${id} immediately. The task completed with {"type":"silent"} — ` +
+            `nothing was posted.\n${lifecycleNote}`
+          );
+        case "invalid-response": {
+          const preview = outcome.responsePreview.slice(0, TOOL_RESPONSE_PREVIEW_LENGTH);
+          return textResult(
+            `Ran scheduled prompt ${id} immediately, but the agent response was not a valid ` +
+            "scheduled-task JSON reply, so nothing was posted (same handling as a scheduled fire).\n" +
+            `Response preview: ${preview}\n` +
+            lifecycleNote
+          );
+        }
+        case "undelivered":
+          return textResult(
+            `Error: scheduled prompt ${id} ran, but its response could not be delivered to ` +
+            `${target.conversationKey}. See the scheduler events for details.`
+          );
+        case "not-run":
+          return textResult(
+            `Error: scheduled prompt ${id} could not be executed — the fire-time authorization ` +
+            "gate denied the run or generation failed, and nothing was posted."
+          );
+      }
+    }
+  });
+
+  return context.runner
+    ? [
+        schedulePrompt,
+        listScheduledPrompts,
+        cancelScheduledPrompt,
+        pruneScheduledPrompt,
+        resumeScheduledPrompt,
+        updateScheduledPrompt,
+        runScheduledTask
+      ] as const
+    : [
+        schedulePrompt,
+        listScheduledPrompts,
+        cancelScheduledPrompt,
+        pruneScheduledPrompt,
+        resumeScheduledPrompt,
+        updateScheduledPrompt
+      ] as const;
 }

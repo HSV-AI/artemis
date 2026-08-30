@@ -70,11 +70,53 @@ function harness(jobs: ScheduledPromptRecord[], nowIso: string, agentText: strin
     runExclusive: vi.fn(),
     // The gate (ConversationService.runScheduledPrompt) generates and persists
     // the turn; the engine consumes its unposted result.
-    runScheduledPrompt: vi.fn().mockResolvedValue({ text: agentText, model: "test-model" })
+    runScheduledPrompt: vi.fn().mockResolvedValue({ text: agentText, model: "test-model" }),
+    runScheduledPromptInline: vi.fn().mockResolvedValue({ text: agentText, model: "test-model" })
   };
   const dispatcher = { sendToConversation: vi.fn().mockResolvedValue(true) };
   const logger: Logger = createLoggerMock();
   const at = new Date(nowIso);
+  const runner = new SchedulerRunner({
+    repository: repository as unknown as ArtemisRepository,
+    conversations: conversations as unknown as ConstructorParameters<typeof SchedulerRunner>[0]["conversations"],
+    dispatcher: dispatcher as unknown as ConstructorParameters<typeof SchedulerRunner>[0]["dispatcher"],
+    logger,
+    now: () => new Date(at.getTime())
+  });
+  return { runner, repository, conversations, dispatcher, logger };
+}
+
+function immediateHarness(
+  record: ScheduledPromptRecord,
+  options: {
+    /** Resolved value of the inline gate; defaults to a valid message JSON reply. */
+    inlineResult?: { text: string; model: string } | null | Error;
+    dispatcherResult?: boolean;
+    now?: string;
+  } = {}
+) {
+  const repository = repositoryMock([record]);
+  const conversations = {
+    runExclusive: vi.fn(),
+    runScheduledPrompt: vi.fn(),
+    runScheduledPromptInline: vi.fn(async () => {
+      if (options.inlineResult instanceof Error) {
+        throw options.inlineResult;
+      }
+      if (options.inlineResult === null) {
+        return null;
+      }
+      return options.inlineResult ?? {
+        text: '{"type":"message","content":"Good morning!"}',
+        model: "test-model"
+      };
+    })
+  };
+  const dispatcher = {
+    sendToConversation: vi.fn().mockResolvedValue(options.dispatcherResult ?? true)
+  };
+  const logger: Logger = createLoggerMock();
+  const at = new Date(options.now ?? "2026-08-30T14:20:00.000Z");
   const runner = new SchedulerRunner({
     repository: repository as unknown as ArtemisRepository,
     conversations: conversations as unknown as ConstructorParameters<typeof SchedulerRunner>[0]["conversations"],
@@ -612,5 +654,191 @@ describe("SchedulerRunner", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+describe("SchedulerRunner.runScheduledTaskNow", () => {
+  it("runs an active job immediately: consumes the occurrence, uses the inline gate, posts, and reports posted", async () => {
+    const scheduled = job({ id: "job-now", schedule: { type: "once", atUtc: "2026-09-01T14:00:00.000Z" } });
+    const { runner, repository, conversations, dispatcher, logger } = immediateHarness(scheduled, {
+      inlineResult: { text: '{"type":"message","content":"On demand!"}', model: "test-model" },
+      now: "2026-08-30T15:00:00.000Z"
+    });
+
+    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({
+      status: "posted",
+      content: "On demand!"
+    });
+
+    // The occurrence is consumed first, exactly like an engine fire: a
+    // one-time job completes at the run instant and never fires again.
+    expect(repository.completeScheduledPrompt).toHaveBeenCalledWith(
+      "job-now",
+      "2026-08-30T15:00:00.000Z"
+    );
+    expect(conversations.runScheduledPromptInline).toHaveBeenCalledTimes(1);
+    expect(conversations.runScheduledPromptInline).toHaveBeenCalledWith(scheduled);
+    expect(conversations.runScheduledPrompt).not.toHaveBeenCalled();
+    const consumeOrder = repository.completeScheduledPrompt.mock.invocationCallOrder[0];
+    const gateOrder = conversations.runScheduledPromptInline.mock.invocationCallOrder[0];
+    expect(consumeOrder).toBeDefined();
+    expect(gateOrder).toBeDefined();
+    if (consumeOrder === undefined || gateOrder === undefined) {
+      return;
+    }
+    expect(consumeOrder).toBeLessThan(gateOrder);
+    expect(dispatcher.sendToConversation).toHaveBeenCalledWith(CONVERSATION, "On demand!");
+    expect(repository.recordEvent).toHaveBeenCalledWith(
+      "scheduled_prompt_fired",
+      expect.objectContaining({
+        conversationKey: CONVERSATION.key,
+        details: expect.objectContaining({ jobId: "job-now", outcome: "posted", trigger: "on-demand" })
+      })
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      "scheduled_prompt_fired",
+      expect.objectContaining({ jobId: "job-now", outcome: "posted", trigger: "on-demand" })
+    );
+  });
+
+  it("re-arms a recurring job like an engine fire", async () => {
+    const recurring = job({ id: "job-daily", createdAt: "2026-08-30T14:00:00.000Z" });
+    const { runner, repository } = immediateHarness(recurring, {
+      inlineResult: { text: '{"type":"silent"}', model: "m" },
+      now: "2026-08-30T15:00:00.000Z"
+    });
+
+    await expect(runner.runScheduledTaskNow(recurring)).resolves.toEqual({ status: "silent" });
+    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith(
+      "job-daily",
+      "2026-08-30T15:00:00.001Z"
+    );
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("posts nothing on a silent response and reports silent", async () => {
+    const scheduled = job({ id: "job-silent", responseType: "silent" });
+    const { runner, dispatcher, repository } = immediateHarness(scheduled, {
+      inlineResult: { text: '{"type":"silent"}', model: "m" }
+    });
+
+    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({ status: "silent" });
+    expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
+    expect(repository.recordEvent).toHaveBeenCalledWith(
+      "scheduled_prompt_fired",
+      expect.objectContaining({
+        details: expect.objectContaining({ jobId: "job-silent", outcome: "silent", trigger: "on-demand" })
+      })
+    );
+  });
+
+  it("posts nothing on an invalid response, records the event, and reports invalid-response", async () => {
+    const scheduled = job({ id: "job-invalid" });
+    const { runner, dispatcher, repository, logger } = immediateHarness(scheduled, {
+      inlineResult: { text: "Not JSON at all", model: "m" }
+    });
+
+    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({
+      status: "invalid-response",
+      responsePreview: "Not JSON at all"
+    });
+    expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      "scheduled_prompt_invalid_response",
+      expect.objectContaining({ jobId: "job-invalid" })
+    );
+    expect(repository.recordEvent).toHaveBeenCalledWith(
+      "scheduled_prompt_invalid_response",
+      expect.objectContaining({ details: expect.objectContaining({ jobId: "job-invalid" }) })
+    );
+  });
+
+  it("reports not-run without posting when the inline gate denies or fails the run", async () => {
+    const scheduled = job({ id: "job-denied" });
+    const { runner, dispatcher, logger, repository } = immediateHarness(scheduled, {
+      inlineResult: null
+    });
+
+    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({ status: "not-run" });
+    expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(repository.recordEvent).not.toHaveBeenCalledWith(
+      "scheduled_prompt_invalid_response",
+      expect.anything()
+    );
+  });
+
+  it("logs a failure and reports undelivered when delivery fails", async () => {
+    const scheduled = job({ id: "job-drop" });
+    const { runner, dispatcher, repository, logger } = immediateHarness(scheduled, {
+      dispatcherResult: false
+    });
+
+    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({ status: "undelivered" });
+    expect(dispatcher.sendToConversation).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      "scheduled_prompt_failed",
+      expect.objectContaining({
+        jobId: "job-drop",
+        errorMessage: "Scheduler response could not be delivered to the channel"
+      })
+    );
+    expect(repository.recordEvent).toHaveBeenCalledWith(
+      "scheduled_prompt_failed",
+      expect.objectContaining({ details: expect.objectContaining({ jobId: "job-drop" }) })
+    );
+  });
+
+  it("reports undelivered for an unresolvable stored conversation key", async () => {
+    const scheduled = job({ id: "job-unroutable", conversationKey: "not-a-key" });
+    const { runner, dispatcher, logger } = immediateHarness(scheduled, {});
+
+    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({ status: "undelivered" });
+    expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      "scheduled_prompt_unroutable",
+      expect.objectContaining({ jobId: "job-unroutable" })
+    );
+  });
+
+  it("refuses non-active records without consuming or generating", async () => {
+    const cancelled = job({ id: "job-cancelled", status: "cancelled", cancelledAt: "2026-08-29T00:00:00.000Z" });
+    const { runner, repository, conversations } = immediateHarness(cancelled, {});
+
+    await expect(runner.runScheduledTaskNow(cancelled)).resolves.toEqual({ status: "not-run" });
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+    expect(repository.markScheduledPromptFired).not.toHaveBeenCalled();
+    expect(conversations.runScheduledPromptInline).not.toHaveBeenCalled();
+  });
+
+  it("reports not-run when consuming the occurrence fails in storage", async () => {
+    const scheduled = job({ id: "job-disk" });
+    const { runner, repository, conversations, logger } = immediateHarness(scheduled, {});
+    repository.markScheduledPromptFired.mockImplementation(() => {
+      throw new Error("disk full");
+    });
+
+    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({ status: "not-run" });
+    expect(conversations.runScheduledPromptInline).not.toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalledWith(
+      "scheduled_prompt_state_failed",
+      expect.objectContaining({ jobId: "job-disk", errorMessage: "disk full" })
+    );
+  });
+
+  it("reports not-run when the inline gate throws, instead of rejecting the tool call", async () => {
+    const scheduled = job({ id: "job-throw" });
+    const { runner, repository, logger } = immediateHarness(scheduled, {
+      inlineResult: new Error("model offline")
+    });
+
+    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({ status: "not-run" });
+    expect(logger.error).toHaveBeenCalledWith(
+      "scheduled_prompt_failed",
+      expect.objectContaining({ jobId: "job-throw", errorMessage: "model offline" })
+    );
+    expect(repository.recordEvent).toHaveBeenCalledWith(
+      "scheduled_prompt_failed",
+      expect.objectContaining({ details: expect.objectContaining({ jobId: "job-throw" }) })
+    );
   });
 });

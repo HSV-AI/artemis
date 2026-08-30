@@ -4,8 +4,11 @@
 
 Implemented.
 
-Source: [HSV-AI/artemis issue #53](https://github.com/HSV-AI/artemis/issues/53); invalid-response
-correction retries from [issue #65](https://github.com/HSV-AI/artemis/issues/65).
+Source: [HSV-AI/artemis issue #53](https://github.com/HSV-AI/artemis/issues/53);
+invalid-response correction retries from
+[issue #65](https://github.com/HSV-AI/artemis/issues/65); immediate on-demand
+execution via `run_scheduled_task` follows
+[issue #67](https://github.com/HSV-AI/artemis/issues/67).
 
 ## Problem
 
@@ -29,6 +32,11 @@ This protocol owns:
 - the scheduler execution engine that polls stored jobs, consumes due occurrences,
   and submits every job through the fire-time authorization gate
   (`ConversationService.runScheduledPrompt`)
+- the immediate on-demand execution path
+  (`SchedulerRunner.runScheduledTaskNow` + the inline gate
+  `ConversationService.runScheduledPromptInline`) behind the
+  `run_scheduled_task` tool, including the recursion guard that keeps the
+  tool out of scheduler-fired generations
 - the scheduler-fired prompt framing and its strict JSON response contract
 - response validation (`message` posts, `silent` stays silent) before any posting,
   with correction prompts re-asking the agent when a reply is invalid
@@ -96,6 +104,47 @@ Discord path as ordinary answers (link-embed suppression, Discord-safe splitting
 silently. Delivery is at-most-once: the occurrence was already consumed, so a failed
 delivery drops that run rather than retrying.
 
+### On-demand execution (`run_scheduled_task`)
+
+An interactive turn can also run a stored job immediately through the same
+framework. The `run_scheduled_task` tool (issue #51's tool surface, wired in
+[issue #67](https://github.com/HSV-AI/artemis/issues/67)) takes only the
+job's `id`, locates the record among its own conversation's history, and —
+for an `active` record — hands it to the engine's immediate-run executor,
+`SchedulerRunner.runScheduledTaskNow`, which the composition wires into the
+PI gateway as a lazily resolved `ScheduledTaskRunner` (the engine is built
+after the gateway). The executor mirrors a due-occurrence fire exactly:
+
+1. The occurrence is consumed first with the identical `consume` path — a
+   one-time job is marked `completed` (it will not fire again), a recurring
+   job re-arms via `last_run_at` now — so an on-demand run and a pending
+   due occurrence can never double-post.
+2. The gate runs as `ConversationService.runScheduledPromptInline`: the same
+   scope allow-lists, the same live membership re-check, and the same
+   generation and persistence in the target conversation's durable session —
+   but without entering the per-conversation `KeyedSerialQueue`. The tool
+   executes inside the live turn that already holds that queue slot for the
+   same conversation (scope-checking guarantees the record's key is the
+   current conversation), so re-queueing would deadlock the turn. The inline
+   run is therefore serialized only by the live turn that carries it.
+3. The response is validated and delivered by the engine's shared `deliver`
+   path: `message` content posts through `sendToConversation`, `silent`
+   posts nothing, invalid JSON posts nothing and records
+   `scheduled_prompt_invalid_response`. The outcome is returned to the tool,
+   which reports it to the model (posted content, silent completion, a
+   bounded invalid-response preview, or a clear error for denied/failed and
+   undeliverable runs).
+
+Every scheduler event carries a `trigger` field (`scheduled` for engine
+fires, `on-demand` for tool runs) so operators can distinguish the two paths
+in the audit log. Only `active` records can run on demand; the tool refuses
+canceled (pointing at `resume_scheduled_prompt`) and completed (retired
+history) records, and unknown or foreign ids answer as not found. Scheduler-
+fired generations are flagged `scheduledRun` on `PiGenerationInput` and the
+PI gateway omits `run_scheduled_task` from them (with its own cached system
+prompt registry), so a fired task can never trigger further runs — on-demand
+execution is reachable only from interactive turns and never recurses.
+
 ## Contracts and data flow
 
 The engine is application-internal and can traverse conversation keys — a power the
@@ -111,10 +160,15 @@ ConversationService.runScheduledPrompt(job) --------------------------> authoriz
   checkScheduledPromptScope (pure allow-lists + attribution) ---------> scope decision
   ChannelMembershipChecker against live Discord state ----------------> membership decision
   KeyedSerialQueue on the conversation key ---------------------------> serialized turn
-  PiGateway.generate( framing + stored prompt ) ----------------------> agent result (persisted)
+  PiGateway.generate( framing + stored prompt, scheduledRun=true ) ---> agent result (persisted, no run tool)
   gate-side reply validation + correction prompts -------------------> up to 3 tries in the durable session
 parseScheduledResponse(agent text) ------------------------------------> message | silent | invalid (engine re-validates before posting)
 DiscordGateway.sendToConversation(identity, content) ------------------> Discord post
+
+run_scheduled_task(id) (interactive turn only) ------------------------> conversation-scoped lookup (active only)
+SchedulerRunner.runScheduledTaskNow(record) ---------------------------> consume + inline gate + shared deliver
+ConversationService.runScheduledPromptInline(record) ------------------> same gates, no queue wait (caller holds the slot)
+ScheduledTaskRunner (composition-wired lazy handle) -------------------> engine executor for the tool
 ```
 
 The gate binds every generation identity from harness-side state: the conversation
@@ -138,7 +192,10 @@ backfills each missed occurrence.
 No new settings. The engine polls every `SCHEDULER_POLL_INTERVAL_MS` = 30,000
 milliseconds and is wired unconditionally by the application composition next to the
 Discord gateway; it posts through the Discord gateway's channel resolution and stops
-with the rest of the application on shutdown.
+with the rest of the application on shutdown. The composition also hands the
+engine to the PI gateway as a lazily resolved `ScheduledTaskRunner`, which is
+what makes the `run_scheduled_task` tool registerable; injected scheduler
+stubs without the executor simply leave the tool unregistered.
 
 ## Persistence
 
@@ -183,22 +240,32 @@ job's own `conversation_key` and nothing else; a stored prompt can never redirec
 run at another channel or user. No job generates before passing the fire-time
 authorization gate — the same scope allow-lists and live membership re-check the
 interactive pipeline applies — so a job whose scheduling user has lost access can
-neither generate nor post. Response validation bounds what reaches Discord: only
+neither generate nor post. The on-demand path inherits all of this: the tool's
+lookup is scoped to the harness-injected conversation key (a foreign id is not
+found, not run), the gate re-authorizes the stored scheduling user's live
+membership, and the run can never widen its permissions beyond its own
+conversation. The `run_scheduled_task` tool is registered only for interactive
+generations and only when the composition wired the executor; scheduler-fired
+generations are flagged `scheduledRun` and never see the tool, so a fired task
+cannot trigger further runs and on-demand execution cannot recurse. Response
+validation bounds what reaches Discord: only
 JSON-conforming message content from the fire-time agent turn is posted, and
 everything else is logged for operators instead. Scheduler runs carry the stored
 scheduling-user attribution (with `scheduled:<job id>:<run id>` source message ids)
 so memory facts derived from a schedule remain bound to the verified human who
 scheduled them. Delivery is best-effort and at-most-once: failed or undeliverable
 posts are logged with the conversation key and job id, never retried automatically,
-and never sent anywhere else.
+and never sent anywhere else. On-demand runs consume the occurrence before
+executing, so an on-demand run and a due-occurrence fire of the same job can
+never double-post.
 
 ## Failure handling
 
 - Authorization rejection (non-allowlisted channel, unauthorized DM user, revoked
   membership, missing or empty scheduling user, unparseable stored scope): the gate
-  records `scheduled_prompt_rejected` and returns null; nothing is generated or
-  posted; the occurrence is consumed so a permanently rejected job cannot
-  retry-storm.
+  records `scheduled_prompt_rejected` (with the run's `trigger`) and returns null;
+  nothing is generated or posted; the occurrence is consumed so a permanently
+  rejected job cannot retry-storm.
 - Generation failure (provider, harness, or empty output): the gate records
   `scheduled_prompt_failed` and returns null; the engine posts nothing; the
   occurrence is consumed. Empty output is a generation failure, not a correction
@@ -218,8 +285,14 @@ and never sent anywhere else.
   gateway with the conversation key and channel id — an unresolved fetch (discord.js
   resolves to null instead of rejecting when the channel's guild is not cached, e.g.
   before the ready handshake) is logged as its own failure, never mislabeled as a
-  not-sendable channel; surfaced by the engine as a `scheduled_prompt_failed` event.
-  The occurrence is consumed.
+  not-sendable channel; surfaced by the engine as a `scheduled_prompt_failed` event
+  and, on the on-demand path, as an `undelivered` outcome the tool reports. The
+  occurrence is consumed.
+- On-demand run requested for an unknown, foreign, canceled, or completed record:
+  the tool refuses with a descriptive error before the executor is invoked; nothing
+  is consumed or generated. A stale record slipping to a non-active status between
+  lookup and run is refused by the executor itself
+  (`scheduled_task_run_refused_inactive`) and reported as `not-run`.
 - Discord not ready (gateway still connecting — login alone is not ready): the tick
   is deferred with `scheduler_deferred_not_ready` debug logging; jobs are neither
   listed nor consumed and the next tick fires them once the handshake completes.
@@ -245,8 +318,12 @@ and never sent anywhere else.
   never retries it itself), unroutable keys, the start/stop
   interval lifecycle with in-flight tick skipping, deferral of whole ticks until the
   Discord readiness gate passes (nothing listed or consumed pre-ready, then the full
-  chain fire → valid JSON → posted once ready), and unchanged firing when no gate is
-  wired.
+  chain fire → valid JSON → posted once ready), unchanged firing when no gate is
+  wired, and the on-demand executor `runScheduledTaskNow` (consume-then-gate
+  ordering with one-time completion and recurring re-arm parity, posted/silent/
+  invalid-response/undelivered/not-run outcomes with their events and logs,
+  inactive-record refusal, storage-failure and gate-throw handling without
+  rejecting, and the engine's queued fire path staying on `runScheduledPrompt`).
 - `test/discord-gateway.test.ts` covers `sendToConversation`: suppression flags,
   per-channel embed allowlists, long-content splitting, non-sendable channels,
   unresolvable channels, a null channel resolution logged as
@@ -266,7 +343,11 @@ and never sent anywhere else.
   tries (exactly two corrections, `responseAttempts: 3`, final result returned
   untouched for the engine to refuse); empty output remaining a generation failure
   without a correction; and a thrown correction retry returning null with
-  `scheduled_prompt_failed` while the invalid attempt stays persisted.
+  `scheduled_prompt_failed` while the invalid attempt stays persisted. The inline
+  variant (`runScheduledPromptInline`) applies the same gates without queueing,
+  completes while an interactive turn holds the conversation queue, flags its
+  generation `scheduledRun`, and events carry the `trigger` (`scheduled` for
+  engine fires, `on-demand` for tool runs).
 - `test/repository.test.ts` covers the execution-store operations (cross-conversation
   listing, re-arm persistence across reopen, completion), the fresh-bootstrap schema
   including `last_run_at` and `scheduled_by_user_id`, the incremental
@@ -280,7 +361,11 @@ and never sent anywhere else.
 - `test/application.test.ts` covers the scheduler's start/stop lifecycle within the
   application composition and the default wiring of the readiness gate: the
   composed engine defers polling until the Discord gateway reports ready and
-  resumes once it does.
+  resumes once it does. `test/pi-gateway.test.ts` covers the on-demand wiring:
+  `run_scheduled_task` registers only when a `ScheduledTaskRunner` resolves, its
+  execution delegates to the engine executor, scheduler-fired generations
+  (`scheduledRun`) omit the tool and cache their own reduced prompt registry, and
+  the management tools stay registered when no executor is wired.
 - `npm run guardrail` remains the completion gate.
 
 ## References

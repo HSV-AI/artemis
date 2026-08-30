@@ -3,7 +3,9 @@ import type {
   Logger,
   PiGenerationResult,
   ScheduledPromptDispatcher,
-  ScheduledPromptRecord
+  ScheduledPromptRecord,
+  ScheduledPromptTrigger,
+  ScheduledTaskRunResult
 } from "./domain.js";
 import { safeError } from "./logger.js";
 import { parseConversationKey } from "./scheduler-authorization.js";
@@ -261,6 +263,55 @@ export class SchedulerRunner {
   }
 
   /**
+   * Run a stored scheduled prompt immediately, on demand — the
+   * `run_scheduled_task` tool's executor. Uses the exact framework of a normal
+   * due-occurrence fire: the occurrence is consumed first (one-time jobs
+   * complete and never fire again; recurring jobs re-arm so the pending
+   * occurrence cannot double-fire), the fire-time authorization gate runs the
+   * task in its conversation's session via the inline variant (the tool
+   * already holds the conversation's queue slot, so re-entering it would
+   * deadlock the live turn), and the strict JSON response contract is
+   * validated and delivered identically: `message` content posts, `silent`
+   * posts nothing, invalid responses post nothing and log an error.
+   *
+   * Only `active` records are accepted; canceled and completed records are
+   * refused by the tool before this runs, and the check is repeated here so a
+   * stale record can never mutate lifecycle state it should not touch.
+   */
+  public async runScheduledTaskNow(record: ScheduledPromptRecord): Promise<ScheduledTaskRunResult> {
+    try {
+      if (record.status !== "active") {
+        this.options.logger.warn("scheduled_task_run_refused_inactive", {
+          jobId: record.id,
+          conversationKey: record.conversationKey,
+          status: record.status
+        });
+        return { status: "not-run" };
+      }
+      if (!this.consume(record, (this.options.now ?? (() => new Date()))())) {
+        return { status: "not-run" };
+      }
+      const result = await this.options.conversations.runScheduledPromptInline(record);
+      if (!result) {
+        // Denied or failed runs are already logged by the gate; nothing posts.
+        return { status: "not-run" };
+      }
+      return await this.deliver(record, result, "on-demand");
+    } catch (error) {
+      this.options.logger.error("scheduled_prompt_failed", {
+        jobId: record.id,
+        conversationKey: record.conversationKey,
+        ...safeError(error)
+      });
+      this.options.repository.recordEvent("scheduled_prompt_failed", {
+        conversationKey: record.conversationKey,
+        details: { jobId: record.id, ...safeError(error) }
+      });
+      return { status: "not-run" };
+    }
+  }
+
+  /**
    * Mark the fired occurrence consumed: one-time jobs complete and never run
    * again, recurring jobs re-arm so the same occurrence cannot become due
    * twice. Returns false when storage failed, leaving the job due for retry.
@@ -289,9 +340,15 @@ export class SchedulerRunner {
   /**
    * Validate the gate's returned agent response and post nothing but valid
    * `message` content. `silent` responses end the run quietly; invalid JSON
-   * is logged for operators with a bounded preview and never posted.
+   * is logged for operators with a bounded preview and never posted. Returns
+   * what happened so the on-demand executor can report it; engine fires
+   * ignore the result.
    */
-  private async deliver(job: ScheduledPromptRecord, result: PiGenerationResult): Promise<void> {
+  private async deliver(
+    job: ScheduledPromptRecord,
+    result: PiGenerationResult,
+    trigger: ScheduledPromptTrigger = "scheduled"
+  ): Promise<ScheduledTaskRunResult> {
     const { repository, logger } = this.options;
     const identity = parseConversationKey(job.conversationKey);
     if (!identity) {
@@ -299,7 +356,7 @@ export class SchedulerRunner {
         jobId: job.id,
         conversationKey: job.conversationKey
       });
-      return;
+      return { status: "undelivered" };
     }
     const parsed = parseScheduledResponse(result.text);
     if (!parsed) {
@@ -311,35 +368,53 @@ export class SchedulerRunner {
         conversationKey: job.conversationKey,
         details: {
           jobId: job.id,
+          trigger,
           responsePreview: result.text.slice(0, INVALID_RESPONSE_PREVIEW_LENGTH)
         }
       });
-      return;
+      return {
+        status: "invalid-response",
+        responsePreview: result.text.slice(0, INVALID_RESPONSE_PREVIEW_LENGTH)
+      };
     }
     if (parsed.outcome === "silent") {
       repository.recordEvent("scheduled_prompt_fired", {
         conversationKey: job.conversationKey,
-        details: { jobId: job.id, outcome: "silent" }
+        details: { jobId: job.id, outcome: "silent", trigger }
       });
       logger.info("scheduled_prompt_fired", {
         jobId: job.id,
         conversationKey: job.conversationKey,
-        outcome: "silent"
+        outcome: "silent",
+        trigger
       });
-      return;
+      return { status: "silent" };
     }
     const posted = await this.options.dispatcher.sendToConversation(identity, parsed.content);
     if (!posted) {
-      throw new Error("Scheduler response could not be delivered to the channel");
+      const error = new Error("Scheduler response could not be delivered to the channel");
+      logger.error("scheduled_prompt_failed", {
+        jobId: job.id,
+        conversationKey: job.conversationKey,
+        trigger,
+        ...safeError(error)
+      });
+      repository.recordEvent("scheduled_prompt_failed", {
+        conversationKey: job.conversationKey,
+        details: { jobId: job.id, trigger, ...safeError(error) }
+      });
+      return { status: "undelivered" };
     }
     repository.recordEvent("scheduled_prompt_fired", {
       conversationKey: job.conversationKey,
-      details: { jobId: job.id, outcome: "posted" }
+      details: { jobId: job.id, outcome: "posted", trigger }
     });
     logger.info("scheduled_prompt_fired", {
       jobId: job.id,
       conversationKey: job.conversationKey,
-      outcome: "posted"
+      outcome: "posted",
+      trigger
     });
+    return { status: "posted", content: parsed.content };
   }
 }

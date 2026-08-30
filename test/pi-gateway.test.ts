@@ -909,6 +909,139 @@ describe("PiSdkGateway", () => {
       expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain(name);
     }
   });
+
+  it("registers run_scheduled_task when the composition supplies an immediate-run executor", async () => {
+    const jobs: ScheduledPromptRecord[] = [
+      {
+        id: "job-1",
+        conversationKey: "dm:sched-channel",
+        prompt: "Say hello",
+        schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+        responseType: "message",
+        scheduledByUserId: "user",
+        status: "active",
+        createdAt: "2026-08-29T14:30:00.000Z"
+      }
+    ];
+    const schedulerStore: ScheduledPromptStore = {
+      createScheduledPrompt: vi.fn(),
+      listScheduledPrompts: vi.fn(() => jobs.filter((job) => job.status === "active")),
+      listScheduledPromptHistory: vi.fn(() => jobs),
+      cancelScheduledPrompt: vi.fn(() => true),
+      pruneScheduledPrompts: vi.fn(() => ({ removedIds: [], remainingCount: 0 })),
+      resumeScheduledPrompt: vi.fn(() => undefined),
+      updateScheduledPrompt: vi.fn(() => undefined)
+    };
+    const runScheduledTaskNow = vi.fn(async () =>
+      ({ status: "posted", content: "Posted on demand" }) as const
+    );
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      healthyFetch(),
+      undefined,
+      undefined,
+      schedulerStore,
+      { isChannelMember: vi.fn(async () => "member" as const) },
+      () => ({ runScheduledTaskNow })
+    );
+    await gateway.checkHealth();
+    await gateway.generate(generationInput({ conversationKey: "dm:sched-channel", conversationKind: "dm" }));
+
+    const systemPrompt = mocks.resourceLoaderConstructor.mock.calls.at(-1)?.[0] as
+      | { systemPrompt?: string }
+      | undefined;
+    expect(systemPrompt?.systemPrompt).toContain("- run_scheduled_task: ");
+
+    type CapturedTool = {
+      name: string;
+      execute: (id: string, params: unknown, ...rest: unknown[]) => Promise<{
+        content: ReadonlyArray<{ type: string; text?: string }>;
+      }>;
+    };
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { customTools?: CapturedTool[] }
+      | undefined;
+    const runTool = sessionOptions?.customTools?.find((tool) => tool.name === "run_scheduled_task");
+    expect(runTool).toBeDefined();
+
+    const result = await runTool!.execute("call", { id: "job-1" }, undefined, undefined, {} as never);
+    expect(result.content[0]?.text).toContain("Posted on demand");
+    expect(runScheduledTaskNow).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "job-1", conversationKey: "dm:sched-channel" })
+    );
+  });
+
+  it("omits run_scheduled_task from scheduler-fired generations so runs never recurse", async () => {
+    const schedulerStore: ScheduledPromptStore = {
+      createScheduledPrompt: vi.fn(),
+      listScheduledPrompts: vi.fn(() => []),
+      listScheduledPromptHistory: vi.fn(() => []),
+      cancelScheduledPrompt: vi.fn(() => true),
+      pruneScheduledPrompts: vi.fn(() => ({ removedIds: [], remainingCount: 0 })),
+      resumeScheduledPrompt: vi.fn(() => undefined),
+      updateScheduledPrompt: vi.fn(() => undefined)
+    };
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      healthyFetch(),
+      undefined,
+      undefined,
+      schedulerStore,
+      { isChannelMember: vi.fn(async () => "member" as const) },
+      () => ({ runScheduledTaskNow: vi.fn(async () => ({ status: "silent" }) as const) })
+    );
+    await gateway.checkHealth();
+    await gateway.generate(
+      generationInput({ conversationKey: "dm:sched-channel", conversationKind: "dm", scheduledRun: true })
+    );
+
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { tools?: string[]; customTools?: Array<{ name: string }> }
+      | undefined;
+    expect(sessionOptions?.tools).toContain("schedule_prompt");
+    expect(sessionOptions?.tools).not.toContain("run_scheduled_task");
+    expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain("run_scheduled_task");
+
+    // The scheduled generation carries its own cached prompt registry, so the
+    // system prompt reflects the reduced tool set rather than a stale cache.
+    const systemPrompt = mocks.resourceLoaderConstructor.mock.calls.at(-1)?.[0] as
+      | { systemPrompt?: string }
+      | undefined;
+    expect(systemPrompt?.systemPrompt).toContain("- schedule_prompt: ");
+    expect(systemPrompt?.systemPrompt).not.toContain("- run_scheduled_task: ");
+  });
+
+  it("omits run_scheduled_task while keeping the management tools when no executor is wired", async () => {
+    const schedulerStore: ScheduledPromptStore = {
+      createScheduledPrompt: vi.fn(),
+      listScheduledPrompts: vi.fn(() => []),
+      listScheduledPromptHistory: vi.fn(() => []),
+      cancelScheduledPrompt: vi.fn(() => true),
+      pruneScheduledPrompts: vi.fn(() => ({ removedIds: [], remainingCount: 0 })),
+      resumeScheduledPrompt: vi.fn(() => undefined),
+      updateScheduledPrompt: vi.fn(() => undefined)
+    };
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      healthyFetch(),
+      undefined,
+      undefined,
+      schedulerStore,
+      { isChannelMember: vi.fn(async () => "member" as const) }
+    );
+    await gateway.checkHealth();
+    await gateway.generate(generationInput({ conversationKey: "dm:sched-channel", conversationKind: "dm" }));
+
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { tools?: string[]; customTools?: Array<{ name: string }> }
+      | undefined;
+    expect(sessionOptions?.tools).toContain("schedule_prompt");
+    expect(sessionOptions?.tools).not.toContain("run_scheduled_task");
+    expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain("run_scheduled_task");
+  });
 });
 
 describe("system prompt Discord channel limits", () => {

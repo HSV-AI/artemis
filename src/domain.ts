@@ -80,6 +80,13 @@ export interface PiGenerationInput {
   sourceMessageId: string;
   authorId: string;
   prompt: string;
+  /**
+   * True when this generation is itself a scheduler-fired task (an engine
+   * poll fire or an on-demand run). The gateway omits the run_scheduled_task
+   * tool from such generations so a fired run can never trigger further
+   * on-demand runs — scheduled execution does not recurse.
+   */
+  scheduledRun?: boolean;
 }
 
 export interface PiSessionEntryRecord {
@@ -297,6 +304,37 @@ export interface SchedulerExecutionStore {
   completeScheduledPrompt(id: string, completedAtUtc: string): void;
 }
 
+/**
+ * What started a scheduled-prompt execution: the engine's due-occurrence poll
+ * (`scheduled`) or an explicit on-demand request through the
+ * `run_scheduled_task` tool (`on-demand`). Recorded on the scheduler events so
+ * operators can tell fires apart.
+ */
+export type ScheduledPromptTrigger = "scheduled" | "on-demand";
+
+/**
+ * Outcome of one on-demand scheduled-task run (the `run_scheduled_task` tool's
+ * executor path). Mirrors a normal scheduled fire: the response contract is
+ * validated identically, `message` content is posted, `silent` posts nothing,
+ * and invalid or undeliverable responses post nothing.
+ */
+export type ScheduledTaskRunResult =
+  | { status: "posted"; content: string }
+  | { status: "silent" }
+  | { status: "invalid-response"; responsePreview: string }
+  | { status: "undelivered" }
+  | { status: "not-run" };
+
+/**
+ * Immediate-run executor for stored scheduled prompts, implemented by the
+ * scheduler execution engine and wired into the scheduler tools by the
+ * composition. Runs the same framework as a due-occurrence fire: consumption,
+ * fire-time authorization gate, strict JSON response validation, and posting.
+ */
+export interface ScheduledTaskRunner {
+  runScheduledTaskNow(record: ScheduledPromptRecord): Promise<ScheduledTaskRunResult>;
+}
+
 export interface PiGateway {
   checkHealth(): Promise<void>;
   generate(input: PiGenerationInput): Promise<PiGenerationResult>;
@@ -322,6 +360,13 @@ export interface ConversationWorkQueue {
    * Returns null for denied or failed runs; posting belongs to the engine.
    */
   runScheduledPrompt(record: ScheduledPromptRecord): Promise<PiGenerationResult | null>;
+  /**
+   * The same gate and execution without the queue wait, for a caller that
+   * already holds the conversation's queue slot — the `run_scheduled_task`
+   * tool executes inside a live turn on the same conversation, so re-entering
+   * the queue would deadlock. Returns null for denied or failed runs.
+   */
+  runScheduledPromptInline(record: ScheduledPromptRecord): Promise<PiGenerationResult | null>;
 }
 
 /**

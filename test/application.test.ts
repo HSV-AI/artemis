@@ -50,7 +50,8 @@ describe("ArtemisApplication", () => {
       }),
       stop: vi.fn(() => {
         order.push("scheduler-stop");
-      })
+      }),
+      runScheduledTaskNow: vi.fn()
     };
     const repository = { close: vi.fn() } as unknown as ArtemisRepository;
     const logger = createLoggerMock();
@@ -81,7 +82,7 @@ describe("ArtemisApplication", () => {
     const pi = createPiMock();
     vi.mocked(pi.checkHealth).mockRejectedValue(new Error("offline"));
     const discord = { start: vi.fn(), stop: vi.fn() } as unknown as DiscordGateway;
-    const scheduler = { start: vi.fn(), stop: vi.fn() };
+    const scheduler = { start: vi.fn(), stop: vi.fn(), runScheduledTaskNow: vi.fn() };
     const repository = { close: vi.fn() } as unknown as ArtemisRepository;
     const logger = createLoggerMock();
     const application = new ArtemisApplication(config, {
@@ -107,7 +108,7 @@ describe("ArtemisApplication", () => {
       start: vi.fn().mockResolvedValue(undefined),
       stop: vi.fn()
     } as unknown as DiscordGateway;
-    const scheduler = { start: vi.fn(), stop: vi.fn() };
+    const scheduler = { start: vi.fn(), stop: vi.fn(), runScheduledTaskNow: vi.fn() };
     const repository = {
       recordLog: vi.fn(),
       close: vi.fn()
@@ -178,7 +179,7 @@ describe("ArtemisApplication", () => {
     });
     const pi = createPiMock();
     const repository = { close: vi.fn() } as unknown as ArtemisRepository;
-    const scheduler = { start: vi.fn(), stop: vi.fn() };
+    const scheduler = { start: vi.fn(), stop: vi.fn(), runScheduledTaskNow: vi.fn() };
     const application = new ArtemisApplication(config, {
       pi,
       repository,
