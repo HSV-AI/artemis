@@ -274,6 +274,11 @@ invalid JSON posts nothing and records `scheduled_prompt_invalid_response`.
 The tool's answer reports the outcome: the posted content for `message`, the
 silent completion, a bounded response preview for invalid responses, or a
 clear error when the authorization gate denied the run or generation failed.
+Every outcome carries a lifecycle note stating that the occurrence was
+consumed (a one-time task completed and will not fire again; a recurring
+schedule continues at its next occurrence) — including the `not-run` error,
+so a denied or failed run never leaves a consumed one-time task sounding
+like it will still fire later.
 The tool is only registered when the composition wired the engine's
 immediate-run executor, and it is never registered for scheduler-fired
 generations themselves — a scheduled fire cannot trigger further on-demand
@@ -548,7 +553,8 @@ the harness-derived identities, and nothing else.
   active, and the registry metadata now advertising six scheduler tools), the
   run tool (registration only with a wired executor, posted content and
   lifecycle notes in the answer, silent/invalid/undelivered/not-run
-  reporting, unknown/foreign/blank/canceled/completed refusals without
+  reporting, consumed-occurrence lifecycle notes on the one-time and
+  recurring `not-run` errors, unknown/foreign/blank/canceled/completed refusals without
   runner invocations, injected-key scoping, and registry metadata), the
   creation-time membership gate (missing user, unwired checker, unknown
   answer, non-member refusal with no schedule-validation leak, membership
