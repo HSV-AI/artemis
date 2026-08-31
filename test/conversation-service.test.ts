@@ -1030,4 +1030,96 @@ describe("ConversationService scheduled prompts", () => {
       );
     });
   });
+
+  describe("runScheduledPromptPreviewInline (on-demand preview)", () => {
+    it("runs the stored prompt as a plain preview turn without the JSON contract, flagged scheduler-fired", async () => {
+      const pi = createPiMock({ text: "The job would post the standup summary." });
+      const { service, logger } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPromptPreviewInline(jobRecord())).resolves.toMatchObject({
+        text: "The job would post the standup summary."
+      });
+
+      expect(pi.generate).toHaveBeenCalledTimes(1);
+      const input = vi.mocked(pi.generate).mock.calls[0]?.[0];
+      expect(input).toMatchObject({
+        conversationKey: "guild:guild-1:channel:group-1",
+        conversationKind: "guild",
+        authorId: "603384387685449728",
+        // Recursion guard: a preview turn never receives run_scheduled_task.
+        scheduledRun: true
+      });
+      expect(input?.sourceMessageId).toMatch(/^scheduled:preview:job-1:/);
+      // A plain preview turn carries the stored prompt verbatim — no fire
+      // framing and no strict JSON response contract.
+      expect(input?.prompt).toBe("Post the weekly standup summary");
+      expect(input?.prompt).not.toContain('"type":"message"');
+      expect(logger.info).toHaveBeenCalledWith(
+        "scheduled_prompt_succeeded",
+        expect.objectContaining({ trigger: "on-demand", mode: "preview" })
+      );
+    });
+
+    it("refuses a non-member without generating anything", async () => {
+      const pi = createPiMock({ text: "never runs" });
+      const { service, logger } = createService(pi, membershipMock("not-member"));
+
+      await expect(service.runScheduledPromptPreviewInline(jobRecord())).resolves.toBeNull();
+
+      expect(pi.generate).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        "scheduled_prompt_rejected",
+        expect.objectContaining({ code: "membership-revoked", jobId: "job-1", trigger: "on-demand" })
+      );
+    });
+
+    it("proceeds logged-unverified when the preview membership check cannot be reached", async () => {
+      const pi = createPiMock({ text: "preview despite unknown membership" });
+      const { service, logger } = createService(pi, membershipMock("unknown"));
+
+      await expect(service.runScheduledPromptPreviewInline(jobRecord())).resolves.toMatchObject({
+        text: "preview despite unknown membership"
+      });
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        "scheduled_prompt_membership_unverified",
+        expect.objectContaining({ conversationKey: "guild:guild-1:channel:group-1", jobId: "job-1" })
+      );
+    });
+
+    it("persists the preview turn attributed to the scheduling user in the durable session", async () => {
+      const pi = createPiMock({ text: "preview answer" });
+      const { service } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPromptPreviewInline(jobRecord())).resolves.toMatchObject({
+        text: "preview answer"
+      });
+
+      const session = repository?.getOrCreateSession(
+        { key: "guild:guild-1:channel:group-1", kind: "guild", guildId: "guild-1", channelId: "group-1" },
+        "test-model"
+      );
+      expect(repository?.getHistory(session?.id ?? "")).toEqual([
+        expect.objectContaining({
+          role: "user",
+          authorId: "603384387685449728",
+          content: "Post the weekly standup summary"
+        }),
+        expect.objectContaining({ role: "assistant", content: "preview answer" })
+      ]);
+    });
+
+    it("records a failure event and returns null when the preview generation fails", async () => {
+      const pi = createPiMock({ text: "   " });
+      const { service, logger } = createService(pi, membershipMock());
+
+      await expect(service.runScheduledPromptPreviewInline(jobRecord())).resolves.toBeNull();
+
+      expect(pi.generate).toHaveBeenCalledTimes(1);
+      expect(logger.error).toHaveBeenCalledWith(
+        "scheduled_prompt_failed",
+        expect.objectContaining({ jobId: "job-1", trigger: "on-demand" })
+      );
+    });
+  });
 });

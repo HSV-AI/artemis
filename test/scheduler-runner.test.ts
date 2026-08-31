@@ -1313,3 +1313,115 @@ describe("SchedulerRunner.runScheduledTaskNow", () => {
     expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
   });
 });
+
+describe("SchedulerRunner.runScheduledTaskPreview", () => {
+  function previewHarness(
+    record: ScheduledPromptRecord,
+    options: {
+      /** Resolved value of the inline preview gate; defaults to a plain text reply. */
+      previewResult?: { text: string; model: string } | null | Error;
+      now?: string;
+    } = {}
+  ) {
+    const repository = repositoryMock([record]);
+    const conversations = {
+      runExclusive: vi.fn(),
+      runScheduledPrompt: vi.fn(),
+      runScheduledPromptInline: vi.fn(),
+      runScheduledPromptPreviewInline: vi.fn(async () => {
+        if (options.previewResult instanceof Error) {
+          throw options.previewResult;
+        }
+        return options.previewResult === undefined
+          ? { text: "What the task would do", model: "test-model" }
+          : options.previewResult;
+      })
+    };
+    const dispatcher = { sendToConversation: vi.fn().mockResolvedValue(true) };
+    const logger: Logger = createLoggerMock();
+    const at = new Date(options.now ?? "2026-08-30T14:20:00.000Z");
+    const runner = new SchedulerRunner({
+      repository: repository as unknown as ArtemisRepository,
+      conversations: conversations as unknown as ConstructorParameters<typeof SchedulerRunner>[0]["conversations"],
+      dispatcher: dispatcher as unknown as ConstructorParameters<typeof SchedulerRunner>[0]["dispatcher"],
+      logger,
+      now: () => new Date(at.getTime())
+    });
+    return { runner, repository, conversations, dispatcher, logger };
+  }
+
+  it("previews via the inline gate and returns the response without consuming or posting", async () => {
+    const scheduled = job({ id: "job-preview", schedule: { type: "once", atUtc: "2026-09-01T14:00:00.000Z" } });
+    const { runner, repository, conversations, dispatcher } = previewHarness(scheduled, {
+      previewResult: { text: "It would post the standup summary", model: "test-model" }
+    });
+
+    await expect(runner.runScheduledTaskPreview(scheduled)).resolves.toEqual({
+      status: "previewed",
+      content: "It would post the standup summary"
+    });
+
+    // The gate runs without queueing: the caller (the live tool turn) already
+    // holds the conversation's queue slot.
+    expect(conversations.runScheduledPromptPreviewInline).toHaveBeenCalledTimes(1);
+    expect(conversations.runScheduledPromptPreviewInline).toHaveBeenCalledWith(scheduled);
+    expect(conversations.runScheduledPromptInline).not.toHaveBeenCalled();
+    expect(conversations.runScheduledPrompt).not.toHaveBeenCalled();
+    // A preview is read-only on the lifecycle: no claim, no release, no
+    // settle, and nothing posted to the channel.
+    expect(repository.claimScheduledPrompt).not.toHaveBeenCalled();
+    expect(repository.releaseScheduledPromptClaim).not.toHaveBeenCalled();
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+    expect(repository.markScheduledPromptFired).not.toHaveBeenCalled();
+    expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
+  });
+
+  it("reports not-run when the preview gate denies or fails, consuming nothing", async () => {
+    const scheduled = job({ id: "job-preview-denied" });
+    const { runner, repository, conversations, dispatcher } = previewHarness(scheduled, {
+      previewResult: null
+    });
+
+    await expect(runner.runScheduledTaskPreview(scheduled)).resolves.toEqual({ status: "not-run" });
+    expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
+    expect(repository.claimScheduledPrompt).not.toHaveBeenCalled();
+    expect(repository.releaseScheduledPromptClaim).not.toHaveBeenCalled();
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+    expect(repository.markScheduledPromptFired).not.toHaveBeenCalled();
+    expect(conversations.runScheduledPromptPreviewInline).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports not-run and logs a failure when the preview gate throws", async () => {
+    const scheduled = job({ id: "job-preview-throw" });
+    const { runner, repository, logger } = previewHarness(scheduled, {
+      previewResult: new Error("model offline")
+    });
+
+    await expect(runner.runScheduledTaskPreview(scheduled)).resolves.toEqual({ status: "not-run" });
+    expect(logger.error).toHaveBeenCalledWith(
+      "scheduled_prompt_failed",
+      expect.objectContaining({ jobId: "job-preview-throw", errorMessage: "model offline" })
+    );
+    expect(repository.recordEvent).toHaveBeenCalledWith(
+      "scheduled_prompt_failed",
+      expect.objectContaining({ details: expect.objectContaining({ jobId: "job-preview-throw" }) })
+    );
+    // A thrown preview must never leave lifecycle mutations behind.
+    expect(repository.releaseScheduledPromptClaim).not.toHaveBeenCalled();
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+    expect(repository.markScheduledPromptFired).not.toHaveBeenCalled();
+  });
+
+  it("refuses non-active records without calling the gate or touching claims", async () => {
+    const cancelled = job({ id: "job-preview-cancelled", status: "cancelled", cancelledAt: "2026-08-29T00:00:00.000Z" });
+    const { runner, repository, conversations, logger } = previewHarness(cancelled, {});
+
+    await expect(runner.runScheduledTaskPreview(cancelled)).resolves.toEqual({ status: "not-run" });
+    expect(conversations.runScheduledPromptPreviewInline).not.toHaveBeenCalled();
+    expect(repository.claimScheduledPrompt).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      "scheduled_task_run_refused_inactive",
+      expect.objectContaining({ jobId: "job-preview-cancelled", status: "cancelled" })
+    );
+  });
+});

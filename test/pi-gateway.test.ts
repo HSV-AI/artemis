@@ -933,6 +933,9 @@ describe("PiSdkGateway", () => {
     const runScheduledTaskNow = vi.fn(async () =>
       ({ status: "posted", content: "Posted on demand" }) as const
     );
+    const runScheduledTaskPreview = vi.fn(async () =>
+      ({ status: "previewed", content: "Preview on demand" }) as const
+    );
     const gateway = new PiSdkGateway(
       artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
       createSessionStore(),
@@ -941,7 +944,7 @@ describe("PiSdkGateway", () => {
       undefined,
       schedulerStore,
       { isChannelMember: vi.fn(async () => "member" as const) },
-      () => ({ runScheduledTaskNow })
+      () => ({ runScheduledTaskNow, runScheduledTaskPreview })
     );
     await gateway.checkHealth();
     await gateway.generate(generationInput({ conversationKey: "dm:sched-channel", conversationKind: "dm" }));
@@ -963,8 +966,18 @@ describe("PiSdkGateway", () => {
     const runTool = sessionOptions?.customTools?.find((tool) => tool.name === "run_scheduled_task");
     expect(runTool).toBeDefined();
 
-    const result = await runTool!.execute("call", { id: "job-1" }, undefined, undefined, {} as never);
-    expect(result.content[0]?.text).toContain("Posted on demand");
+    // The default (no consume_next) is the preview path: it delegates to the
+    // preview executor and never fires.
+    const previewResult = await runTool!.execute("call", { id: "job-1" }, undefined, undefined, {} as never);
+    expect(previewResult.content[0]?.text).toContain("Preview on demand");
+    expect(runScheduledTaskPreview).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "job-1", conversationKey: "dm:sched-channel" })
+    );
+    expect(runScheduledTaskNow).not.toHaveBeenCalled();
+
+    // consume_next=true delegates to the fire executor.
+    const fireResult = await runTool!.execute("call", { id: "job-1", consume_next: true }, undefined, undefined, {} as never);
+    expect(fireResult.content[0]?.text).toContain("Posted on demand");
     expect(runScheduledTaskNow).toHaveBeenCalledWith(
       expect.objectContaining({ id: "job-1", conversationKey: "dm:sched-channel" })
     );
@@ -988,7 +1001,10 @@ describe("PiSdkGateway", () => {
       undefined,
       schedulerStore,
       { isChannelMember: vi.fn(async () => "member" as const) },
-      () => ({ runScheduledTaskNow: vi.fn(async () => ({ status: "silent" }) as const) })
+      () => ({
+        runScheduledTaskNow: vi.fn(async () => ({ status: "silent" }) as const),
+        runScheduledTaskPreview: vi.fn(async () => ({ status: "previewed", content: "p" }) as const)
+      })
     );
     await gateway.checkHealth();
     await gateway.generate(

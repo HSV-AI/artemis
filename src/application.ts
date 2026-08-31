@@ -40,7 +40,7 @@ export interface ApplicationDependencies {
   pi?: PiGateway;
   discord?: DiscordGateway;
   discordClient?: Client;
-  scheduler?: Pick<SchedulerRunner, "start" | "stop" | "runScheduledTaskNow">;
+  scheduler?: Pick<SchedulerRunner, "start" | "stop" | "runScheduledTaskNow" | "runScheduledTaskPreview">;
 }
 
 export class ArtemisApplication {
@@ -48,7 +48,7 @@ export class ArtemisApplication {
   private readonly repository: ArtemisRepository;
   private readonly pi: PiGateway;
   private readonly discord: DiscordGateway;
-  private readonly scheduler: Pick<SchedulerRunner, "start" | "stop" | "runScheduledTaskNow">;
+  private readonly scheduler: Pick<SchedulerRunner, "start" | "stop" | "runScheduledTaskNow" | "runScheduledTaskPreview">;
 
   public constructor(
     private readonly config: ArtemisConfig,

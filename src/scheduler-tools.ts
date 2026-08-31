@@ -1425,20 +1425,24 @@ export function createSchedulerTools(
     name: "run_scheduled_task",
     label: "Run Scheduled Task",
     description:
-      "Execute one of this conversation's ongoing scheduled prompts immediately through the same scheduler executor that fires scheduled prompts, posting its validated response exactly like a normal fire.",
-    promptSnippet: "Run one of this conversation's scheduled prompts immediately",
+      "Run one of this conversation's ongoing scheduled prompts immediately: by default a preview that returns the response without consuming the occurrence or posting anything; pass consume_next=true to fire it now like a scheduled run.",
+    promptSnippet: "Run one of this conversation's scheduled prompts immediately (preview by default)",
     promptGuidelines: [
-      "Only run when the current Discord user explicitly asks to execute a scheduled prompt now.",
-      "Use an id from schedule_prompt or list_scheduled_prompts; only this conversation's scheduled prompts can run.",
-      "Only ongoing records can run immediately; canceled records need update_scheduled_prompt with a new schedule to re-arm them first, and completed records are retired history.",
-      "A completed run consumes the task's next occurrence like a scheduled fire: a one-time task completes and will not fire again, a recurring task continues at its next occurrence.",
-      "A denied, failed, invalid-response, or undelivered run consumes nothing: the claim is released and the task remains scheduled, retrying on a later tick.",
-      "Response handling is identical to a scheduled fire: JSON-validated message content is posted, silent posts nothing, invalid responses post nothing."
+      "Default to the preview (omit consume_next): it runs the stored prompt and returns the agent's response for review without consuming the occurrence and without posting anything to the channel.",
+      "Pass consume_next=true only when the current Discord user explicitly asks to execute a scheduled prompt now for real: the run consumes the task's next occurrence and posts its validated response like a scheduled fire.",
+      "Use an id from schedule_prompt or list_scheduled_prompts; only this conversation's scheduled prompts can run, previewed or fired.",
+      "Only ongoing records can run; canceled records need update_scheduled_prompt with a new schedule to re-arm them first, and completed records are retired history.",
+      "A fired (consume_next=true) run consumes the occurrence: a one-time task completes and will not fire again, a recurring task continues at its next occurrence. A denied, failed, invalid-response, or undelivered fire consumes nothing: the claim is released and the task remains scheduled, retrying on a later tick.",
+      "A preview never consumes the occurrence: a one-time task remains ongoing and will fire at its scheduled time, a recurring task's schedule continues unchanged, and the response only returns as the tool result (never posted).",
+      "Fires follow the scheduled JSON contract: message content posts, silent posts nothing, invalid responses post nothing."
     ],
     parameters: Type.Object({
       id: Type.String({
         description: "ID of the scheduled prompt to run immediately, from schedule_prompt or list_scheduled_prompts"
-      })
+      }),
+      consume_next: Type.Optional(Type.Boolean({
+        description: "Set true to consume the next occurrence and fire for real (runs the scheduled JSON contract, posts, completes one-time tasks, re-arms recurring schedules). Defaults to false: a reversible preview that returns the response without consuming or posting."
+      }))
     }),
     async execute(_toolCallId, params) {
       const runner = context.runner;
@@ -1452,6 +1456,9 @@ export function createSchedulerTools(
       if (id === "") {
         return textResult("Error: id of the scheduled prompt to run is required.");
       }
+      // Fire is opt-in: an absent or false consume_next is always the
+      // reversible preview, never a fire.
+      const consumeNext = params.consume_next === true;
       // Locate the target in the conversation's audit history first, so an
       // unknown id (pruned or foreign) is named precisely before any run work
       // happens. The lookup is scoped to the harness-injected key, so another
@@ -1470,56 +1477,85 @@ export function createSchedulerTools(
           ? "Re-arm it first with update_scheduled_prompt (it re-arms a canceled record with a new schedule)."
           : "Completed one-time records are retired history and cannot run again.";
         return textResult(
-          `Error: only ongoing scheduled prompts can run immediately; ${id} is currently ` +
+          `Error: only ongoing scheduled prompts can run immediately (preview or fire); ${id} is currently ` +
           `${describePromptStatus(target.status)}. ${suffix}`
         );
       }
-      const outcome = await runner.runScheduledTaskNow(target);
+      // A one-time job's pending-note and a recurring job's pending-note spell
+      // out what "left pending" means for the schedule at hand, so the answer
+      // never lets the user believe the occurrence was spent when it was not.
+      const pendingNote = target.schedule.type === "once"
+        ? "The occurrence is left pending: the one-time task remains ongoing and will fire at its scheduled time."
+        : "The occurrence is left pending: the recurring schedule continues unchanged and will fire at its next occurrence.";
       const lifecycleNote = target.schedule.type === "once"
         ? "The one-time task is now completed and will not fire again."
         : "The run consumed the occurrence like any scheduled fire; the recurring schedule continues.";
       const retryNote =
         "The task was not consumed: its claim was released and it remains scheduled, so it fires " +
         "again on a later scheduler tick (for a recurring schedule, the missed occurrence retries).";
-      switch (outcome.status) {
-        case "posted":
-          return textResult(
-            `Ran scheduled prompt ${id} immediately through the scheduler executor.\n` +
-            `Posted to ${target.conversationKey} (harness-injected):\n${outcome.content}\n` +
-            lifecycleNote
-          );
-        case "silent":
-          return textResult(
-            `Ran scheduled prompt ${id} immediately. The task completed with {"type":"silent"} — ` +
-            `nothing was posted.\n${lifecycleNote}`
-          );
-        case "invalid-response": {
-          const preview = outcome.responsePreview.slice(0, TOOL_RESPONSE_PREVIEW_LENGTH);
-          return textResult(
-            `Ran scheduled prompt ${id} immediately, but the agent response was not a valid ` +
-            "scheduled-task JSON reply, so nothing was posted (same handling as a scheduled fire).\n" +
-            `Response preview: ${preview}\n` +
-            retryNote
-          );
+      if (consumeNext) {
+        const outcome = await runner.runScheduledTaskNow(target);
+        switch (outcome.status) {
+          case "posted":
+            return textResult(
+              `Ran scheduled prompt ${id} immediately through the scheduler executor. The occurrence was consumed.\n` +
+              `Posted to ${target.conversationKey} (harness-injected):\n${outcome.content}\n` +
+              lifecycleNote
+            );
+          case "silent":
+            return textResult(
+              `Ran scheduled prompt ${id} immediately. The task completed with {"type":"silent"} — ` +
+              `nothing was posted. The occurrence was consumed.\n${lifecycleNote}`
+            );
+          case "invalid-response": {
+            const preview = outcome.responsePreview.slice(0, TOOL_RESPONSE_PREVIEW_LENGTH);
+            return textResult(
+              `Ran scheduled prompt ${id} immediately, but the agent response was not a valid ` +
+              "scheduled-task JSON reply, so nothing was posted (same handling as a scheduled fire).\n" +
+              `Response preview: ${preview}\n` +
+              retryNote
+            );
+          }
+          case "unroutable":
+            return textResult(
+              `Error: scheduled prompt ${id} ran, but its stored conversation key could not be ` +
+              `resolved for delivery. The occurrence was consumed.\n${lifecycleNote} ` +
+              "See the scheduler events for details."
+            );
+          case "undelivered":
+            return textResult(
+              `Error: scheduled prompt ${id} ran, but its response could not be delivered to ` +
+              `${target.conversationKey}. See the scheduler events for details.\n${retryNote}`
+            );
+          case "not-run":
+            return textResult(
+              `Error: scheduled prompt ${id} could not be executed — the fire-time authorization ` +
+              "gate denied the run, the run is already executing elsewhere, or generation failed, " +
+              "and nothing was posted.\n" +
+              retryNote
+            );
+          case "previewed":
+            // Unreachable: the fire executor never returns a preview outcome.
+            // Returning the pending note keeps this branch from falling
+            // through to a second runner call.
+            return textResult(pendingNote);
         }
-        case "unroutable":
-          return textResult(
-            `Error: scheduled prompt ${id} ran, but its stored conversation key could not be ` +
-            `resolved for delivery. See the scheduler events for details.`
-          );
-        case "undelivered":
-          return textResult(
-            `Error: scheduled prompt ${id} ran, but its response could not be delivered to ` +
-            `${target.conversationKey}. See the scheduler events for details.\n${retryNote}`
-          );
-        case "not-run":
-          return textResult(
-            `Error: scheduled prompt ${id} could not be executed — the fire-time authorization ` +
-            "gate denied the run, the run is already executing elsewhere, or generation failed, " +
-            "and nothing was posted.\n" +
-            retryNote
-          );
       }
+      const outcome = await runner.runScheduledTaskPreview(target);
+      if (outcome.status !== "previewed") {
+        return textResult(
+          `Error: scheduled prompt ${id} could not be previewed — the fire-time authorization ` +
+          "gate denied the run or generation failed. Nothing was run, posted, or consumed; " +
+          "the occurrence stays pending.\n" +
+          pendingNote
+        );
+      }
+      return textResult(
+        `Previewed scheduled prompt ${id} — nothing was posted to the channel and the ` +
+        "occurrence was not consumed.\n" +
+        `Agent response:\n${outcome.content}\n` +
+        pendingNote
+      );
     }
   });
 
