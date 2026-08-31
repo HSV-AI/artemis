@@ -36,11 +36,14 @@ function job(overrides: Partial<ScheduledPromptRecord> = {}): ScheduledPromptRec
     status: overrides.status ?? "active",
     createdAt: overrides.createdAt ?? "2026-08-30T14:00:00.000Z",
     ...(overrides.lastRunAt ? { lastRunAt: overrides.lastRunAt } : {}),
+    ...(overrides.nextRun ? { nextRun: overrides.nextRun } : {}),
     ...(overrides.cancelledAt ? { cancelledAt: overrides.cancelledAt } : {})
   };
 }
 
 interface RepositoryCalls {
+  /** Mirrored stored records, so tests can inspect settle effects. */
+  stored: ScheduledPromptRecord[];
   listActiveScheduledPrompts: ReturnType<typeof vi.fn>;
   claimScheduledPrompt: ReturnType<typeof vi.fn>;
   releaseScheduledPromptClaim: ReturnType<typeof vi.fn>;
@@ -53,6 +56,7 @@ function repositoryMock(jobs: ScheduledPromptRecord[] = []): RepositoryCalls {
   const stored: ScheduledPromptRecord[] = jobs.map((entry) => ({ ...entry }));
   const claimed = new Set<string>();
   return {
+    stored,
     // Listings return copies, like storage round-trips do, so engine-side
     // mutation of a record never leaks into what the gate receives.
     listActiveScheduledPrompts: vi.fn(() =>
@@ -71,10 +75,15 @@ function repositoryMock(jobs: ScheduledPromptRecord[] = []): RepositoryCalls {
     releaseScheduledPromptClaim: vi.fn((id: string) => {
       claimed.delete(id);
     }),
-    markScheduledPromptFired: vi.fn((id: string, firedAtUtc: string) => {
+    markScheduledPromptFired: vi.fn((id: string, firedAtUtc: string, nextRunUtc?: string) => {
       const target = stored.find((entry) => entry.id === id);
       if (target) {
         target.lastRunAt = firedAtUtc;
+        if (nextRunUtc !== undefined) {
+          target.nextRun = nextRunUtc;
+        } else {
+          delete target.nextRun;
+        }
       }
       claimed.delete(id);
     }),
@@ -83,6 +92,7 @@ function repositoryMock(jobs: ScheduledPromptRecord[] = []): RepositoryCalls {
       if (target && target.status === "active") {
         target.status = "completed";
         target.lastRunAt = completedAtUtc;
+        delete target.nextRun;
       }
       claimed.delete(id);
     }),
@@ -310,6 +320,17 @@ describe("dueOccurrence", () => {
     );
     expect(due?.toISOString()).toBe("2026-09-01T14:15:00.000Z");
   });
+
+  it("ignores a stale stored next-run snapshot when resolving the due occurrence", () => {
+    // The persisted next run is a display snapshot rewritten at claim time;
+    // due detection stays anchored to the last run (or creation).
+    const reArmed = job({
+      lastRunAt: "2026-08-30T14:20:00.001Z",
+      nextRun: "2026-12-25T00:00:00.000Z"
+    });
+    expect(dueOccurrence(reArmed, new Date("2026-08-31T14:15:00.000Z"))?.toISOString())
+      .toBe("2026-08-31T14:15:00.000Z");
+  });
 });
 
 describe("SchedulerRunner", () => {
@@ -383,7 +404,14 @@ describe("SchedulerRunner", () => {
     );
     await runner.runOnce();
     expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
-    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith("job-1", "2026-08-30T14:20:00.001Z");
+    // The settle persists the engine's own next occurrence, derived from the
+    // re-armed last run: the next daily 09:15 America/Chicago after
+    // 2026-08-30T14:20:00.001Z is 2026-08-31T14:15:00.000Z.
+    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith(
+      "job-1",
+      "2026-08-30T14:20:00.001Z",
+      "2026-08-31T14:15:00.000Z"
+    );
     expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
 
     await runner.runOnce();
@@ -425,7 +453,13 @@ describe("SchedulerRunner", () => {
     clock.value = new Date("2026-08-31T14:30:00.000Z");
     await runner.runOnce();
     expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
-    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith("job-1", "2026-08-31T14:30:00.001Z");
+    // The persisted next run is the next weekday occurrence (Tuesday 09:15
+    // CDT) derived from the re-armed last run.
+    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith(
+      "job-1",
+      "2026-08-31T14:30:00.001Z",
+      "2026-09-01T14:15:00.000Z"
+    );
     expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
     expect(dispatcher.sendToConversation).toHaveBeenCalledWith(CONVERSATION, "Monday standup!");
 
@@ -483,6 +517,23 @@ describe("SchedulerRunner", () => {
     );
     await runner.runOnce();
     expect(conversations.runScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("completes a one-time job with no next run: the settle signature clears the snapshot", async () => {
+    const scheduled = job({
+      schedule: { type: "once", atUtc: "2026-08-30T14:00:00.000Z" },
+      nextRun: "2026-08-30T14:00:00.000Z"
+    });
+    const { runner, repository } = harness(
+      [scheduled],
+      "2026-08-30T14:30:00.000Z",
+      '{"type":"silent"}'
+    );
+    await runner.runOnce();
+    expect(repository.completeScheduledPrompt).toHaveBeenCalledWith("job-1", "2026-08-30T14:30:00.000Z");
+    // No next-run argument for one-time jobs: completion clears the stored
+    // snapshot at the storage layer, so completed records carry no next run.
+    expect(repository.completeScheduledPrompt.mock.calls[0]).toHaveLength(2);
   });
 
   it("runs a silent one-time job through the gate, posts nothing, and completes it", async () => {
@@ -645,7 +696,11 @@ describe("SchedulerRunner", () => {
     expect(conversations.runScheduledPrompt).toHaveBeenCalledWith(
       expect.objectContaining({ id: "job-bad" })
     );
-    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith("job-bad", "2026-08-30T14:20:00.001Z");
+    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith(
+      "job-bad",
+      "2026-08-30T14:20:00.001Z",
+      "2026-08-31T14:15:00.000Z"
+    );
   });
 
   it("defers firing while Discord is not ready and leaves the occurrence unconsumed", async () => {
@@ -799,7 +854,8 @@ describe("SchedulerRunner", () => {
     expect(dispatcher.sendToConversation).toHaveBeenCalledTimes(1);
     expect(repository.markScheduledPromptFired).toHaveBeenCalledWith(
       "job-1",
-      "2026-08-30T14:20:00.001Z"
+      "2026-08-30T14:20:00.001Z",
+      "2026-08-31T14:15:00.000Z"
     );
     expect(repository.releaseScheduledPromptClaim).not.toHaveBeenCalled();
 
@@ -836,7 +892,51 @@ describe("SchedulerRunner", () => {
     clock.value = new Date("2026-08-30T14:21:00.000Z");
     await runner.runOnce();
     expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(2);
-    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith("job-1", "2026-08-30T14:21:00.001Z");
+    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith(
+      "job-1",
+      "2026-08-30T14:21:00.001Z",
+      "2026-08-31T14:15:00.000Z"
+    );
+  });
+
+  it("persists the engine's next occurrence so the stored record lists what it will honor next", async () => {
+    // End-to-end against a real repository: after the settle, the record's
+    // nextRun snapshot equals the engine's next occurrence derived from the
+    // re-armed last run — a due-but-unfired listing never shows tomorrow.
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-nextrun-"));
+    const store = new ArtemisRepository(directory + "/artemis.sqlite");
+    try {
+      const created = store.createScheduledPrompt(CONVERSATION.key, {
+        prompt: "Morning!",
+        schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
+        responseType: "silent",
+        scheduledByUserId: "user-1",
+        nextRun: "2026-08-30T14:15:00.000Z"
+      });
+      // Pre-arm the job with a fixed last-run basis so due detection is
+      // independent of the real clock the suite runs under.
+      store.markScheduledPromptFired(created.id, "2026-08-29T14:20:00.001Z", "2026-08-30T14:15:00.000Z");
+      const conversations = {
+        runExclusive: vi.fn(),
+        runScheduledPrompt: vi.fn().mockResolvedValue({ text: '{"type":"silent"}', model: "m" })
+      };
+      const runner = new SchedulerRunner({
+        repository: store,
+        conversations: conversations as never,
+        dispatcher: { sendToConversation: vi.fn().mockResolvedValue(true) } as never,
+        logger: createLoggerMock(),
+        now: () => new Date("2026-08-30T14:20:00.000Z")
+      });
+
+      await runner.runOnce();
+      const listed = store.listActiveScheduledPrompts();
+      expect(listed).toHaveLength(1);
+      expect(listed[0]?.lastRunAt).toBe("2026-08-30T14:20:00.001Z");
+      expect(listed[0]?.nextRun).toBe("2026-08-31T14:15:00.000Z");
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("lets two concurrent pollers fire the same due job at most once", async () => {
@@ -1051,7 +1151,8 @@ describe("SchedulerRunner.runScheduledTaskNow", () => {
     await expect(runner.runScheduledTaskNow(recurring)).resolves.toEqual({ status: "silent" });
     expect(repository.markScheduledPromptFired).toHaveBeenCalledWith(
       "job-daily",
-      "2026-08-30T15:00:00.001Z"
+      "2026-08-30T15:00:00.001Z",
+      "2026-08-31T14:15:00.000Z"
     );
     expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
   });
@@ -1150,7 +1251,8 @@ describe("SchedulerRunner.runScheduledTaskNow", () => {
     );
     expect(repository.markScheduledPromptFired).toHaveBeenCalledWith(
       "job-unroutable",
-      expect.any(String)
+      expect.any(String),
+      "2026-08-31T14:15:00.000Z"
     );
     expect(repository.releaseScheduledPromptClaim).not.toHaveBeenCalled();
   });

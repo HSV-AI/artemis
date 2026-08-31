@@ -1014,6 +1014,24 @@ export function createSchedulerTools(
   context: SchedulerToolContext,
   now: () => Date = () => new Date()
 ) {
+  /**
+   * Display basis for an active row's next run: the record's persisted
+   * engine snapshot when one is stored, so listings show the occurrence the
+   * engine will actually honor (including one that is due but not yet
+   * fired); recomputation for legacy rows without a snapshot, and for a
+   * stored value that no longer parses. Completed and canceled rows never
+   * resolve a next run at all.
+   */
+  const resolveListedNextRun = (job: ScheduledPromptRecord): Date | undefined => {
+    if (job.nextRun !== undefined) {
+      const stored = new Date(job.nextRun);
+      if (!Number.isNaN(stored.getTime())) {
+        return stored;
+      }
+    }
+    return nextOccurrenceUtc(job.schedule, now());
+  };
+
   const schedulePrompt = defineTool({
     name: "schedule_prompt",
     label: "Schedule Prompt",
@@ -1064,7 +1082,8 @@ export function createSchedulerTools(
         prompt,
         schedule: resolved.schedule,
         responseType,
-        scheduledByUserId: context.schedulingUserId?.trim() ?? ""
+        scheduledByUserId: context.schedulingUserId?.trim() ?? "",
+        nextRun: resolved.nextRun.toISOString()
       });
       return textResult(createdPromptText(record, resolved.nextRun, resolved.timezone));
     }
@@ -1110,7 +1129,7 @@ export function createSchedulerTools(
           `scheduled_at: ${job.createdAt}`
         ];
         if (job.status === "active") {
-          const nextRun = nextOccurrenceUtc(job.schedule, now());
+          const nextRun = resolveListedNextRun(job);
           fields.push(`next run ${nextRun ? nextRun.toISOString() : "unresolved"}`);
         } else if (job.status === "completed") {
           fields.push(`completed_at: ${job.completedAt ?? "unresolved"}`);
@@ -1323,7 +1342,12 @@ export function createSchedulerTools(
         if ("error" in resolved) {
           return textResult(resolved.error);
         }
-        const resumed = store.resumeScheduledPrompt(context.conversationKey, id, resolved.schedule);
+        const resumed = store.resumeScheduledPrompt(
+          context.conversationKey,
+          id,
+          resolved.schedule,
+          resolved.nextRun.toISOString()
+        );
         if (!resumed) {
           return textResult(
             `Error: no canceled scheduled prompt with id "${id}" in ${context.conversationKey}. ` +
@@ -1360,7 +1384,13 @@ export function createSchedulerTools(
       }
       const changes: ScheduledPromptUpdate = {
         ...(promptText !== undefined ? { prompt: promptText } : {}),
-        ...(scheduleChange !== undefined ? { schedule: scheduleChange } : {})
+        ...(scheduleChange !== undefined ? { schedule: scheduleChange } : {}),
+        // Persist the resolved snapshot with the schedule rewrite; a
+        // prompt-only edit passes none and the store preserves the stored
+        // snapshot instead of recomputing it.
+        ...(scheduleChange !== undefined && resolvedNextRun !== undefined
+          ? { nextRun: resolvedNextRun.toISOString() }
+          : {})
       };
       const updated = store.updateScheduledPrompt(context.conversationKey, id, changes);
       if (!updated) {
@@ -1369,9 +1399,9 @@ export function createSchedulerTools(
           "Nothing was updated."
         );
       }
-      const nextRun = scheduleChange
+      const nextRun = scheduleChange && resolvedNextRun
         ? resolvedNextRun
-        : nextOccurrenceUtc(updated.schedule, now());
+        : resolveListedNextRun(updated);
       const localTimezone = resolvedTimezone ??
         (updated.schedule.type === "once"
           ? (context.defaultTimezone !== undefined && isValidTimezone(context.defaultTimezone)
