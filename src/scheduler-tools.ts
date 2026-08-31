@@ -1401,7 +1401,8 @@ export function createSchedulerTools(
       "Only run when the current Discord user explicitly asks to execute a scheduled prompt now.",
       "Use an id from schedule_prompt or list_scheduled_prompts; only this conversation's scheduled prompts can run.",
       "Only ongoing records can run immediately; canceled records need update_scheduled_prompt with a new schedule to re-arm them first, and completed records are retired history.",
-      "The run consumes the task's next occurrence like a scheduled fire: a one-time task completes and will not fire again, a recurring task continues at its next occurrence.",
+      "A completed run consumes the task's next occurrence like a scheduled fire: a one-time task completes and will not fire again, a recurring task continues at its next occurrence.",
+      "A denied, failed, invalid-response, or undelivered run consumes nothing: the claim is released and the task remains scheduled, retrying on a later tick.",
       "Response handling is identical to a scheduled fire: JSON-validated message content is posted, silent posts nothing, invalid responses post nothing."
     ],
     parameters: Type.Object({
@@ -1447,6 +1448,9 @@ export function createSchedulerTools(
       const lifecycleNote = target.schedule.type === "once"
         ? "The one-time task is now completed and will not fire again."
         : "The run consumed the occurrence like any scheduled fire; the recurring schedule continues.";
+      const retryNote =
+        "The task was not consumed: its claim was released and it remains scheduled, so it fires " +
+        "again on a later scheduler tick (for a recurring schedule, the missed occurrence retries).";
       switch (outcome.status) {
         case "posted":
           return textResult(
@@ -1465,22 +1469,25 @@ export function createSchedulerTools(
             `Ran scheduled prompt ${id} immediately, but the agent response was not a valid ` +
             "scheduled-task JSON reply, so nothing was posted (same handling as a scheduled fire).\n" +
             `Response preview: ${preview}\n` +
-            lifecycleNote
+            retryNote
           );
         }
+        case "unroutable":
+          return textResult(
+            `Error: scheduled prompt ${id} ran, but its stored conversation key could not be ` +
+            `resolved for delivery. See the scheduler events for details.`
+          );
         case "undelivered":
           return textResult(
             `Error: scheduled prompt ${id} ran, but its response could not be delivered to ` +
-            `${target.conversationKey}. See the scheduler events for details.`
+            `${target.conversationKey}. See the scheduler events for details.\n${retryNote}`
           );
         case "not-run":
           return textResult(
             `Error: scheduled prompt ${id} could not be executed — the fire-time authorization ` +
-            "gate denied the run or generation failed, and nothing was posted.\n" +
-            // The executor consumed the occurrence before the gate ran (issue
-            // #70), so the reply must not leave a consumed one-time task
-            // sounding like it will still fire later.
-            lifecycleNote
+            "gate denied the run, the run is already executing elsewhere, or generation failed, " +
+            "and nothing was posted.\n" +
+            retryNote
           );
       }
     }

@@ -101,6 +101,7 @@ interface ScheduledPromptRow {
   cancelled_at: string | null;
   scheduled_by_user_id: string | null;
   last_run_at: string | null;
+  claimed_until: string | null;
 }
 
 function now(): string {
@@ -558,16 +559,18 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
   ): ScheduledPromptRecord | undefined {
     // Resume is a single-row repair of a canceled record: the schedule
     // columns are rewritten as a set so the row-shape CHECK constraint stays
-    // satisfied, the cancel bookkeeping and fire marker are cleared (so the
-    // next occurrence derives from the resume instant), and created_at moves
-    // to the resume instant — the moment the event was re-scheduled.
+    // satisfied, the cancel bookkeeping, fire marker, and any stale claim are
+    // cleared (so the next occurrence derives from the resume instant and is
+    // immediately claimable), and created_at moves to the resume instant — the
+    // moment the event was re-scheduled.
     const resumedAt = now();
     const result = this.database
       .prepare(
         `UPDATE scheduled_prompts
          SET schedule_type = ?, at_utc = ?, time_of_day = ?, day_of_week = ?,
              day_of_month = ?, cron_expression = ?, timezone = ?,
-             status = 'active', cancelled_at = NULL, last_run_at = NULL, created_at = ?
+             status = 'active', cancelled_at = NULL, last_run_at = NULL,
+             claimed_until = NULL, created_at = ?
          WHERE id = ? AND conversation_key = ? AND status = 'cancelled'`
       )
       .run(
@@ -654,6 +657,31 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       )
       .all() as ScheduledPromptRow[];
     return rows.map((row) => this.mapScheduledPrompt(row));
+  }
+
+  public claimScheduledPrompt(id: string, claimedUntilUtc: string, nowUtc: string): boolean {
+    // The claim is one atomic conditional UPDATE: only an `active` job with no
+    // live claim (never claimed, or `claimed_until` already past) is claimed,
+    // so two pollers racing on the same due occurrence can never both win —
+    // SQLite evaluates the WHERE and the write as a single unit of work.
+    const result = this.database
+      .prepare(
+        `UPDATE scheduled_prompts
+         SET claimed_until = ?
+         WHERE id = ? AND status = 'active'
+           AND (claimed_until IS NULL OR claimed_until < ?)`
+      )
+      .run(claimedUntilUtc, id, nowUtc);
+    return result.changes === 1;
+  }
+
+  public releaseScheduledPromptClaim(id: string): void {
+    // Clearing the claim returns a denied or failed job to the claimable pool.
+    // The id alone is enough: cancelled or completed records never claim, and
+    // a stale claim on a resumed row is harmless bookkeeping to clear.
+    this.database
+      .prepare("UPDATE scheduled_prompts SET claimed_until = NULL WHERE id = ?")
+      .run(id);
   }
 
   public markScheduledPromptFired(id: string, firedAtUtc: string): void {
@@ -815,6 +843,10 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
 
     if (!applied.has(10)) {
       this.applyMigration10();
+    }
+
+    if (!applied.has(11)) {
+      this.applyMigration11();
     }
 
     // A fully migrated database is the steady state. The bootstrap path
@@ -1069,6 +1101,32 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
     transaction();
   }
 
+  /**
+   * Migration 11 replaces the scheduler's consume-then-pray lifecycle with
+   * claim-and-reconcile: `claimed_until` lets the engine atomically claim a
+   * due occurrence before the fire-time gate runs and release it afterwards on
+   * denial or failure, while a crashed run's claim simply expires and the job
+   * becomes reclaimable. The column is additive — a nullable timestamp, no
+   * CHECK constraint change — so a plain ALTER TABLE preserves every existing
+   * row verbatim (unlike migrations 9 and 10's table rebuilds).
+   */
+  private applyMigration11(): void {
+    const timestamp = now();
+    const transaction = this.database.transaction(() => {
+      const columns = this.database.prepare("PRAGMA table_info(scheduled_prompts)").all() as {
+        name: string;
+      }[];
+      const hasColumn = columns.some((column) => column.name === "claimed_until");
+      if (!hasColumn) {
+        this.database.exec("ALTER TABLE scheduled_prompts ADD COLUMN claimed_until TEXT;");
+      }
+      this.database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+        .run(11, timestamp);
+    });
+    transaction();
+  }
+
   private bootstrapFreshDatabase(): void {
     const timestamp = now();
     const transaction = this.database.transaction(() => {
@@ -1202,6 +1260,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
           created_at TEXT NOT NULL,
           cancelled_at TEXT,
           last_run_at TEXT,
+          claimed_until TEXT,
           CHECK (
             (schedule_type = 'once'
               AND at_utc IS NOT NULL AND time_of_day IS NULL AND day_of_week IS NULL
@@ -1228,7 +1287,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       const insert = this.database.prepare(
         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)"
       );
-      for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+      for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]) {
         insert.run(version, timestamp);
       }
     });

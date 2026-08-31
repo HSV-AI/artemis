@@ -1,9 +1,13 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { ArtemisRepository } from "../src/repository.js";
+import { ArtemisRepository } from "../src/repository.js";
 import type { ConversationIdentity } from "../src/domain.js";
 import type { Logger } from "../src/domain.js";
 import type { ScheduledPromptRecord } from "../src/domain.js";
 import {
+  SCHEDULER_CLAIM_TIMEOUT_MS,
   SCHEDULER_POLL_INTERVAL_MS,
   SCHEDULER_RESPONSE_MAX_ATTEMPTS,
   SchedulerRunner,
@@ -38,27 +42,49 @@ function job(overrides: Partial<ScheduledPromptRecord> = {}): ScheduledPromptRec
 
 interface RepositoryCalls {
   listActiveScheduledPrompts: ReturnType<typeof vi.fn>;
+  claimScheduledPrompt: ReturnType<typeof vi.fn>;
+  releaseScheduledPromptClaim: ReturnType<typeof vi.fn>;
   markScheduledPromptFired: ReturnType<typeof vi.fn>;
   completeScheduledPrompt: ReturnType<typeof vi.fn>;
   recordEvent: ReturnType<typeof vi.fn>;
 }
 
 function repositoryMock(jobs: ScheduledPromptRecord[] = []): RepositoryCalls {
-  const stored = [...jobs];
+  const stored: ScheduledPromptRecord[] = jobs.map((entry) => ({ ...entry }));
+  const claimed = new Set<string>();
   return {
-    listActiveScheduledPrompts: vi.fn(() => stored.filter((entry) => entry.status === "active")),
+    // Listings return copies, like storage round-trips do, so engine-side
+    // mutation of a record never leaks into what the gate receives.
+    listActiveScheduledPrompts: vi.fn(() =>
+      stored
+        .filter((entry) => entry.status === "active")
+        .map((entry) => ({ ...entry }))
+    ),
+    claimScheduledPrompt: vi.fn((id: string) => {
+      const target = stored.find((entry) => entry.id === id);
+      if (!target || target.status !== "active" || claimed.has(id)) {
+        return false;
+      }
+      claimed.add(id);
+      return true;
+    }),
+    releaseScheduledPromptClaim: vi.fn((id: string) => {
+      claimed.delete(id);
+    }),
     markScheduledPromptFired: vi.fn((id: string, firedAtUtc: string) => {
       const target = stored.find((entry) => entry.id === id);
       if (target) {
         target.lastRunAt = firedAtUtc;
       }
+      claimed.delete(id);
     }),
     completeScheduledPrompt: vi.fn((id: string, completedAtUtc: string) => {
       const target = stored.find((entry) => entry.id === id);
-      if (target) {
+      if (target && target.status === "active") {
         target.status = "completed";
         target.lastRunAt = completedAtUtc;
       }
+      claimed.delete(id);
     }),
     recordEvent: vi.fn()
   };
@@ -296,16 +322,16 @@ describe("SchedulerRunner", () => {
 
     expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
     expect(conversations.runScheduledPrompt).toHaveBeenCalledWith(scheduled);
-    // The occurrence is consumed before the gate runs so a crash mid-turn
-    // cannot double-post.
-    const consumeOrder = repository.completeScheduledPrompt.mock.invocationCallOrder[0];
+    // The occurrence is claimed before the gate runs, so only one poller can
+    // execute a due job.
+    const claimOrder = repository.claimScheduledPrompt.mock.invocationCallOrder[0];
     const gateOrder = conversations.runScheduledPrompt.mock.invocationCallOrder[0];
-    expect(consumeOrder).toBeDefined();
+    expect(claimOrder).toBeDefined();
     expect(gateOrder).toBeDefined();
-    if (consumeOrder === undefined || gateOrder === undefined) {
+    if (claimOrder === undefined || gateOrder === undefined) {
       return;
     }
-    expect(consumeOrder).toBeLessThan(gateOrder);
+    expect(claimOrder).toBeLessThan(gateOrder);
     expect(dispatcher.sendToConversation).toHaveBeenCalledWith(CONVERSATION, "Good morning!");
     expect(repository.recordEvent).toHaveBeenCalledWith(
       "scheduled_prompt_fired",
@@ -329,7 +355,24 @@ describe("SchedulerRunner", () => {
     await runner.runOnce();
     expect(conversations.runScheduledPrompt).not.toHaveBeenCalled();
     expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
+    expect(repository.claimScheduledPrompt).not.toHaveBeenCalled();
     expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("claims a due job with the fixed claim deadline held from the tick instant", async () => {
+    expect(SCHEDULER_CLAIM_TIMEOUT_MS).toBe(600_000);
+    const { runner, repository, conversations } = harness(
+      [job({ createdAt: "2026-08-30T14:00:00.000Z" })],
+      "2026-08-30T14:20:00.000Z",
+      '{"type":"silent"}'
+    );
+    await runner.runOnce();
+    expect(repository.claimScheduledPrompt).toHaveBeenCalledWith(
+      "job-1",
+      "2026-08-30T14:30:00.000Z",
+      "2026-08-30T14:20:00.000Z"
+    );
+    expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
   });
 
   it("runs a due daily job, posts the content, and re-arms via lastRunAt", async () => {
@@ -490,38 +533,62 @@ describe("SchedulerRunner", () => {
         })
       })
     );
-    // The occurrence is still consumed so an invalid response cannot retry-storm.
-    expect(repository.markScheduledPromptFired).toHaveBeenCalled();
+    // The claim is released so an invalid response cannot silently destroy a
+    // one-time job: it stays claimable and fires again on a later tick.
+    expect(repository.releaseScheduledPromptClaim).toHaveBeenCalledWith("job-1");
+    expect(repository.markScheduledPromptFired).not.toHaveBeenCalled();
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
   });
 
-  it("posts nothing when the authorization gate denies or fails the run", async () => {
-    const repository = repositoryMock([job({ createdAt: "2026-08-30T14:00:00.000Z" })]);
+  it("releases the claim and stays claimable when the authorization gate denies or fails the run (finding 1)", async () => {
+    // Regression for finding 1: the pre-claim-and-reconcile engine consumed a
+    // one-time occurrence before the gate, so a denied or failed run marked
+    // the job completed and it never fired again.
+    const scheduled = job({ schedule: { type: "once", atUtc: "2026-08-30T14:00:00.000Z" } });
+    const repository = repositoryMock([scheduled]);
     const conversations = {
       runExclusive: vi.fn(),
-      runScheduledPrompt: vi.fn().mockResolvedValue(null)
+      runScheduledPrompt: vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce({
+        text: '{"type":"message","content":"Finally fired"}',
+        model: "test-model"
+      })
     };
     const dispatcher = { sendToConversation: vi.fn().mockResolvedValue(true) };
     const logger = createLoggerMock();
+    const clock = { value: new Date("2026-08-30T14:20:00.000Z") };
     const runner = new SchedulerRunner({
       repository: repository as unknown as ArtemisRepository,
       conversations: conversations as never,
       dispatcher: dispatcher as never,
       logger,
-      now: () => new Date("2026-08-30T14:20:00.000Z")
+      now: () => new Date(clock.value.getTime())
     });
 
+    // First tick: the gate denies or fails the run.
     await runner.runOnce();
-    // Denied or failed runs return null already logged by the gate; the
-    // engine posts nothing and does not double-log an invalid response.
+    expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
     expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
-    expect(logger.error).not.toHaveBeenCalled();
-    expect(repository.recordEvent).not.toHaveBeenCalledWith(
-      "scheduled_prompt_invalid_response",
-      expect.anything()
-    );
-   });
+    // The job was NOT consumed: no completion, and the claim was released.
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+    expect(repository.markScheduledPromptFired).not.toHaveBeenCalled();
+    expect(repository.releaseScheduledPromptClaim).toHaveBeenCalledWith("job-1");
+
+    // Second tick: the job is claimable again and fires once more.
+    clock.value = new Date("2026-08-30T14:21:00.000Z");
+    await runner.runOnce();
+    expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(2);
+    expect(dispatcher.sendToConversation).toHaveBeenCalledWith(CONVERSATION, "Finally fired");
+    // The successful run settles the job exactly once.
+    expect(repository.completeScheduledPrompt).toHaveBeenCalledTimes(1);
+    expect(repository.completeScheduledPrompt).toHaveBeenCalledWith("job-1", "2026-08-30T14:21:00.000Z");
+
+    // A third tick finds nothing due: the one-time job is retired.
+    clock.value = new Date("2026-08-30T14:22:00.000Z");
+    await runner.runOnce();
+    expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(2);
+  });
  
-   it("logs a failure, posts nothing, and consumes the occurrence when delivery fails", async () => {
+  it("logs a failure, posts nothing, and releases the claim when delivery fails", async () => {
     const repository = repositoryMock([job({ createdAt: "2026-08-30T14:00:00.000Z" })]);
     const conversations = {
       runExclusive: vi.fn(),
@@ -553,6 +620,10 @@ describe("SchedulerRunner", () => {
       "scheduled_prompt_failed",
       expect.objectContaining({ details: expect.objectContaining({ jobId: "job-1" }) })
     );
+    // The failed delivery releases the claim: the job can be retried on a
+    // later tick instead of being silently dropped.
+    expect(repository.releaseScheduledPromptClaim).toHaveBeenCalledWith("job-1");
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
   });
 
   it("logs an error and posts nothing when the conversation key cannot be routed", async () => {
@@ -599,10 +670,10 @@ describe("SchedulerRunner", () => {
     await runner.runOnce();
     await runner.runOnce(); // repeated ticks stay deferred
 
-    // Nothing runs pre-ready: no listing, no consumption, no generation, no
+    // Nothing runs pre-ready: no listing, no claim, no generation, no
     // post. The occurrence is still due and the next ready tick takes it.
     expect(repository.listActiveScheduledPrompts).not.toHaveBeenCalled();
-    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+    expect(repository.claimScheduledPrompt).not.toHaveBeenCalled();
     expect(conversations.runScheduledPrompt).not.toHaveBeenCalled();
     expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
     expect(logger.debug).toHaveBeenCalledWith(
@@ -649,9 +720,9 @@ describe("SchedulerRunner", () => {
     );
   });
 
-  it("leaves the job due when consuming the occurrence fails in storage", async () => {
+  it("leaves the job due when claiming the occurrence fails in storage", async () => {
     const repository = repositoryMock([job({ createdAt: "2026-08-30T14:00:00.000Z" })]);
-    repository.markScheduledPromptFired.mockImplementation(() => {
+    repository.claimScheduledPrompt.mockImplementation(() => {
       throw new Error("disk full");
     });
     const conversations = {
@@ -673,6 +744,196 @@ describe("SchedulerRunner", () => {
       "scheduled_prompt_state_failed",
       expect.objectContaining({ jobId: "job-1", errorMessage: "disk full" })
     );
+  });
+
+  it("keeps the tick alive when releasing the claim fails in storage; expiry self-heals", async () => {
+    // A release failure must not reject the poll; the job self-heals when the
+    // stale claim passes its deadline.
+    const repository = repositoryMock([job({ createdAt: "2026-08-30T14:00:00.000Z" })]);
+    repository.releaseScheduledPromptClaim.mockImplementation(() => {
+      throw new Error("disk full");
+    });
+    const conversations = {
+      runExclusive: vi.fn(),
+      runScheduledPrompt: vi.fn().mockResolvedValue(null) // denied run → release
+    };
+    const dispatcher = { sendToConversation: vi.fn().mockResolvedValue(true) };
+    const logger = createLoggerMock();
+    const runner = new SchedulerRunner({
+      repository: repository as unknown as ArtemisRepository,
+      conversations: conversations as never,
+      dispatcher: dispatcher as never,
+      logger,
+      now: () => new Date("2026-08-30T14:20:00.000Z")
+    });
+
+    await expect(runner.runOnce()).resolves.toBeUndefined();
+    expect(repository.releaseScheduledPromptClaim).toHaveBeenCalledWith("job-1");
+    expect(logger.error).toHaveBeenCalledWith(
+      "scheduled_prompt_state_failed",
+      expect.objectContaining({ jobId: "job-1", errorMessage: "disk full" })
+    );
+  });
+
+  it("reconciles a recurring success by re-arming and does not double-fire", async () => {
+    const repository = repositoryMock([job({ createdAt: "2026-08-30T14:00:00.000Z" })]);
+    const conversations = {
+      runExclusive: vi.fn(),
+      runScheduledPrompt: vi.fn().mockResolvedValue(
+        { text: '{"type":"message","content":"Morning!"}', model: "test-model" }
+      )
+    };
+    const dispatcher = { sendToConversation: vi.fn().mockResolvedValue(true) };
+    const clock = { value: new Date("2026-08-30T14:20:00.000Z") };
+    const runner = new SchedulerRunner({
+      repository: repository as unknown as ArtemisRepository,
+      conversations: conversations as never,
+      dispatcher: dispatcher as never,
+      logger: createLoggerMock(),
+      now: () => new Date(clock.value.getTime())
+    });
+
+    await runner.runOnce();
+    // The claim is settled (armed) only after the validated message posted.
+    expect(repository.claimScheduledPrompt).toHaveBeenCalledTimes(1);
+    expect(dispatcher.sendToConversation).toHaveBeenCalledTimes(1);
+    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith(
+      "job-1",
+      "2026-08-30T14:20:00.001Z"
+    );
+    expect(repository.releaseScheduledPromptClaim).not.toHaveBeenCalled();
+
+    clock.value = new Date("2026-08-30T14:21:00.000Z");
+    await runner.runOnce();
+    expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a recurring job whose generation failed until a run succeeds, then re-arms", async () => {
+    const repository = repositoryMock([job({ createdAt: "2026-08-30T14:00:00.000Z" })]);
+    const conversations = {
+      runExclusive: vi.fn(),
+      runScheduledPrompt: vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce({
+        text: '{"type":"silent"}',
+        model: "test-model"
+      })
+    };
+    const clock = { value: new Date("2026-08-30T14:20:00.000Z") };
+    const runner = new SchedulerRunner({
+      repository: repository as unknown as ArtemisRepository,
+      conversations: conversations as never,
+      dispatcher: { sendToConversation: vi.fn().mockResolvedValue(true) } as never,
+      logger: createLoggerMock(),
+      now: () => new Date(clock.value.getTime())
+    });
+
+    // First tick: the gate fails the run; the failed occurrence stays due.
+    await runner.runOnce();
+    expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
+    expect(repository.releaseScheduledPromptClaim).toHaveBeenCalledWith("job-1");
+    expect(repository.markScheduledPromptFired).not.toHaveBeenCalled();
+
+    // Second tick: the same occurrence is retried and succeeds; the job arms.
+    clock.value = new Date("2026-08-30T14:21:00.000Z");
+    await runner.runOnce();
+    expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(2);
+    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith("job-1", "2026-08-30T14:21:00.001Z");
+  });
+
+  it("lets two concurrent pollers fire the same due job at most once", async () => {
+    // A real SQLite store backs both engines so the atomic claim decides the
+    // race: only one poller may claim and run the due occurrence.
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-claim-race-"));
+    const store = new ArtemisRepository(directory + "/artemis.sqlite");
+    try {
+      store.createScheduledPrompt(CONVERSATION.key, {
+        prompt: "one-shot",
+        schedule: { type: "once", atUtc: "2025-01-01T00:00:00.000Z" },
+        responseType: "silent",
+        scheduledByUserId: "user-1"
+      });
+      let runs = 0;
+      const conversations = {
+        runExclusive: vi.fn(),
+        runScheduledPrompt: vi.fn(async () => {
+          runs += 1;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return { text: '{"type":"silent"}', model: "m" };
+        })
+      };
+      const buildRunner = () =>
+        new SchedulerRunner({
+          repository: store,
+          conversations: conversations as never,
+          dispatcher: { sendToConversation: vi.fn().mockResolvedValue(true) } as never,
+          logger: createLoggerMock(),
+          now: () => new Date("2026-08-30T14:20:00.000Z")
+        });
+      const first = buildRunner();
+      const second = buildRunner();
+
+      // Both pollers race without awaiting each other; the first synchronous
+      // claim wins and the second engine must skip the already-claimed job.
+      const race = Promise.all([first.runOnce(), second.runOnce()]);
+      await race;
+
+      expect(runs).toBe(1);
+      expect(store.listActiveScheduledPrompts()).toEqual([]); // completed once
+
+      await first.runOnce();
+      await second.runOnce();
+      expect(runs).toBe(1); // the settled one-time job never fires again
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reclaims and fires a due job whose claim was left behind by a crashed run", async () => {
+    // A crash mid-run leaves the claim set; once the claim deadline passes,
+    // the stored job becomes reclaimable and fires on a later tick instead of
+    // being permanently lost.
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-crash-claim-"));
+    const store = new ArtemisRepository(directory + "/artemis.sqlite");
+    try {
+      const created = store.createScheduledPrompt(CONVERSATION.key, {
+        prompt: "crash survivor",
+        schedule: { type: "once", atUtc: "2025-01-01T00:00:00.000Z" },
+        responseType: "silent",
+        scheduledByUserId: "user-1"
+      });
+      // Simulate the crashed run: the claim was set in the past and never
+      // reconciled.
+      expect(
+        store.claimScheduledPrompt(
+          created.id,
+          "2026-08-30T14:10:00.000Z",
+          "2026-08-30T14:00:00.000Z"
+        )
+      ).toBe(true);
+
+      let runs = 0;
+      const conversations = {
+        runExclusive: vi.fn(),
+        runScheduledPrompt: vi.fn(async () => {
+          runs += 1;
+          return { text: '{"type":"silent"}', model: "m" };
+        })
+      };
+      const runner = new SchedulerRunner({
+        repository: store,
+        conversations: conversations as never,
+        dispatcher: { sendToConversation: vi.fn().mockResolvedValue(true) } as never,
+        logger: createLoggerMock(),
+        now: () => new Date("2026-08-30T14:30:00.000Z") // past the stale deadline
+      });
+
+      await runner.runOnce();
+      expect(runs).toBe(1);
+      expect(store.listActiveScheduledPrompts()).toEqual([]); // completed exactly once
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("does not fire a silent daily job twice from one stored state", async () => {
@@ -731,7 +992,7 @@ describe("SchedulerRunner", () => {
   });
 });
 describe("SchedulerRunner.runScheduledTaskNow", () => {
-  it("runs an active job immediately: consumes the occurrence, uses the inline gate, posts, and reports posted", async () => {
+  it("runs an active job immediately: claims first, uses the inline gate, posts, and settles the job", async () => {
     const scheduled = job({ id: "job-now", schedule: { type: "once", atUtc: "2026-09-01T14:00:00.000Z" } });
     const { runner, repository, conversations, dispatcher, logger } = immediateHarness(scheduled, {
       inlineResult: { text: '{"type":"message","content":"On demand!"}', model: "test-model" },
@@ -743,24 +1004,30 @@ describe("SchedulerRunner.runScheduledTaskNow", () => {
       content: "On demand!"
     });
 
-    // The occurrence is consumed first, exactly like an engine fire: a
-    // one-time job completes at the run instant and never fires again.
-    expect(repository.completeScheduledPrompt).toHaveBeenCalledWith(
+    // The claim precedes the inline gate exactly like an engine fire; the
+    // one-time job is settled only after its validated message posted.
+    expect(repository.claimScheduledPrompt).toHaveBeenCalledWith(
       "job-now",
+      "2026-08-30T15:10:00.000Z",
       "2026-08-30T15:00:00.000Z"
     );
     expect(conversations.runScheduledPromptInline).toHaveBeenCalledTimes(1);
     expect(conversations.runScheduledPromptInline).toHaveBeenCalledWith(scheduled);
     expect(conversations.runScheduledPrompt).not.toHaveBeenCalled();
-    const consumeOrder = repository.completeScheduledPrompt.mock.invocationCallOrder[0];
+    const claimOrder = repository.claimScheduledPrompt.mock.invocationCallOrder[0];
     const gateOrder = conversations.runScheduledPromptInline.mock.invocationCallOrder[0];
-    expect(consumeOrder).toBeDefined();
+    expect(claimOrder).toBeDefined();
     expect(gateOrder).toBeDefined();
-    if (consumeOrder === undefined || gateOrder === undefined) {
+    if (claimOrder === undefined || gateOrder === undefined) {
       return;
     }
-    expect(consumeOrder).toBeLessThan(gateOrder);
+    expect(claimOrder).toBeLessThan(gateOrder);
     expect(dispatcher.sendToConversation).toHaveBeenCalledWith(CONVERSATION, "On demand!");
+    expect(repository.completeScheduledPrompt).toHaveBeenCalledWith(
+      "job-now",
+      "2026-08-30T15:00:00.000Z"
+    );
+    expect(repository.releaseScheduledPromptClaim).not.toHaveBeenCalled();
     expect(repository.recordEvent).toHaveBeenCalledWith(
       "scheduled_prompt_fired",
       expect.objectContaining({
@@ -774,7 +1041,7 @@ describe("SchedulerRunner.runScheduledTaskNow", () => {
     );
   });
 
-  it("re-arms a recurring job like an engine fire", async () => {
+  it("re-arms a recurring job like an engine fire on success", async () => {
     const recurring = job({ id: "job-daily", createdAt: "2026-08-30T14:00:00.000Z" });
     const { runner, repository } = immediateHarness(recurring, {
       inlineResult: { text: '{"type":"silent"}', model: "m" },
@@ -826,7 +1093,7 @@ describe("SchedulerRunner.runScheduledTaskNow", () => {
     );
   });
 
-  it("reports not-run without posting when the inline gate denies or fails the run", async () => {
+  it("reports not-run without posting when the inline gate denies or fails the run, releasing the claim", async () => {
     const scheduled = job({ id: "job-denied" });
     const { runner, dispatcher, logger, repository } = immediateHarness(scheduled, {
       inlineResult: null
@@ -839,9 +1106,14 @@ describe("SchedulerRunner.runScheduledTaskNow", () => {
       "scheduled_prompt_invalid_response",
       expect.anything()
     );
+    // The denied run no longer consumes the occurrence: the claim is released
+    // so the task stays scheduled and can fire on a later tick.
+    expect(repository.releaseScheduledPromptClaim).toHaveBeenCalledWith("job-denied");
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+    expect(repository.markScheduledPromptFired).not.toHaveBeenCalled();
   });
 
-  it("logs a failure and reports undelivered when delivery fails", async () => {
+  it("reports undelivered for a valid run, releasing the claim so the task can retry", async () => {
     const scheduled = job({ id: "job-drop" });
     const { runner, dispatcher, repository, logger } = immediateHarness(scheduled, {
       dispatcherResult: false
@@ -860,34 +1132,54 @@ describe("SchedulerRunner.runScheduledTaskNow", () => {
       "scheduled_prompt_failed",
       expect.objectContaining({ details: expect.objectContaining({ jobId: "job-drop" }) })
     );
+    expect(repository.releaseScheduledPromptClaim).toHaveBeenCalledWith("job-drop");
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
   });
 
-  it("reports undelivered for an unresolvable stored conversation key", async () => {
+  it("reports unroutable for an unresolvable stored conversation key and settles the job", async () => {
+    // An unparseable key can never deliver: the run is reported as unroutable
+    // and the job is settled so a structurally broken record cannot retry forever.
     const scheduled = job({ id: "job-unroutable", conversationKey: "not-a-key" });
-    const { runner, dispatcher, logger } = immediateHarness(scheduled, {});
+    const { runner, dispatcher, logger, repository } = immediateHarness(scheduled, {});
 
-    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({ status: "undelivered" });
+    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({ status: "unroutable" });
     expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalledWith(
       "scheduled_prompt_unroutable",
       expect.objectContaining({ jobId: "job-unroutable" })
     );
+    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith(
+      "job-unroutable",
+      expect.any(String)
+    );
+    expect(repository.releaseScheduledPromptClaim).not.toHaveBeenCalled();
   });
 
-  it("refuses non-active records without consuming or generating", async () => {
+  it("refuses to run a job it could not claim (held by a concurrent fire)", async () => {
+    const scheduled = job({ id: "job-held" });
+    const { runner, repository, conversations } = immediateHarness(scheduled, {});
+    repository.claimScheduledPrompt.mockReturnValue(false);
+
+    await expect(runner.runScheduledTaskNow(scheduled)).resolves.toEqual({ status: "not-run" });
+    expect(repository.releaseScheduledPromptClaim).not.toHaveBeenCalled();
+    expect(conversations.runScheduledPromptInline).not.toHaveBeenCalled();
+  });
+
+  it("refuses non-active records without claiming or generating", async () => {
     const cancelled = job({ id: "job-cancelled", status: "cancelled", cancelledAt: "2026-08-29T00:00:00.000Z" });
     const { runner, repository, conversations } = immediateHarness(cancelled, {});
 
     await expect(runner.runScheduledTaskNow(cancelled)).resolves.toEqual({ status: "not-run" });
     expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
     expect(repository.markScheduledPromptFired).not.toHaveBeenCalled();
+    expect(repository.claimScheduledPrompt).not.toHaveBeenCalled();
     expect(conversations.runScheduledPromptInline).not.toHaveBeenCalled();
   });
 
-  it("reports not-run when consuming the occurrence fails in storage", async () => {
+  it("reports not-run when claiming the occurrence fails in storage", async () => {
     const scheduled = job({ id: "job-disk" });
     const { runner, repository, conversations, logger } = immediateHarness(scheduled, {});
-    repository.markScheduledPromptFired.mockImplementation(() => {
+    repository.claimScheduledPrompt.mockImplementation(() => {
       throw new Error("disk full");
     });
 
@@ -899,7 +1191,7 @@ describe("SchedulerRunner.runScheduledTaskNow", () => {
     );
   });
 
-  it("reports not-run when the inline gate throws, instead of rejecting the tool call", async () => {
+  it("reports not-run and releases the claim when the inline gate throws", async () => {
     const scheduled = job({ id: "job-throw" });
     const { runner, repository, logger } = immediateHarness(scheduled, {
       inlineResult: new Error("model offline")
@@ -914,5 +1206,8 @@ describe("SchedulerRunner.runScheduledTaskNow", () => {
       "scheduled_prompt_failed",
       expect.objectContaining({ details: expect.objectContaining({ jobId: "job-throw" }) })
     );
+    // The thrown gate run releases the claim so the job can retry.
+    expect(repository.releaseScheduledPromptClaim).toHaveBeenCalledWith("job-throw");
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
   });
 });

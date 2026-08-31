@@ -2070,7 +2070,7 @@ describe("run_scheduled_task", () => {
     expect(text).toMatch(/nothing was posted/i);
   });
 
-  it("reports an invalid agent response and includes a bounded preview", async () => {
+  it("reports an invalid agent response with a bounded preview and notes the task stays scheduled", async () => {
     const store = storeMock([activeJob({ id: "job-bad" })]);
     const preview = "x".repeat(500);
     const runner = runnerMock({ status: "invalid-response", responsePreview: preview });
@@ -2080,9 +2080,12 @@ describe("run_scheduled_task", () => {
     expect(text).toMatch(/not a valid scheduled-task JSON reply/i);
     expect(text).toMatch(/nothing was posted/i);
     expect(text).toContain("x".repeat(200));
+    // The invalid run released its claim: the task remains scheduled.
+    expect(text).toMatch(/remains scheduled/i);
+    expect(text).not.toMatch(/will not fire again/i);
   });
 
-  it("reports a delivery failure distinctly", async () => {
+  it("reports a delivery failure distinctly and notes the task stays scheduled", async () => {
     const store = storeMock([activeJob({ id: "job-undelivered" })]);
     const runner = runnerMock({ status: "undelivered" });
 
@@ -2090,6 +2093,9 @@ describe("run_scheduled_task", () => {
 
     expect(text).toContain("Error:");
     expect(text).toMatch(/could not be delivered/i);
+    // The undelivered run released its claim: the task remains scheduled.
+    expect(text).toMatch(/remains scheduled/i);
+    expect(text).not.toMatch(/will not fire again/i);
   });
 
   it("reports a denied or failed gate run as an error with nothing posted", async () => {
@@ -2103,22 +2109,33 @@ describe("run_scheduled_task", () => {
     expect(text).toMatch(/nothing was posted/i);
   });
 
-  it("notes the consumed occurrence on a not-run outcome for one-time and recurring schedules", async () => {
+  it("states the task remains scheduled on a not-run outcome for one-time and recurring schedules", async () => {
     const store = storeMock([
       activeJob({ id: "job-once-denied", schedule: { type: "once", atUtc: "2026-09-01T14:00:00.000Z" } }),
       activeJob({ id: "job-daily-denied" })
     ]);
     const runTool = runToolOf(store, runnerMock({ status: "not-run" }));
 
-    // The executor consumed the occurrence before denying the run, so the
-    // one-time task must not be left sounding like it will still fire later.
+    // The denied run releases its claim, so the one-time task must be left
+    // sounding like it will still fire later — the occurrence was not consumed.
     const onceText = await executeTool(runTool, { id: "job-once-denied" });
     expect(onceText).toContain("Error:");
-    expect(onceText).toContain("completed and will not fire again");
+    expect(onceText).toMatch(/remains scheduled/i);
+    expect(onceText).not.toMatch(/completed and will not fire again/i);
 
     const dailyText = await executeTool(runTool, { id: "job-daily-denied" });
     expect(dailyText).toContain("Error:");
-    expect(dailyText).toContain("schedule continues");
+    expect(dailyText).toMatch(/remains scheduled/i);
+  });
+
+  it("reports an unroutable conversation key as an error without a lifecycle claim", async () => {
+    const store = storeMock([activeJob({ id: "job-unroutable" })]);
+    const runner = runnerMock({ status: "unroutable" });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-unroutable" });
+
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/could not be resolved/i);
   });
 
   it("errors on an unknown or foreign id without touching the runner", async () => {
