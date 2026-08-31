@@ -289,23 +289,33 @@ prompts (see [scheduler-execution.md](scheduler-execution.md)). Parameters:
 - `id` (required): schedule ID of an `ongoing` record, from
   `schedule_prompt` or `list_scheduled_prompts`.
 
-The run behaves exactly like a real scheduled fire: the occurrence is consumed
-first (a one-time task is marked `completed` and will not fire again; a
-recurring task re-arms via `last_run_at` and its recurring schedule
-continues), the [fire-time authorization gate](#trust-boundary-and-authorization)
+The run behaves exactly like a real scheduled fire under the
+[engine's claim-and-reconcile lifecycle](scheduler-execution.md): the job is
+claimed atomically first (a run another engine holds a live claim on answers
+`not-run` without any work), the
+[fire-time authorization gate](#trust-boundary-and-authorization)
 re-checks the stored scope and the scheduling user's live membership before
 any generation, the task generates inside its conversation's durable session
 with the same permissions, and the strict JSON response contract is applied
 identically — `message` content posts to the channel, `silent` posts nothing,
 invalid JSON posts nothing and records `scheduled_prompt_invalid_response`.
+The claim then reconciles exactly like a scheduled fire: a validated success
+settles the job (a one-time task is marked `completed` and will not fire
+again; a recurring task re-arms via `last_run_at` and its recurring schedule
+continues), while a denied, failed, invalid-response, or undeliverable run
+releases the claim — the task remains scheduled and fires again on a later
+tick.
 The tool's answer reports the outcome: the posted content for `message`, the
 silent completion, a bounded response preview for invalid responses, or a
-clear error when the authorization gate denied the run or generation failed.
-Every outcome carries a lifecycle note stating that the occurrence was
-consumed (a one-time task completed and will not fire again; a recurring
-schedule continues at its next occurrence) — including the `not-run` error,
-so a denied or failed run never leaves a consumed one-time task sounding
-like it will still fire later.
+clear error when the authorization gate denied the run, the run is already
+executing elsewhere, or generation failed. Every settled outcome carries a
+lifecycle note stating the occurrence was consumed (a one-time task completed
+and will not fire again; a recurring schedule continues at its next
+occurrence), and every released outcome carries the opposite note — the task
+was not consumed, its claim was released, and it remains scheduled (fires
+again on the next scheduler tick; a recurring schedule retries the missed
+occurrence) — so the answer never leaves the user believing the wrong thing
+about whether the task will still fire later.
 The tool is only registered when the composition wired the engine's
 immediate-run executor, and it is never registered for scheduler-fired
 generations themselves — a scheduled fire cannot trigger further on-demand
@@ -539,14 +549,14 @@ the harness-derived identities, and nothing else.
 - `run_scheduled_task` with a blank `id`, an unknown or foreign `id`, a
   canceled record (points at `update_scheduled_prompt`'s re-arm), or a
   completed record (retired history): descriptive error naming the id and
-  conversation; the runner is never invoked and nothing is consumed or
+  conversation; the runner is never invoked and nothing is claimed or
   generated.
 - `run_scheduled_task` when no immediate-run executor is wired: refusal
   naming the unavailability; nothing runs (the tool is not registered when
   no executor is configured, so this path only guards a misconfiguration).
 - A stale non-active record reaching the executor (between lookup and run):
   the engine refuses inactive records with `scheduled_task_run_refused_inactive`
-  and reports `not-run`; nothing is consumed or generated.
+  and reports `not-run`; nothing is claimed or generated.
 - `include_history` that is not a boolean: descriptive error; no mutation;
   the default listing path is never taken.
 - `prune_scheduled_prompt` with both an `id` and a bulk filter, or with
@@ -632,9 +642,10 @@ the harness-derived identities, and nothing else.
   registry metadata advertising five management tools without the runner and
   six with it, none exposing a `scope` parameter), the
   run tool (registration only with a wired executor, posted content and
-  lifecycle notes in the answer, silent/invalid/undelivered/not-run
-  reporting, consumed-occurrence lifecycle notes on the one-time and
-  recurring `not-run` errors, unknown/foreign/blank/canceled/completed refusals without
+  lifecycle notes in the answer, silent/invalid/undelivered/unroutable/not-run
+  reporting, settled-occurrence notes on posted and silent outcomes and
+  release/remain-scheduled notes on invalid, undelivered, and denied or failed
+  `not-run` outcomes, unknown/foreign/blank/canceled/completed refusals without
   runner invocations, injected-key scoping, and registry metadata), the
   creation-time membership gate (missing user, unwired checker, unknown
   answer, non-member refusal with no schedule-validation leak, membership

@@ -10,7 +10,9 @@ invalid-response correction retries from
 execution via `run_scheduled_task` follows
 [issue #67](https://github.com/HSV-AI/artemis/issues/67); firing of the
 optional cron schedule surface follows
-[issue #73](https://github.com/HSV-AI/artemis/issues/73).
+[issue #73](https://github.com/HSV-AI/artemis/issues/73); the claim-and-
+reconcile lifecycle replacing consume-before-gate follows
+[issue #75](https://github.com/HSV-AI/artemis/issues/75).
 
 ## Problem
 
@@ -31,8 +33,9 @@ membership checks the interactive pipeline enforces.
 
 This protocol owns:
 
-- the scheduler execution engine that polls stored jobs, consumes due occurrences,
-  and submits every job through the fire-time authorization gate
+- the scheduler execution engine that polls stored jobs, atomically claims due
+  occurrences in storage (claim-and-reconcile), and submits every claimed job
+  through the fire-time authorization gate
   (`ConversationService.runScheduledPrompt`)
 - the immediate on-demand execution path
   (`SchedulerRunner.runScheduledTaskNow` + the inline gate
@@ -44,11 +47,12 @@ This protocol owns:
   with correction prompts re-asking the agent when a reply is invalid
 - the Discord delivery path for scheduler output (`sendToConversation`)
 - the execution-store operations that cross conversations inside the process
-  boundary (`listActiveScheduledPrompts`, `markScheduledPromptFired`,
+  boundary (`listActiveScheduledPrompts`, `claimScheduledPrompt`,
+  `releaseScheduledPromptClaim`, `markScheduledPromptFired`,
   `completeScheduledPrompt`)
-- the `scheduled_prompts` schema extension (migration 9): `last_run_at` and the
-  `completed` status; migration 10's `cron` schedule type fires through the
-  same due-occurrence path with no engine-side branch
+- the `scheduled_prompts` schema extensions for execution: migration 9's
+  `last_run_at` and `completed` status, migration 10's `cron` schedule type,
+  and migration 11's `claimed_until` claim-deadline column
 
 It does not redefine the scheduler tools' parameters, validation, storage rules, or
 the authorization they enforce at fire time ([Scheduler
@@ -62,17 +66,26 @@ polling the scheduled-prompt store on a fixed 30-second interval, with one immed
 poll to catch up on work missed while the process was down. Firing is gated on the
 Discord gateway's ready handshake, not on a completed `login()`: ticks that arrive
 before the handshake (or while it has not yet happened) are deferred without listing
-or consuming, so a job's occurrence is never spent on a client that cannot yet resolve
+or claiming, so a job's occurrence is never spent on a client that cannot yet resolve
 its target channel — the ready handshake guarantees the client's guild and channel
 caches are populated. Each poll lists every active job across conversations; for each
 job it computes the occurrence the job is
 due for, from the job's `last_run_at` (or `created_at` when it has never fired), and
 fires the job when that occurrence is at or before the current time.
 
-Firing consumes the occurrence first (one-time jobs are marked `completed`,
-recurring jobs are re-armed via `last_run_at`) so a crash mid-turn can never
-double-post. The engine then submits the consumed job to the fire-time authorization
-gate, `ConversationService.runScheduledPrompt`: the gate re-applies the interactive
+Firing is **claim-and-reconcile**, never consume-before-run. First the engine
+claims the due occurrence atomically in storage
+(`claimScheduledPrompt`): a single conditional UPDATE that succeeds only when the
+job is `active` and its claim is absent or its `claimed_until` deadline has
+passed. Only a claimed job runs the gate, so two pollers — or two overlapping
+processes — can never both execute the same due occurrence, and the claim doubles
+as accidental multi-instance insurance that previously only the in-process
+`polling` boolean provided. A claim left behind by a crashed process simply
+expires at its deadline (`SCHEDULER_CLAIM_TIMEOUT_MS`, ten minutes), making the
+job reclaimable on a later tick instead of permanently lost.
+
+The engine then submits the claimed job to the fire-time authorization gate,
+`ConversationService.runScheduledPrompt`: the gate re-applies the interactive
 pipeline's authorization to the stored, harness-derived scope, re-checks live
 membership where feasible, and — for allowed runs — generates inside the target DM
 or Channel Group's durable native PI session with the full agent (every registered
@@ -104,8 +117,15 @@ fails, and finishes the run with no post — broken JSON never reaches a channel
 A valid `message` response is posted to the target channel through the same outbound
 Discord path as ordinary answers (link-embed suppression, Discord-safe splitting at
 2,000 characters) and pinned to the conversation; a valid `silent` response ends
-silently. Delivery is at-most-once: the occurrence was already consumed, so a failed
-delivery drops that run rather than retrying.
+silently. Delivery stays at-most-once in the normal path: an attempt posts once, and
+only after a validated post (or a `silent` completion) is the claim settled. A denied,
+failed, invalid, or undeliverable run releases its claim and fires again on a later
+tick, so transient breakage can no longer permanently destroy a one-time job (the
+pre-claim-and-reconcile engine consumed occurrences before the gate, which marked
+denied one-time jobs `completed` forever). The known tradeoff: a run that crashes
+after posting but before reconciling leaves its claim set, and once the claim expires
+the job fires again — the crash-recovery edge is at-least-once, a deliberate exchange
+so no crashed run is ever permanently lost.
 
 ### On-demand execution (`run_scheduled_task`)
 
@@ -118,10 +138,10 @@ for an `active` record — hands it to the engine's immediate-run executor,
 PI gateway as a lazily resolved `ScheduledTaskRunner` (the engine is built
 after the gateway). The executor mirrors a due-occurrence fire exactly:
 
-1. The occurrence is consumed first with the identical `consume` path — a
-   one-time job is marked `completed` (it will not fire again), a recurring
-   job re-arms via `last_run_at` now — so an on-demand run and a pending
-   due occurrence can never double-post.
+1. The occurrence is claimed first with the identical `claim` path — so an
+   on-demand run and a pending due occurrence (or another instance's fire)
+   can never double-run the same job. A record someone else holds a live
+   claim on answers `not-run` without doing any work.
 2. The gate runs as `ConversationService.runScheduledPromptInline`: the same
    scope allow-lists, the same live membership re-check, and the same
    generation and persistence in the target conversation's durable session —
@@ -133,10 +153,13 @@ after the gateway). The executor mirrors a due-occurrence fire exactly:
 3. The response is validated and delivered by the engine's shared `deliver`
    path: `message` content posts through `sendToConversation`, `silent`
    posts nothing, invalid JSON posts nothing and records
-   `scheduled_prompt_invalid_response`. The outcome is returned to the tool,
-   which reports it to the model (posted content, silent completion, a
-   bounded invalid-response preview, or a clear error for denied/failed and
-   undeliverable runs).
+   `scheduled_prompt_invalid_response`. The claim is then reconciled exactly
+   like a scheduled fire: posted and silent outcomes settle the job (a
+   one-time task completes and will not fire again; a recurring schedule
+   re-arms at its next occurrence), while denied, failed, invalid, and
+   undeliverable outcomes release the claim — the task remains scheduled and
+   fires again on a later tick, and the tool says so instead of claiming the
+   occurrence was consumed.
 
 Every scheduler event carries a `trigger` field (`scheduled` for engine
 fires, `on-demand` for tool runs) so operators can distinguish the two paths
@@ -159,7 +182,7 @@ same gate as interactive traffic:
 discordReady() gate (Discord gateway ready handshake) ---------------> defer whole ticks while not ready
 repository.listActiveScheduledPrompts() (engine process boundary) ----> due jobs
 dueOccurrence(job, now) from schedule + lastRunAt ?? createdAt -------> due check
-markScheduledPromptFired / completeScheduledPrompt -------------------> consume occurrence
+repository.claimScheduledPrompt(id, deadline, now) (atomic) ----------> claim occurrence (one winner)
 ConversationService.runScheduledPrompt(job) --------------------------> authorization gate
   checkScheduledPromptScope (pure allow-lists + attribution) ---------> scope decision
   ChannelMembershipChecker against live Discord state ----------------> membership decision
@@ -168,9 +191,11 @@ ConversationService.runScheduledPrompt(job) --------------------------> authoriz
   gate-side reply validation + correction prompts -------------------> up to 3 tries in the durable session
 parseScheduledResponse(agent text) ------------------------------------> message | silent | invalid (engine re-validates before posting)
 DiscordGateway.sendToConversation(identity, content) ------------------> Discord post
+claim reconcile: markScheduledPromptFired / completeScheduledPrompt ---> settled (posted | silent | unroutable)
+claim reconcile: releaseScheduledPromptClaim --------------------------> released (denied | failed | invalid | undelivered)
 
 run_scheduled_task(id) (interactive turn only) ------------------------> conversation-scoped lookup (active only)
-SchedulerRunner.runScheduledTaskNow(record) ---------------------------> consume + inline gate + shared deliver
+SchedulerRunner.runScheduledTaskNow(record) ---------------------------> claim + inline gate + shared deliver + reconcile
 ConversationService.runScheduledPromptInline(record) ------------------> same gates, no queue wait (caller holds the slot)
 ScheduledTaskRunner (composition-wired lazy handle) -------------------> engine executor for the tool
 ```
@@ -191,15 +216,24 @@ jobs (`daily`, `weekly`, `monthly`) resolve their wall-clock time, and cron
 jobs (`type: "cron"`) resolve the stored 5-field expression against the
 calendar in the schedule's timezone with standard cron
 day-of-month/day-of-week OR semantics through the same resolution helpers the
-presets use. `last_run_at` is set to just after the fire instant
-so the same occurrence can never become due twice. Occurrences missed while the
+presets use. `last_run_at` is set to just after the fire instant so the same occurrence can
+never become due twice. Occurrences missed while the
 process was down deliberately collapse into a single late run; the engine never
-backfills each missed occurrence.
+backfills each missed occurrence. A recurring job whose run failed keeps its
+occurrence due and retries on later ticks until a run succeeds (the missed
+occurrence is still collapsed, so retries target the single most recent due
+instant, and a one-time job likewise repeats until it fires).
 
 ## Configuration
 
 No new settings. The engine polls every `SCHEDULER_POLL_INTERVAL_MS` = 30,000
-milliseconds and is wired unconditionally by the application composition next to the
+milliseconds and claims due occurrences for
+`SCHEDULER_CLAIM_TIMEOUT_MS` = 600,000 milliseconds (ten minutes) — long enough
+to cover a full three-attempt generation with corrections and tool calls, short
+enough that a crashed claim becomes reclaimable on a later tick. Both are fixed
+constants: the claim only arbitrates races between overlapping engine
+instances, and no deployment has needed to tune it. The engine is
+wired unconditionally by the application composition next to the
 Discord gateway; it posts through the Discord gateway's channel resolution and stops
 with the rest of the application on shutdown. The composition also hands the
 engine to the PI gateway as a lazily resolved `ScheduledTaskRunner`, which is
@@ -211,25 +245,41 @@ stubs without the executor simply leave the tool unregistered.
 Migration 9 extends `scheduled_prompts` for the execution engine by rebuilding the
 table in one transaction (SQLite cannot alter a CHECK constraint):
 
-- `last_run_at`: nullable UTC timestamp, set just after each fire (a one-millisecond
-  forward offset guards the at-or-after boundary semantics) and updated for every
-  recurring run; the engine derives the next occurrence from `last_run_at` once it
-  exists, so wall-clock resolution stays DST-correct.
-- `status` gains `completed` alongside `active` and `cancelled`: a fired one-time job
+- `last_run_at`: nullable UTC timestamp, set just after each successful fire (a
+  one-millisecond forward offset guards the at-or-after boundary semantics) and
+  updated for every recurring run; the engine derives the next occurrence from
+  `last_run_at` once it exists, so wall-clock resolution stays DST-correct.
+- `status` gains `completed` alongside `active` and `cancelled`: a settled one-time
+  job
   is retained for audit but never appears in active lists and never fires again.
 - Migration 8's `scheduled_by_user_id` attribution is carried over verbatim; every
   existing row is preserved.
 - The existing per-recurrence shape CHECK constraints are preserved verbatim.
 
+Migration 10 extends the same table with the optional strict cron schedule
+surface (`cron_expression` plus the `cron` schedule type, locked by the
+row-shape CHECK constraint), rebuilt in one transaction with every existing row
+preserved verbatim; cron jobs fire through the same due-occurrence path.
+
+Migration 11 replaces the engine's consume-before-run lifecycle with
+claim-and-reconcile by adding `claimed_until`: a nullable UTC timestamp with no
+CHECK-constraint change, so a plain `ALTER TABLE ... ADD COLUMN` applies
+additively and preserves every existing row verbatim (unlike the migration 9
+and 10 rebuilds). Rows written before migration 11 claim like unclaimed rows.
+`claimed_until` is engine-internal bookkeeping only: it never appears on the
+model-facing record surface or in scheduler tool listings, and resume clears it
+alongside the cancel flag and fire marker so a re-armed record is immediately
+claimable.
+
 A fresh empty database bootstraps to the current schema in one transaction. A
-verified migration-9 database receives migration 10's cron columns
+verified migration-10 database receives migration 11's claim column
 incrementally on its next startup; a
-verified migration-8 database receives the rebuild incrementally on its next startup and then
-the cron columns; a verified
-migration-5 database receives 6, 7, 8, 9, and 10 in order; a verified
+verified migration-9 database receives the rebuild incrementally on its next startup and then
+the cron columns and the claim column; a verified
+migration-5 database receives 6, 7, 8, 9, 10, and 11 in order; a verified
 migration-7 database is first attributed by migration 8 (legacy rows backfilled
 to an unattributed scheduler, which the gate refuses to run), then rebuilt by
-migration 9 and extended by migration 10. Cancelled jobs stay cancelled with
+migration 9 and extended by migrations 10 and 11. Cancelled jobs stay cancelled with
 their rows intact; the engine never touches them. Stored cron jobs fire
 exactly like the preset recurring shapes: they appear in active listings,
 re-arm via `last_run_at`, and never complete after a fire.
@@ -267,22 +317,41 @@ JSON-conforming message content from the fire-time agent turn is posted, and
 everything else is logged for operators instead. Scheduler runs carry the stored
 scheduling-user attribution (with `scheduled:<job id>:<run id>` source message ids)
 so memory facts derived from a schedule remain bound to the verified human who
-scheduled them. Delivery is best-effort and at-most-once: failed or undeliverable
-posts are logged with the conversation key and job id, never retried automatically,
-and never sent anywhere else. On-demand runs consume the occurrence before
-executing, so an on-demand run and a due-occurrence fire of the same job can
-never double-post.
+scheduled them. Delivery is best-effort and at-most-once in the normal path: a
+validated response posts once, settled jobs never re-fire, and failed or
+undeliverable posts are logged with the conversation key and job id and never
+sent anywhere else — a released claim re-runs the whole occurrence, which makes
+the deliberate retry surface explicit (see Failure handling) rather than a
+silent delivery-path retry. The atomic claim means an on-demand run and a
+due-occurrence fire of the same job can never double-run.
 
 ## Failure handling
+
+The claim-and-reconcile reconcile rule is deliberate: **only a validated success
+(a posted `message` or a completed `silent`) settles a claim** — one-time jobs
+complete, recurring jobs re-arm via `last_run_at`. Everything else releases the
+claim so the job fires again on a later tick. This fixes finding 1 (a denied or
+failed one-time run is no longer marked `completed` and destroyed) and removes
+the permanently-lost job class, at two documented costs: a job whose runs fail
+persistently retries every poll (a retry storm until an operator cancels or
+prunes it — every attempt is recorded in the durable scheduler events, denial
+retries are cheap because the gate rejects before any generation, and there is
+no automatic retry cap or backoff today), and a run that crashes after its post
+but before its reconcile double-fires once the claim expires (at-least-once
+recovery, never a lost job). Known permanent denials and permanent delivery
+failures therefore storm at a bounded, logged rate instead of disappearing
+silently; if that becomes operationally expensive, a retry cap or backoff is a
+future extension behind this same contract.
 
 - Authorization rejection (non-allowlisted channel, unauthorized DM user, revoked
   membership, missing or empty scheduling user, unparseable stored scope): the gate
   records `scheduled_prompt_rejected` (with the run's `trigger`) and returns null;
-  nothing is generated or posted; the occurrence is consumed so a permanently
-  rejected job cannot retry-storm.
+  nothing is generated or posted; the claim is released so the job can fire again
+  when the blocking condition is fixed (the user rejoins the guild, the channel is
+  allowlisted, or the record is cancelled by an operator).
 - Generation failure (provider, harness, or empty output): the gate records
-  `scheduled_prompt_failed` and returns null; the engine posts nothing; the
-  occurrence is consumed. Empty output is a generation failure, not a correction
+  `scheduled_prompt_failed` and returns null; the engine posts nothing; the claim
+  is released. Empty output is a generation failure, not a correction
   trigger; a correction turn that produces empty output fails the run the same way
   (already-issued corrections stay persisted for the audit history).
 - Invalid agent JSON (including missing, unknown, or empty-message types, and any
@@ -292,7 +361,7 @@ never double-post.
   after the original attempt. On exhaustion (three invalid tries) the gate returns
   the final result untouched; the engine logs `scheduled_prompt_invalid_response`
   (error) with a bounded response preview plus a durable event; nothing is posted;
-  the occurrence is consumed.
+  the claim is released so the job can retry on a later tick.
 - Delivery failure (channel fetch rejection, an unresolved channel, a non-sendable
   channel, or an SDK send error): `scheduler_channel_unavailable`,
   `scheduler_channel_unresolved`, or `discord_channel_not_sendable` logging from the
@@ -300,20 +369,34 @@ never double-post.
   resolves to null instead of rejecting when the channel's guild is not cached, e.g.
   before the ready handshake) is logged as its own failure, never mislabeled as a
   not-sendable channel; surfaced by the engine as a `scheduled_prompt_failed` event
-  and, on the on-demand path, as an `undelivered` outcome the tool reports. The
-  occurrence is consumed.
+  and, on the on-demand path, as an `undelivered` outcome the tool reports. The claim
+  is released, so the occurrence re-runs later instead of disappearing.
+- Unroutable stored conversation key (unparseable scope at delivery time): logged as
+  `scheduled_prompt_unroutable` and reported as `unroutable` on the on-demand path.
+  This is structural damage no retry can fix, so the claim is settled — the
+  occurrence is consumed without a post (one-time jobs complete, recurring jobs
+  re-arm) to prevent an unfixable retry loop.
 - On-demand run requested for an unknown, foreign, canceled, or completed record:
   the tool refuses with a descriptive error before the executor is invoked; nothing
-  is consumed or generated. A stale record slipping to a non-active status between
+  is claimed or generated. A stale record slipping to a non-active status between
   lookup and run is refused by the executor itself
   (`scheduled_task_run_refused_inactive`) and reported as `not-run`.
+- On-demand run while another engine holds a live claim on the same job: the claim
+  fails and the executor answers `not-run` without doing any work.
 - Discord not ready (gateway still connecting — login alone is not ready): the tick
   is deferred with `scheduler_deferred_not_ready` debug logging; jobs are neither
-  listed nor consumed and the next tick fires them once the handshake completes.
+  listed nor claimed and the next tick fires them once the handshake completes.
 - Unresolvable stored schedule: the job is skipped silently by due detection rather
   than failing the tick.
-- Storage failure while consuming an occurrence (`scheduled_prompt_state_failed`):
-  the job stays due and is retried on a later tick; nothing is posted.
+- Storage failure while claiming (`scheduled_prompt_state_failed`): the job stays
+  due and is retried on a later tick; nothing is posted.
+- Storage failure while releasing a claim (`scheduled_prompt_state_failed`): logged
+  only; the run's outcome stands and the stale claim expires at its deadline, so
+  the job self-heals.
+- Storage failure while settling a claim (recording the fire or completion):
+  `scheduled_prompt_state_failed` is logged; the posted message stands, and once
+  the claim expires the occurrence fires again — the documented at-least-once
+  crash edge, never a wedged job.
 - Poll-level persistence or listing failure (`scheduler_poll_failed`): logged; the
   next tick retries.
 - Ticks that arrive while a poll is still running are skipped; long model calls
@@ -327,18 +410,26 @@ never double-post.
   shapes, the required `content` field, JSON-only output), due-occurrence resolution
   from creation and `last_run_at` for every schedule shape including cron
   (weekday windows, re-arm from `last_run_at` to the next weekday occurrence),
-  DST-correct weekly re-arms, missed-occurrence collapse, consumption before
-  execution (at-most-once), message posting, silent
-  completion, posting through `sendToConversation` with the parsed identity, the
-  invalid-response and delivery-failure paths (the engine submits the job once and
-  never retries it itself), unroutable keys, the start/stop
+  DST-correct weekly re-arms, missed-occurrence collapse, claim-before-gate
+  ordering with the fixed `SCHEDULER_CLAIM_TIMEOUT_MS` deadline, the finding-1
+  regression (a denied or failed gate leaves a one-time job claimable — not
+  `completed` — and it fires again on a later tick, then settles exactly once on
+  success), recurring re-arm on success without double-fires, release-on-failure
+  for denied, invalid-response, and delivery-failure outcomes (with the retry
+  visible on the next tick), self-healing release and settle storage failures,
+  message posting, silent
+  completion, posting through `sendToConversation` with the parsed identity,
+  unroutable keys (settled, not released), two concurrent pollers sharing a real
+  SQLite store firing one due job exactly once, a fired job whose claim was left
+  behind by a crashed run becoming reclaimable after its deadline, the start/stop
   interval lifecycle with in-flight tick skipping, deferral of whole ticks until the
-  Discord readiness gate passes (nothing listed or consumed pre-ready, then the full
-  chain fire → valid JSON → posted once ready), unchanged firing when no gate is
-  wired, and the on-demand executor `runScheduledTaskNow` (consume-then-gate
-  ordering with one-time completion and recurring re-arm parity, posted/silent/
-  invalid-response/undelivered/not-run outcomes with their events and logs,
-  inactive-record refusal, storage-failure and gate-throw handling without
+  Discord readiness gate passes (nothing listed or claimed pre-ready, then the full
+  chain claim → fire → valid JSON → posted once ready), unchanged firing when no gate is
+  wired, and the on-demand executor `runScheduledTaskNow` (claim-then-gate
+  ordering with the identical reconcile semantics, posted/silent/
+  invalid-response/unroutable/undelivered/not-run outcomes with their events and logs,
+  inactive-record refusal, claim-contention refusal, storage-failure and gate-throw
+  handling without
   rejecting, and the engine's queued fire path staying on `runScheduledPrompt`).
 - `test/discord-gateway.test.ts` covers `sendToConversation`: suppression flags,
   per-channel embed allowlists, long-content splitting, non-sendable channels,
@@ -365,12 +456,18 @@ never double-post.
   generation `scheduledRun`, and events carry the `trigger` (`scheduled` for
   engine fires, `on-demand` for tool runs).
 - `test/repository.test.ts` covers the execution-store operations (cross-conversation
-  listing, re-arm persistence across reopen, completion), the fresh-bootstrap schema
-  including `last_run_at`, `scheduled_by_user_id`, and `cron_expression`, the
-  incremental migration-6-through-10 path, the additive migration-8 attribution
+  listing, atomic claiming — one winner per due job, expired-claim reclaim,
+  active-only eligibility, release returning a job to the claimable pool,
+  claim persistence across reopen, resume clearing a stale claim, re-arm
+  persistence across reopen, completion), the fresh-bootstrap schema
+  including `last_run_at`, `scheduled_by_user_id`, `cron_expression`, and
+  `claimed_until` across migrations 1 through 11, the
+  incremental migration-6-through-11 path, the additive migration-8 attribution
   upgrade, the migration-9 rebuild that preserves jobs and history from a
   migration-8 database, the migration-10 rebuild that adds the cron columns
-  while preserving every job, and deterministic creation-order listing (a
+  while preserving every job, the additive migration-11 claim column that
+  upgrades a migration-10 database without a rebuild, and deterministic
+  creation-order listing (a
   `rowid` tiebreak keeps same-millisecond
   records in insertion order).
 - `test/discord-gateway.test.ts` covers `sendToConversation`: suppression flags,
@@ -384,6 +481,14 @@ never double-post.
   execution delegates to the engine executor, scheduler-fired generations
   (`scheduledRun`) omit the tool and cache their own reduced prompt registry, and
   the management tools stay registered when no executor is wired.
+- `test/scheduler-tools.test.ts` covers `run_scheduled_task`'s outcome reporting
+  under the claim-and-reconcile lifecycle: posted and silent runs keep the
+  completion note (one-time completed, recurring schedule continues), while
+  invalid-response, undelivered, and not-run answers state that the task was not
+  consumed, its claim was released, and it remains scheduled to fire again; the
+  unroutable outcome reports an unresolvable stored key without a lifecycle
+  claim; and unknown, foreign, canceled, and completed ids are refused before any
+  executor work.
 - `npm run guardrail` remains the completion gate.
 
 ## References

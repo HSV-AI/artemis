@@ -251,7 +251,7 @@ describe("ArtemisRepository", () => {
     expect(stored?.parentChannelId).toBeUndefined();
   });
 
-  it("bootstraps a fresh empty database with the current schema and migrations 1 through 10", () => {
+  it("bootstraps a fresh empty database with the current schema and migrations 1 through 11", () => {
     const directory = mkdtempSync(join(tmpdir(), "artemis-bootstrap-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "artemis.sqlite");
@@ -272,7 +272,7 @@ describe("ArtemisRepository", () => {
     ).map((column) => column.name);
     database.close();
 
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(tables.map((row) => row.name)).toEqual(
       expect.arrayContaining([
         "conversations",
@@ -295,9 +295,10 @@ describe("ArtemisRepository", () => {
       "updated_at"
     ]);
     expect(scheduledPromptColumns).toContain("cron_expression");
+    expect(scheduledPromptColumns).toContain("claimed_until");
   });
 
-  it("applies incremental migrations 6 through 10 to a verified migration-5 database without touching its history", () => {
+  it("applies incremental migrations 6 through 11 to a verified migration-5 database without touching its history", () => {
     const directory = mkdtempSync(join(tmpdir(), "artemis-migration5-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "artemis.sqlite");
@@ -316,11 +317,11 @@ describe("ArtemisRepository", () => {
     ]);
     repository.insertAssistant(session.id, { text: "ack", model: "model" });
     // Simulate a pre-timezone, pre-scheduler database: drop migrations 6
-    // through 10 and their tables.
+    // through 11 and their tables.
     const downgrade = new Database(path);
     downgrade.exec("DROP TABLE channel_timezones;");
     downgrade.exec("DROP TABLE scheduled_prompts;");
-    downgrade.prepare("DELETE FROM schema_migrations WHERE version IN (6, 7, 8, 9, 10)").run();
+    downgrade.prepare("DELETE FROM schema_migrations WHERE version IN (6, 7, 8, 9, 10, 11)").run();
     downgrade.close();
     repository.close();
     repository = undefined;
@@ -359,7 +360,7 @@ describe("ArtemisRepository", () => {
 
     expect(beforeVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
     expect(beforeTables).toEqual([]);
-    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(afterVersions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(afterTables.map((row) => row.name)).toEqual(["channel_timezones", "scheduled_prompts"]);
   });
 
@@ -710,10 +711,134 @@ describe("ArtemisRepository", () => {
       name: string;
     }[];
     database.close();
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(columns.map((column) => column.name)).toContain("scheduled_by_user_id");
     expect(columns.map((column) => column.name)).toContain("last_run_at");
     expect(columns.map((column) => column.name)).toContain("cron_expression");
+  });
+
+  it("applies migration 11 to a migration-10 database, adding the claim column while preserving every job", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-migration11-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const legacy = repository.createScheduledPrompt("dm:legacy", {
+      prompt: "legacy prompt",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "legacy-user"
+    });
+    const cancelled = repository.createScheduledPrompt("dm:legacy", {
+      prompt: "cancelled prompt",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "silent",
+      scheduledByUserId: "legacy-user"
+    });
+    repository.markScheduledPromptFired(legacy.id, "2026-08-30T14:20:00.001Z");
+    repository.cancelScheduledPrompt("dm:legacy", cancelled.id);
+    repository.close();
+    repository = undefined;
+
+    // Downgrade the scheduled_prompts table to its migration-10 shape: no
+    // claimed_until column. Only migration 11 is rolled back.
+    const downgrade = new Database(path);
+    const rows = downgrade.prepare("SELECT * FROM scheduled_prompts").all() as
+      Array<Record<string, unknown>>;
+    downgrade.exec("DROP TABLE scheduled_prompts;");
+    downgrade.exec(`
+      CREATE TABLE scheduled_prompts (
+        id TEXT PRIMARY KEY,
+        conversation_key TEXT NOT NULL,
+        prompt TEXT NOT NULL,
+        schedule_type TEXT NOT NULL
+          CHECK (schedule_type IN ('once', 'daily', 'weekly', 'monthly', 'cron')),
+        at_utc TEXT,
+        time_of_day TEXT,
+        day_of_week INTEGER,
+        day_of_month INTEGER,
+        cron_expression TEXT,
+        timezone TEXT,
+        response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
+        scheduled_by_user_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK (status IN ('active', 'cancelled', 'completed')),
+        created_at TEXT NOT NULL,
+        cancelled_at TEXT,
+        last_run_at TEXT,
+        CHECK (
+          (schedule_type = 'once'
+            AND at_utc IS NOT NULL AND time_of_day IS NULL AND day_of_week IS NULL
+            AND day_of_month IS NULL AND cron_expression IS NULL AND timezone IS NULL)
+          OR (schedule_type = 'daily'
+            AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
+            AND day_of_month IS NULL AND cron_expression IS NULL AND timezone IS NOT NULL)
+          OR (schedule_type = 'weekly'
+            AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NOT NULL
+            AND day_of_month IS NULL AND cron_expression IS NULL AND timezone IS NOT NULL)
+          OR (schedule_type = 'monthly'
+            AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
+            AND day_of_month IS NOT NULL AND cron_expression IS NULL AND timezone IS NOT NULL)
+          OR (schedule_type = 'cron'
+            AND at_utc IS NULL AND time_of_day IS NULL AND day_of_week IS NULL
+            AND day_of_month IS NULL AND cron_expression IS NOT NULL
+            AND timezone IS NOT NULL)
+        )
+      );
+    `);
+    const insert = downgrade.prepare(
+      `INSERT INTO scheduled_prompts
+       (id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
+        day_of_week, day_of_month, cron_expression, timezone, response_type,
+        scheduled_by_user_id, status, created_at, cancelled_at, last_run_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const row of rows) {
+      insert.run(
+        row.id,
+        row.conversation_key,
+        row.prompt,
+        row.schedule_type,
+        row.at_utc,
+        row.time_of_day,
+        row.day_of_week,
+        row.day_of_month,
+        row.cron_expression,
+        row.timezone,
+        row.response_type,
+        row.scheduled_by_user_id,
+        row.status,
+        row.created_at,
+        row.cancelled_at,
+        row.last_run_at
+      );
+    }
+    downgrade.prepare("DELETE FROM schema_migrations WHERE version = 11").run();
+    downgrade.close();
+
+    repository = new ArtemisRepository(path);
+    // Every pre-migration row survives, with its fire bookkeeping intact.
+    expect(repository.listScheduledPromptHistory("dm:legacy").map((job) => job.id))
+      .toEqual([legacy.id, cancelled.id]);
+    expect(repository.listScheduledPrompts("dm:legacy")[0]?.lastRunAt).toBe("2026-08-30T14:20:00.001Z");
+    expect(repository.listActiveScheduledPrompts().map((job) => job.id)).toEqual([legacy.id]);
+
+    // The claim lifecycle works against the upgraded table.
+    expect(repository.claimScheduledPrompt(legacy.id, "2026-08-30T14:30:00.000Z", "2026-08-30T14:20:00.000Z"))
+      .toBe(true);
+    expect(repository.claimScheduledPrompt(legacy.id, "2026-08-30T14:40:00.000Z", "2026-08-30T14:25:00.000Z"))
+      .toBe(false);
+    repository.close();
+    repository = undefined;
+
+    const database = new Database(path, { readonly: true });
+    const versions = database
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all() as { version: number }[];
+    const columns = database.prepare("PRAGMA table_info(scheduled_prompts)").all() as {
+      name: string;
+    }[];
+    database.close();
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    expect(columns.map((column) => column.name)).toContain("claimed_until");
   });
 
   it("applies migration 10 to a migration-9 database, preserving jobs and adding the cron columns", () => {
@@ -828,8 +953,129 @@ describe("ArtemisRepository", () => {
       name: string;
     }[];
     database.close();
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(columns.map((column) => column.name)).toContain("cron_expression");
+  });
+
+  it("claims an active job atomically so a second concurrent claim of the same job fails", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "claimable",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+
+    // First poller wins the atomic claim;
+    expect(
+      repository.claimScheduledPrompt(created.id, "2026-08-30T14:30:00.000Z", "2026-08-30T14:20:00.000Z")
+    ).toBe(true);
+    // second concurrent poller is refused while the claim is live.
+    expect(
+      repository.claimScheduledPrompt(created.id, "2026-08-30T14:35:00.000Z", "2026-08-30T14:20:00.000Z")
+    ).toBe(false);
+  });
+
+  it("reclaims a job only once its claim deadline has passed", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "expired claim",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+
+    expect(
+      repository.claimScheduledPrompt(created.id, "2026-08-30T14:30:00.000Z", "2026-08-30T14:20:00.000Z")
+    ).toBe(true);
+    // Before the deadline the claim holds.
+    expect(
+      repository.claimScheduledPrompt(created.id, "2026-08-30T14:31:00.000Z", "2026-08-30T14:29:59.999Z")
+    ).toBe(false);
+    // Once the deadline passes the crashed run's claim is recomputable.
+    expect(
+      repository.claimScheduledPrompt(created.id, "2026-08-30T14:40:00.000Z", "2026-08-30T14:30:00.001Z")
+    ).toBe(true);
+  });
+
+  it("only claims active records, refusing cancelled and completed jobs", () => {
+    repository = new ArtemisRepository(":memory:");
+    const live = repository.createScheduledPrompt("dm:one", {
+      prompt: "live",
+      schedule: { type: "weekly", time: "09:15", dayOfWeek: 1, timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const cancelled = repository.createScheduledPrompt("dm:one", {
+      prompt: "cancelled",
+      schedule: { type: "daily", time: "10:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    const done = repository.createScheduledPrompt("dm:one", {
+      prompt: "one-time",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    repository.cancelScheduledPrompt("dm:one", cancelled.id);
+    repository.completeScheduledPrompt(done.id, "2026-08-30T14:30:00.000Z");
+
+    expect(
+      repository.claimScheduledPrompt(cancelled.id, "2026-08-30T14:30:00.000Z", "2026-08-30T14:20:00.000Z")
+    ).toBe(false);
+    expect(
+      repository.claimScheduledPrompt(done.id, "2026-08-30T14:30:00.000Z", "2026-08-30T14:20:00.000Z")
+    ).toBe(false);
+    expect(
+      repository.claimScheduledPrompt(live.id, "2026-08-30T14:30:00.000Z", "2026-08-30T14:20:00.000Z")
+    ).toBe(true);
+  });
+
+  it("releases a claim so the job can be claimed and run again", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "released",
+      schedule: { type: "once", atUtc: "2026-09-01T09:00:00.000Z" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+
+    expect(
+      repository.claimScheduledPrompt(created.id, "2026-08-30T14:30:00.000Z", "2026-08-30T14:20:00.000Z")
+    ).toBe(true);
+    repository.releaseScheduledPromptClaim(created.id);
+    // An active job denied at run time is immediately claimable again.
+    expect(
+      repository.claimScheduledPrompt(created.id, "2026-08-30T14:30:01.000Z", "2026-08-30T14:20:01.000Z")
+    ).toBe(true);
+    // Releasing an unclaimed job is a safe no-op.
+    expect(() => repository?.releaseScheduledPromptClaim("missing-id")).not.toThrow();
+  });
+
+  it("persists the claim across a repository reopen so restarts cannot double-run", () => {
+    const directory = mkdtempSync(join(tmpdir(), "artemis-scheduler-claim-persist-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "artemis.sqlite");
+    repository = new ArtemisRepository(path);
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "durable claim",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "message",
+      scheduledByUserId: "user-1"
+    });
+    expect(
+      repository.claimScheduledPrompt(created.id, "2026-08-30T14:30:00.000Z", "2026-08-30T14:20:00.000Z")
+    ).toBe(true);
+    repository.close();
+    repository = undefined;
+
+    repository = new ArtemisRepository(path);
+    // The claimed occurrence survives the restart and is not re-claimable
+    // before its deadline.
+    expect(
+      repository.claimScheduledPrompt(created.id, "2026-08-30T14:31:00.000Z", "2026-08-30T14:25:00.000Z")
+    ).toBe(false);
   });
 
   it("enforces the recurrence shape at the storage layer", () => {
@@ -1137,6 +1383,33 @@ describe("ArtemisRepository", () => {
     // The resumed job is live again in both listings.
     expect(repository.listScheduledPrompts("dm:one").map((job) => job.id)).toEqual([created.id]);
     expect(repository.listActiveScheduledPrompts().map((job) => job.id)).toEqual([created.id]);
+  });
+
+  it("clears a stale claim when re-arming a cancelled record so the resumed job can fire", () => {
+    repository = new ArtemisRepository(":memory:");
+    const created = repository.createScheduledPrompt("dm:one", {
+      prompt: "standup",
+      schedule: { type: "daily", time: "09:15", timezone: "UTC" },
+      responseType: "silent",
+      scheduledByUserId: "user-1"
+    });
+    // Claim the job, then cancel it mid-claim (the fire is still in flight),
+    // then re-arm: the resume clears the stale claim too, so the resumed job
+    // is immediately claimable by the engine.
+    expect(repository.claimScheduledPrompt(created.id, "2026-08-30T14:30:00.000Z", "2026-08-30T14:20:00.000Z"))
+      .toBe(true);
+    expect(repository.cancelScheduledPrompt("dm:one", created.id)).toBe(true);
+
+    const resumed = repository.resumeScheduledPrompt("dm:one", created.id, {
+      type: "daily",
+      time: "10:00",
+      timezone: "UTC"
+    });
+
+    expect(resumed).toBeDefined();
+    expect(
+      repository.claimScheduledPrompt(created.id, "2026-08-30T14:31:00.000Z", "2026-08-30T14:30:30.000Z")
+    ).toBe(true);
   });
 
   it("resumes with a one-time schedule stored as the UTC shape", () => {
@@ -1577,7 +1850,7 @@ describe("ArtemisRepository", () => {
       name: string;
     }[];
     database.close();
-    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(versions.map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(columns.map((column) => column.name)).toContain("scheduled_by_user_id");
     expect(columns.map((column) => column.name)).toContain("last_run_at");
   });

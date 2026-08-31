@@ -15,6 +15,16 @@ import { nextOccurrenceUtc } from "./scheduler-tools.js";
 /** How often the execution engine polls stored jobs for due occurrences. */
 export const SCHEDULER_POLL_INTERVAL_MS = 30_000;
 
+/**
+ * How long an engine claim on a due occurrence stays live before it expires.
+ * Long enough to cover a full multi-attempt generation (three tries with
+ * correction turns and tool calls), short enough that a claim left behind by a
+ * crashed process becomes reclaimable on a later tick instead of parking the
+ * job forever. A fixed constant: the claim only arbitrates races between
+ * overlapping engine instances, and no deployment has needed to tune it.
+ */
+export const SCHEDULER_CLAIM_TIMEOUT_MS = 600_000;
+
 /** Longest stored agent response kept in invalid-response event details. */
 export const INVALID_RESPONSE_PREVIEW_LENGTH = 500;
 
@@ -150,7 +160,7 @@ export interface SchedulerRunnerOptions {
   /**
    * Fire-time readiness gate (wired by the composition to the Discord
    * gateway's ready handshake). When provided and false, the whole tick is
-   * deferred — no listing, no consumption, no generation, no posting — so a
+   * deferred — no listing, no claiming, no generation, no posting — so a
    * job cannot fire while the client cannot yet resolve its channels. The
    * job stays due and the next tick picks it up.
    */
@@ -160,20 +170,30 @@ export interface SchedulerRunnerOptions {
 /**
  * Fires stored scheduled prompts. Every poll lists active jobs across
  * conversations, computes each job's due occurrence from the stored
- * wall-clock definition (so DST stays correct), consumes the occurrence so
- * delivery is at-most-once, and runs due jobs through the conversation
- * service's fire-time authorization gate
+ * wall-clock definition (so DST stays correct), and runs due jobs through the
+ * conversation service's fire-time authorization gate
  * ({@link ConversationWorkQueue.runScheduledPrompt}) — the same gate that
- * serializes interactive Discord turns. The gate generates in the target
- * conversation's durable session with full tool access and returns the
- * result unposted; the engine then validates the strict JSON response and
- * only posts JSON-conforming `message` content. One-time jobs complete after
- * firing, recurring jobs re-arm until cancelled.
+ * serializes interactive Discord turns. The lifecycle is claim-and-reconcile:
+ * a due job is claimed atomically in storage before the gate runs (two
+ * pollers can never both claim, and only claimed jobs execute), and the claim
+ * is reconciled after the run — settled (one-time jobs complete, recurring
+ * jobs re-arm via `last_run_at`) when a valid response posted or completed
+ * silently, released on denial, generation failure, invalid response, or
+ * delivery failure so the job can fire again on a later tick. The gate
+ * generates in the target conversation's durable session with full tool
+ * access and returns the result unposted; the engine then validates the
+ * strict JSON response and only posts JSON-conforming `message` content.
+ *
+ * A claim left behind by a crashed run expires at its deadline
+ * ({@link SCHEDULER_CLAIM_TIMEOUT_MS}), so a crashed occurrence is
+ * reclaimable rather than permanently lost. That crash-recovery edge is
+ * at-least-once (a re-firing run may post again after a crashed attempt that
+ * already posted); in the normal path delivery stays at-most-once.
  *
  * Ticks are deferred until the optional {@link SchedulerRunnerOptions.ready}
  * gate passes (wired to the Discord gateway's ready handshake): firing a
  * scheduled prompt while the Discord client is still connecting resolves to
- * an unpostable channel and would silently consume the run.
+ * an unpostable channel.
  */
 export class SchedulerRunner {
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -205,9 +225,9 @@ export class SchedulerRunner {
    * (or whose poll is in flight) is never started twice; long executions
    * simply finish and leave the next occurrence for a later tick. Ticks that
    * arrive before the ready gate (the Discord gateway's ready handshake) are
-   * deferred without listing or consuming — firing into a client that cannot
-   * yet resolve its target channel would burn the occurrence's single
-   * delivery attempt on an undeliverable response.
+   * deferred without listing or claiming — firing into a client that cannot
+   * yet resolve its target channel would spend the occurrence's delivery
+   * attempt on an undeliverable response.
    */
   public async runOnce(): Promise<void> {
     if (this.polling) {
@@ -235,19 +255,26 @@ export class SchedulerRunner {
   }
 
   private async fire(job: ScheduledPromptRecord, now: Date): Promise<void> {
-    // Consume the occurrence before executing so a crash mid-turn cannot
-    // double-post; scheduler delivery is at-most-once.
-    if (!this.consume(job, now)) {
+    // Claim the due occurrence atomically before the gate runs: only one
+    // poller can claim a job, and a claim left behind by a crashed run simply
+    // expires, making the job reclaimable instead of permanently lost.
+    const claimedUntil = new Date(now.getTime() + SCHEDULER_CLAIM_TIMEOUT_MS);
+    if (!this.claim(job, now, claimedUntil)) {
       return;
     }
     try {
-      // Every fired job passes the fire-time authorization gate: scope
+      // Every claimed job passes the fire-time authorization gate: scope
       // re-check, live membership re-check, and serialized generation in the
       // target conversation's durable session. Denied or failed runs come
       // back as null, already logged by the gate; nothing is posted.
       const result = await this.options.conversations.runScheduledPrompt(job);
       if (result) {
-        await this.deliver(job, result);
+        const outcome = await this.deliver(job, result);
+        this.reconcile(job, now, outcome);
+      } else {
+        // Denied or failed: release the claim so the job can fire again on a
+        // later tick instead of being silently consumed (finding 1).
+        this.release(job);
       }
     } catch (error) {
       this.options.logger.error("scheduled_prompt_failed", {
@@ -259,44 +286,56 @@ export class SchedulerRunner {
         conversationKey: job.conversationKey,
         details: { jobId: job.id, ...safeError(error) }
       });
+      this.release(job);
     }
   }
 
   /**
    * Run a stored scheduled prompt immediately, on demand — the
    * `run_scheduled_task` tool's executor. Uses the exact framework of a normal
-   * due-occurrence fire: the occurrence is consumed first (one-time jobs
-   * complete and never fire again; recurring jobs re-arm so the pending
-   * occurrence cannot double-fire), the fire-time authorization gate runs the
-   * task in its conversation's session via the inline variant (the tool
-   * already holds the conversation's queue slot, so re-entering it would
-   * deadlock the live turn), and the strict JSON response contract is
-   * validated and delivered identically: `message` content posts, `silent`
-   * posts nothing, invalid responses post nothing and log an error.
+   * due-occurrence fire: the occurrence is claimed first (so an on-demand run
+   * and a pending due occurrence can never double-run), the fire-time
+   * authorization gate runs the task in its conversation's session via the
+   * inline variant (the tool already holds the conversation's queue slot, so
+   * re-entering it would deadlock the live turn), and the strict JSON response
+   * contract is validated and delivered identically: `message` content posts,
+   * `silent` posts nothing, invalid responses post nothing and log an error.
+   * The claim is reconciled exactly like an engine fire: posted or silent
+   * responses settle the job (one-time completes, recurring re-arms); denied,
+   * failed, invalid, or undeliverable runs release the claim so the task
+   * remains scheduled and fires again on a later tick.
    *
    * Only `active` records are accepted; canceled and completed records are
    * refused by the tool before this runs, and the check is repeated here so a
    * stale record can never mutate lifecycle state it should not touch.
    */
   public async runScheduledTaskNow(record: ScheduledPromptRecord): Promise<ScheduledTaskRunResult> {
+    if (record.status !== "active") {
+      this.options.logger.warn("scheduled_task_run_refused_inactive", {
+        jobId: record.id,
+        conversationKey: record.conversationKey,
+        status: record.status
+      });
+      return { status: "not-run" };
+    }
+    const now = (this.options.now ?? (() => new Date()))();
+    const claimedUntil = new Date(now.getTime() + SCHEDULER_CLAIM_TIMEOUT_MS);
+    // Claim before the inline gate; a job already claimed by a concurrent
+    // engine fire is not run again here.
+    if (!this.claim(record, now, claimedUntil)) {
+      return { status: "not-run" };
+    }
     try {
-      if (record.status !== "active") {
-        this.options.logger.warn("scheduled_task_run_refused_inactive", {
-          jobId: record.id,
-          conversationKey: record.conversationKey,
-          status: record.status
-        });
-        return { status: "not-run" };
-      }
-      if (!this.consume(record, (this.options.now ?? (() => new Date()))())) {
-        return { status: "not-run" };
-      }
       const result = await this.options.conversations.runScheduledPromptInline(record);
       if (!result) {
         // Denied or failed runs are already logged by the gate; nothing posts.
+        // Release the claim: the task remains scheduled and can fire later.
+        this.release(record);
         return { status: "not-run" };
       }
-      return await this.deliver(record, result, "on-demand");
+      const outcome = await this.deliver(record, result, "on-demand");
+      this.reconcile(record, now, outcome);
+      return outcome;
     } catch (error) {
       this.options.logger.error("scheduled_prompt_failed", {
         jobId: record.id,
@@ -307,26 +346,24 @@ export class SchedulerRunner {
         conversationKey: record.conversationKey,
         details: { jobId: record.id, ...safeError(error) }
       });
+      this.release(record);
       return { status: "not-run" };
     }
   }
 
   /**
-   * Mark the fired occurrence consumed: one-time jobs complete and never run
-   * again, recurring jobs re-arm so the same occurrence cannot become due
-   * twice. Returns false when storage failed, leaving the job due for retry.
+   * Atomically claim the occurrence for this run. Contention (another engine
+   * already holds a live claim) returns false silently — that is the normal
+   * multi-instance guard, not an error. Also returns false when storage
+   * failed, leaving the job due for retry, with the failure logged.
    */
-  private consume(job: ScheduledPromptRecord, now: Date): boolean {
+  private claim(job: ScheduledPromptRecord, now: Date, claimedUntil: Date): boolean {
     try {
-      if (job.schedule.type === "once") {
-        this.options.repository.completeScheduledPrompt(job.id, now.toISOString());
-      } else {
-        this.options.repository.markScheduledPromptFired(
-          job.id,
-          new Date(now.getTime() + 1).toISOString()
-        );
-      }
-      return true;
+      return this.options.repository.claimScheduledPrompt(
+        job.id,
+        claimedUntil.toISOString(),
+        now.toISOString()
+      );
     } catch (error) {
       this.options.logger.error("scheduled_prompt_state_failed", {
         jobId: job.id,
@@ -338,11 +375,74 @@ export class SchedulerRunner {
   }
 
   /**
+   * Reconcile the claim with the run's outcome: settled once a validated
+   * response posted or the run completed silently (one-time jobs complete,
+   * recurring jobs re-arm via `last_run_at`), and also for an unroutable
+   * stored key — a structurally broken record can never deliver, so consuming
+   * it prevents an unfixable retry loop. Every other outcome (invalid
+   * response, undeliverable post) releases the claim so the job can retry.
+   */
+  private reconcile(job: ScheduledPromptRecord, now: Date, outcome: ScheduledTaskRunResult): void {
+    if (
+      outcome.status === "posted" ||
+      outcome.status === "silent" ||
+      outcome.status === "unroutable"
+    ) {
+      this.settleFired(job, now);
+      return;
+    }
+    this.release(job);
+  }
+
+  /**
+   * Settle a successfully fired occurrence: one-time jobs complete and never
+   * run again, recurring jobs re-arm so the same occurrence cannot become due
+   * twice. Storage failures are logged; the outstanding claim then expires at
+   * its deadline, making the settled occurrence reclaimable (the documented
+   * at-least-once crash edge) rather than wedging the job.
+   */
+  private settleFired(job: ScheduledPromptRecord, now: Date): void {
+    try {
+      if (job.schedule.type === "once") {
+        this.options.repository.completeScheduledPrompt(job.id, now.toISOString());
+      } else {
+        this.options.repository.markScheduledPromptFired(
+          job.id,
+          new Date(now.getTime() + 1).toISOString()
+        );
+      }
+    } catch (error) {
+      this.options.logger.error("scheduled_prompt_state_failed", {
+        jobId: job.id,
+        conversationKey: job.conversationKey,
+        ...safeError(error)
+      });
+    }
+  }
+
+  /**
+   * Release the claim of a job whose run was denied or failed, returning the
+   * occurrence to the claimable pool. Never throws: a failed release leaves
+   * the claim to expire at its deadline instead of disturbing the run.
+   */
+  private release(job: ScheduledPromptRecord): void {
+    try {
+      this.options.repository.releaseScheduledPromptClaim(job.id);
+    } catch (error) {
+      this.options.logger.error("scheduled_prompt_state_failed", {
+        jobId: job.id,
+        conversationKey: job.conversationKey,
+        ...safeError(error)
+      });
+    }
+  }
+
+  /**
    * Validate the gate's returned agent response and post nothing but valid
    * `message` content. `silent` responses end the run quietly; invalid JSON
    * is logged for operators with a bounded preview and never posted. Returns
-   * what happened so the on-demand executor can report it; engine fires
-   * ignore the result.
+   * what happened so the caller can reconcile the claim and so the on-demand
+   * executor can report it.
    */
   private async deliver(
     job: ScheduledPromptRecord,
@@ -356,7 +456,7 @@ export class SchedulerRunner {
         jobId: job.id,
         conversationKey: job.conversationKey
       });
-      return { status: "undelivered" };
+      return { status: "unroutable" };
     }
     const parsed = parseScheduledResponse(result.text);
     if (!parsed) {

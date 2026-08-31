@@ -296,10 +296,26 @@ export interface ScheduledPromptStore {
  * model-facing {@link ScheduledPromptStore}, these operations run inside the
  * process boundary across every conversation and are never exposed to the
  * model as tool parameters or tool outputs.
+ *
+ * The engine's lifecycle is claim-and-reconcile: a due occurrence is claimed
+ * atomically before the fire-time gate runs, and the claim is reconciled
+ * afterwards — settled on success, released on denial or failure. A claim left
+ * behind by a crashed run expires at its deadline, so a due job is never
+ * permanently lost and two pollers can never both run the same occurrence.
  */
 export interface SchedulerExecutionStore {
   /** Every active job across conversations, ordered by creation. */
   listActiveScheduledPrompts(): ScheduledPromptRecord[];
+  /**
+   * Atomically claims one job for execution: only an `active` job whose claim
+   * is absent (never claimed) or expired (`claimed_until` before `nowUtc`)
+   * claims successfully, storing `claimedUntilUtc` as the new claim deadline.
+   * Returns false when another runner already holds a live claim, the record
+   * is not active, or the id does not exist.
+   */
+  claimScheduledPrompt(id: string, claimedUntilUtc: string, nowUtc: string): boolean;
+  /** Clears a job's claim so a denied or failed run can retry on a later tick. */
+  releaseScheduledPromptClaim(id: string): void;
   /** Records the moment a recurring job was last armed, blocking re-fires. */
   markScheduledPromptFired(id: string, firedAtUtc: string): void;
   /** Marks a one-time job completed after it fired. */
@@ -324,6 +340,7 @@ export type ScheduledTaskRunResult =
   | { status: "posted"; content: string }
   | { status: "silent" }
   | { status: "invalid-response"; responsePreview: string }
+  | { status: "unroutable" }
   | { status: "undelivered" }
   | { status: "not-run" };
 
