@@ -1159,34 +1159,29 @@ describe("prune_scheduled_prompt", () => {
     expect(store.pruneScheduledPrompts).not.toHaveBeenCalled();
   });
 
-  it("rejects cross-conversation scope without touching the store", async () => {
-    const store = storeMock([record({ id: "job-gone" })]);
-    const [, , , pruneScheduledPrompt] = createTools(store);
-
-    const text = await executeTool(pruneScheduledPrompt, { id: "job-gone", scope: "dm:other" });
-
-    expect(text).toContain("Error:");
-    expect(text).toContain("dm:other");
-    expect(store.pruneScheduledPrompts).not.toHaveBeenCalled();
-    expect(store.listScheduledPromptHistory).not.toHaveBeenCalled();
-  });
-
-  it("accepts a scope that matches the injected conversation", async () => {
+  it("has no scope parameter and always prunes within the injected conversation", async () => {
     const store = storeMock([
-      record({ id: "job-gone", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
+      record({ id: "job-mine" }),
+      record({ id: "job-foreign", conversationKey: "dm:other" })
     ]);
     const [, , , pruneScheduledPrompt] = createTools(store);
 
+    // A stray scope value is an ignored unknown parameter; the store call
+    // stays keyed to the harness-injected conversation either way.
     const text = await executeTool(pruneScheduledPrompt, {
-      id: "job-gone",
-      scope: conversationKey
+      id: "job-mine",
+      scope: "dm:other"
     });
 
     expect(store.pruneScheduledPrompts).toHaveBeenCalledWith(conversationKey, {
       kind: "id",
-      id: "job-gone"
+      id: "job-mine"
     });
     expect(text).toContain("Pruned 1");
+
+    const foreign = await executeTool(pruneScheduledPrompt, { id: "job-foreign", scope: "dm:other" });
+    expect(foreign).toContain("No scheduled prompt with id");
+    expect(store.jobs.some((job) => job.id === "job-foreign")).toBe(true);
   });
 
   it("reports an empty bulk prune as a no-op", async () => {
@@ -1201,173 +1196,10 @@ describe("prune_scheduled_prompt", () => {
   });
 });
 
-describe("resume_scheduled_prompt", () => {
-  it("resumes a canceled record with a new daily schedule and preserves the prompt", async () => {
-    const store = storeMock([
-      record({
-        id: "job-past",
-        status: "cancelled",
-        cancelledAt: "2026-08-29T15:00:00.000Z",
-        prompt: "Standup summary"
-      })
-    ]);
-    const [schedulePrompt, , , , resumeScheduledPrompt] = createTools(store);
-    expect(schedulePrompt).toBeDefined();
-
-    const text = await executeTool(resumeScheduledPrompt, {
-      id: "job-past",
-      schedule: { type: "daily", time: "08:30", timezone: "America/Chicago" }
-    });
-
-    expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
-      conversationKey,
-      "job-past",
-      { type: "daily", time: "08:30", timezone: "America/Chicago" }
-    );
-    expect(text).toContain("Resumed scheduled prompt job-past");
-    expect(text).toContain("daily at 08:30 (America/Chicago)");
-    expect(text).toContain("Standup summary");
-    expect(text).toContain(conversationKey);
-  });
-
-  it("resumes with a one-time schedule resolved in the channel timezone", async () => {
-    const store = storeMock([
-      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
-    ]);
-    const [, , , , resumeScheduledPrompt] = createTools(store, { defaultTimezone: "America/Chicago" });
-
-    await executeTool(resumeScheduledPrompt, {
-      id: "job-past",
-      schedule: { type: "once", at: "2026-09-01T09:15:00" }
-    });
-
-    expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
-      conversationKey,
-      "job-past",
-      { type: "once", atUtc: "2026-09-01T14:15:00.000Z" }
-    );
-  });
-
-  it("refuses to resume an ongoing record", async () => {
-    const store = storeMock([record({ id: "job-live" })]);
-    const [, , , , resumeScheduledPrompt] = createTools(store);
-
-    const text = await executeTool(resumeScheduledPrompt, {
-      id: "job-live",
-      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
-    });
-
-    expect(text).toContain("Error:");
-    expect(text).toMatch(/only canceled/i);
-    expect(text).toContain("ongoing");
-    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
-  });
-
-  it("refuses to resume a completed record", async () => {
-    const store = storeMock([
-      record({ id: "job-done", status: "completed", completedAt: "2026-08-29T13:00:00.000Z" })
-    ]);
-    const [, , , , resumeScheduledPrompt] = createTools(store);
-
-    const text = await executeTool(resumeScheduledPrompt, {
-      id: "job-done",
-      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
-    });
-
-    expect(text).toContain("Error:");
-    expect(text).toMatch(/only canceled/i);
-    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
-  });
-
-  it("refuses an unknown or pruned id without mutating", async () => {
-    const store = storeMock([record({ id: "job-live" })]);
-    const [, , , , resumeScheduledPrompt] = createTools(store);
-
-    const text = await executeTool(resumeScheduledPrompt, {
-      id: "job-pruned",
-      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
-    });
-
-    expect(text).toContain("Error:");
-    expect(text).toContain("job-pruned");
-    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
-  });
-
-  it("refuses a past one-time schedule without resuming", async () => {
-    const store = storeMock([
-      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
-    ]);
-    const [, , , , resumeScheduledPrompt] = createTools(store);
-
-    const text = await executeTool(resumeScheduledPrompt, {
-      id: "job-past",
-      schedule: { type: "once", at: "2026-08-01T00:00:00Z" }
-    });
-
-    expect(text).toContain("Error:");
-    expect(text).toMatch(/past/i);
-    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
-  });
-
-  it("validates the new schedule exactly like schedule_prompt", async () => {
-    const store = storeMock([
-      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
-    ]);
-    const [, , , , resumeScheduledPrompt] = createTools(store);
-
-    const missingTime = await executeTool(resumeScheduledPrompt, {
-      id: "job-past",
-      schedule: { type: "daily" }
-    });
-    expect(missingTime).toMatch(/HH:MM/);
-
-    const missingDay = await executeTool(resumeScheduledPrompt, {
-      id: "job-past",
-      schedule: { type: "weekly", time: "08:30", timezone: "UTC" }
-    });
-    expect(missingDay).toMatch(/day_of_week/);
-
-    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
-  });
-
-  it("rejects cross-conversation scope without touching the store", async () => {
-    const store = storeMock();
-    const [, , , , resumeScheduledPrompt] = createTools(store);
-
-    const text = await executeTool(resumeScheduledPrompt, {
-      id: "job-past",
-      schedule: { type: "daily", time: "08:30", timezone: "UTC" },
-      scope: "dm:other"
-    });
-
-    expect(text).toContain("Error:");
-    expect(text).toContain("dm:other");
-    expect(store.listScheduledPromptHistory).not.toHaveBeenCalled();
-    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
-  });
-
-  it("requires an id", async () => {
-    const store = storeMock();
-    const [, , , , resumeScheduledPrompt] = createTools(store);
-
-    const blank = await executeTool(resumeScheduledPrompt, {
-      id: "  ",
-      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
-    });
-    const missing = await executeTool(resumeScheduledPrompt, {
-      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
-    });
-
-    expect(blank).toContain("Error:");
-    expect(missing).toContain("Error:");
-    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
-  });
-});
-
 describe("update_scheduled_prompt", () => {
   it("updates the prompt text in place and keeps the schedule", async () => {
     const store = storeMock([record({ id: "job-live", prompt: "Old text" })]);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const text = await executeTool(updateScheduledPrompt, { id: "job-live", prompt: "New text" });
 
@@ -1391,7 +1223,7 @@ describe("update_scheduled_prompt", () => {
 
   it("updates only the schedule and preserves the prompt text", async () => {
     const store = storeMock([record({ id: "job-live", prompt: "Standup summary" })]);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const text = await executeTool(updateScheduledPrompt, {
       id: "job-live",
@@ -1413,7 +1245,7 @@ describe("update_scheduled_prompt", () => {
 
   it("updates prompt and schedule together", async () => {
     const store = storeMock([record({ id: "job-live" })]);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const text = await executeTool(updateScheduledPrompt, {
       id: "job-live",
@@ -1431,7 +1263,7 @@ describe("update_scheduled_prompt", () => {
 
   it("resolves naive at values in the channel timezone like schedule_prompt", async () => {
     const store = storeMock([record({ id: "job-live" })]);
-    const [, , , , , updateScheduledPrompt] = createTools(store, { defaultTimezone: "America/Chicago" });
+    const [, , , , updateScheduledPrompt] = createTools(store, { defaultTimezone: "America/Chicago" });
 
     await executeTool(updateScheduledPrompt, {
       id: "job-live",
@@ -1447,7 +1279,7 @@ describe("update_scheduled_prompt", () => {
 
   it("validates the new schedule exactly like schedule_prompt without mutating", async () => {
     const store = storeMock([record({ id: "job-live" })]);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const missingTime = await executeTool(updateScheduledPrompt, {
       id: "job-live",
@@ -1478,7 +1310,7 @@ describe("update_scheduled_prompt", () => {
 
   it("refuses an unknown or pruned id without mutating", async () => {
     const store = storeMock([record({ id: "job-live" })]);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const text = await executeTool(updateScheduledPrompt, {
       id: "job-other",
@@ -1491,36 +1323,160 @@ describe("update_scheduled_prompt", () => {
     expect(store.jobs[0]?.prompt).toBe("Say hello");
   });
 
-  it("refuses a canceled record and points at resume_scheduled_prompt", async () => {
+  it("re-arms a canceled record with a new schedule and preserves the original prompt", async () => {
+    const store = storeMock([
+      record({
+        id: "job-past",
+        status: "cancelled",
+        cancelledAt: "2026-08-29T15:00:00.000Z",
+        prompt: "Standup summary"
+      })
+    ]);
+    const [, , , , updateScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "daily", time: "08:30", timezone: "America/Chicago" }
+    });
+
+    expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
+      conversationKey,
+      "job-past",
+      { type: "daily", time: "08:30", timezone: "America/Chicago" }
+    );
+    expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
+    expect(text).toContain("Resumed scheduled prompt job-past");
+    expect(text).toContain("daily at 08:30 (America/Chicago)");
+    expect(text).toContain("Standup summary");
+    expect(text).toContain(conversationKey);
+    // Mocked store contract: status back to active, cancel bookkeeping cleared.
+    expect(store.jobs[0]?.status).toBe("active");
+    expect(store.jobs[0]?.cancelledAt).toBeUndefined();
+  });
+
+  it("resolves a re-arm's naive once schedule in the channel timezone like schedule_prompt", async () => {
     const store = storeMock([
       record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
     ]);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+    const [, , , , updateScheduledPrompt] = createTools(store, { defaultTimezone: "America/Chicago" });
+
+    await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "once", at: "2026-09-01T09:15:00" }
+    });
+
+    expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
+      conversationKey,
+      "job-past",
+      { type: "once", atUtc: "2026-09-01T14:15:00.000Z" }
+    );
+  });
+
+  it("always preserves the original prompt when re-arming, even if one is supplied", async () => {
+    const store = storeMock([
+      record({
+        id: "job-past",
+        status: "cancelled",
+        cancelledAt: "2026-08-29T15:00:00.000Z",
+        prompt: "Original text"
+      })
+    ]);
+    const [, , , , updateScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      prompt: "Replacement text",
+      schedule: { type: "weekly", time: "08:30", day_of_week: 1, timezone: "UTC" }
+    });
+
+    expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
+      conversationKey,
+      "job-past",
+      { type: "weekly", time: "08:30", dayOfWeek: 1, timezone: "UTC" }
+    );
+    expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
+    expect(text).toContain("Original text");
+    expect(text).not.toContain("Replacement text");
+    expect(store.jobs[0]?.prompt).toBe("Original text");
+  });
+
+  it("requires a schedule to re-arm and refuses a prompt-only update on a canceled record", async () => {
+    const store = storeMock([
+      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
+    ]);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const text = await executeTool(updateScheduledPrompt, { id: "job-past", prompt: "New text" });
 
     expect(text).toContain("Error:");
-    expect(text).toContain("canceled");
-    expect(text).toMatch(/resume/i);
+    expect(text).toMatch(/schedule is required/i);
+    expect(text).toMatch(/nothing was changed/i);
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
     expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
+    expect(store.jobs[0]?.status).toBe("cancelled");
+  });
+
+  it("validates a re-arm's schedule exactly like schedule_prompt without mutating", async () => {
+    const store = storeMock([
+      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
+    ]);
+    const [, , , , updateScheduledPrompt] = createTools(store);
+
+    const missingTime = await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "daily" }
+    });
+    expect(missingTime).toMatch(/HH:MM/);
+
+    const missingDay = await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "weekly", time: "08:30", timezone: "UTC" }
+    });
+    expect(missingDay).toMatch(/day_of_week/);
+
+    const past = await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "once", at: "2026-08-01T00:00:00Z" }
+    });
+    expect(past).toMatch(/past/i);
+
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
+    expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("answers a clear no-op when a record stops being canceled before the re-arm lands", async () => {
+    const store = storeMock([
+      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
+    ]);
+    store.resumeScheduledPrompt = vi.fn(() => undefined);
+    const [, , , , updateScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      schedule: { type: "daily", time: "08:30", timezone: "UTC" }
+    });
+
+    expect(text).toContain("Error:");
+    expect(text).toContain("job-past");
   });
 
   it("refuses a completed record", async () => {
     const store = storeMock([
       record({ id: "job-done", status: "completed", completedAt: "2026-08-29T13:00:00.000Z" })
     ]);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const text = await executeTool(updateScheduledPrompt, { id: "job-done", prompt: "New text" });
 
     expect(text).toContain("Error:");
     expect(text).toContain("completed");
     expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
   });
 
   it("requires an id and at least one change", async () => {
     const store = storeMock([record({ id: "job-live" })]);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const blank = await executeTool(updateScheduledPrompt, { id: "  ", prompt: "New text" });
     const missingId = await executeTool(updateScheduledPrompt, { prompt: "New text" });
@@ -1535,7 +1491,7 @@ describe("update_scheduled_prompt", () => {
 
   it("refuses a blank prompt without mutating", async () => {
     const store = storeMock([record({ id: "job-live" })]);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const text = await executeTool(updateScheduledPrompt, { id: "job-live", prompt: "   " });
 
@@ -1544,26 +1500,30 @@ describe("update_scheduled_prompt", () => {
     expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
   });
 
-  it("rejects cross-conversation scope without touching the store", async () => {
-    const store = storeMock([record({ id: "job-live" })]);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+  it("ignores a stray scope parameter; the harness-injected key always scopes the lookup", async () => {
+    const store = storeMock([
+      record({ id: "job-live" }),
+      record({ id: "foreign-job", conversationKey: "dm:other", prompt: "Foreign text" })
+    ]);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const text = await executeTool(updateScheduledPrompt, {
-      id: "job-live",
-      prompt: "New text",
+      id: "foreign-job",
+      prompt: "Hijack",
       scope: "dm:other"
     });
 
     expect(text).toContain("Error:");
-    expect(text).toContain("dm:other");
-    expect(store.listScheduledPromptHistory).not.toHaveBeenCalled();
+    expect(text).toContain("foreign-job");
     expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
+    expect(store.jobs[1]?.prompt).toBe("Foreign text");
   });
 
   it("reports a clear no-op when the record is no longer ongoing", async () => {
     const store = storeMock([record({ id: "job-live" })]);
     store.updateScheduledPrompt = vi.fn(() => undefined);
-    const [, , , , , updateScheduledPrompt] = createTools(store);
+    const [, , , , updateScheduledPrompt] = createTools(store);
 
     const text = await executeTool(updateScheduledPrompt, { id: "job-live", prompt: "New text" });
 
@@ -1573,16 +1533,22 @@ describe("update_scheduled_prompt", () => {
 });
 
 describe("tool registry metadata", () => {
-  it("advertises the six scheduler tools with trust-boundary guidelines", () => {
+  it("advertises the five management scheduler tools with trust-boundary guidelines", () => {
     const store = storeMock();
     const [
       schedulePrompt,
       listScheduledPrompts,
       cancelScheduledPrompt,
       pruneScheduledPrompt,
-      resumeScheduledPrompt,
       updateScheduledPrompt
     ] = createTools(store);
+    const managementTools = [
+      schedulePrompt,
+      listScheduledPrompts,
+      cancelScheduledPrompt,
+      pruneScheduledPrompt,
+      updateScheduledPrompt
+    ];
 
     expect(schedulePrompt.name).toBe("schedule_prompt");
     expect(schedulePrompt.promptSnippet).toBeTruthy();
@@ -1601,15 +1567,20 @@ describe("tool registry metadata", () => {
     expect(pruneScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/explicitly/i);
     expect(pruneScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/recoverable/i);
 
-    expect(resumeScheduledPrompt.name).toBe("resume_scheduled_prompt");
-    expect(resumeScheduledPrompt.promptSnippet).toBeTruthy();
-    expect(resumeScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/explicitly/i);
-    expect(resumeScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/canceled/i);
-
     expect(updateScheduledPrompt.name).toBe("update_scheduled_prompt");
     expect(updateScheduledPrompt.promptSnippet).toBeTruthy();
     expect(updateScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/explicitly/i);
-    expect(updateScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/ongoing/i);
+    expect(updateScheduledPrompt.promptGuidelines?.join("\n")).toMatch(/re.arms|re-arm/i);
+
+    // resume_scheduled_prompt is gone: update_scheduled_prompt handles its
+    // re-arm behavior, so the scheduler tool surface is one tool smaller.
+    expect(managementTools.map((tool) => tool.name)).not.toContain("resume_scheduled_prompt");
+    // No scheduler tool exposes a scope parameter; the injected conversation
+    // key scopes every operation and cannot be overridden.
+    for (const tool of managementTools) {
+      const properties = (tool.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+      expect(Object.keys(properties)).not.toContain("scope");
+    }
   });
 
   it("appends run_scheduled_task with guidelines when a runner is wired", () => {
@@ -1621,13 +1592,13 @@ describe("tool registry metadata", () => {
     expect(runTool?.promptGuidelines?.join("\n")).toMatch(/ongoing/i);
     // The other scheduler tools are unaffected by the added runner.
     expect(tools.map((tool) => tool.name)).toContain("schedule_prompt");
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(6);
   });
 
-  it("registers only the six management tools when no runner is wired", () => {
+  it("registers only the five management tools when no runner is wired", () => {
     const tools = createTools(storeMock(), { runner: undefined });
     expect(tools.map((tool) => tool.name)).not.toContain("run_scheduled_task");
-    expect(tools).toHaveLength(6);
+    expect(tools).toHaveLength(5);
   });
 });
 
@@ -1762,13 +1733,13 @@ describe("run_scheduled_task", () => {
     expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
   });
 
-  it("refuses canceled records and points at resume", async () => {
+  it("refuses canceled records and points at update_scheduled_prompt for a re-arm", async () => {
     const store = storeMock([record({ id: "job-cancelled", status: "cancelled" })]);
     const runner = runnerMock();
 
     const text = await executeTool(runToolOf(store, runner), { id: "job-cancelled" });
     expect(text).toContain("Error:");
-    expect(text).toMatch(/resume_scheduled_prompt/i);
+    expect(text).toMatch(/update_scheduled_prompt/i);
     expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
   });
 

@@ -8,7 +8,10 @@ the audit-log history, pruning, and resume surface follow
 [issue #60](https://github.com/HSV-AI/artemis/issues/60); in-place editing of
 ongoing jobs follows [issue #64](https://github.com/HSV-AI/artemis/issues/64);
 immediate on-demand execution through the engine follows
-[issue #67](https://github.com/HSV-AI/artemis/issues/67).
+[issue #67](https://github.com/HSV-AI/artemis/issues/67); merging
+`resume_scheduled_prompt` into `update_scheduled_prompt` (which dispatches on
+the target record's status) and removing the redundant `scope` parameter
+follows [issue #72](https://github.com/HSV-AI/artemis/issues/72).
 
 ## Problem
 
@@ -34,8 +37,8 @@ recreating it, which discarded the job's id and creation history.
 This protocol owns:
 
 - the `schedule_prompt`, `list_scheduled_prompts`, `cancel_scheduled_prompt`,
-  `prune_scheduled_prompt`, `resume_scheduled_prompt`, `update_scheduled_prompt`,
-  and `run_scheduled_task` PI custom tools
+  `prune_scheduled_prompt`, `update_scheduled_prompt`, and `run_scheduled_task`
+  PI custom tools
 - the `PromptSchedule`, `ScheduledPromptRecord`, `ScheduledPromptStatus`,
   `ScheduledPromptPruneFilter`, `ScheduledPromptPruneResult`,
   `ScheduledPromptUpdate`, and `ScheduledPromptStore` domain contracts
@@ -43,7 +46,7 @@ This protocol owns:
 - recurrence-resolution helpers: strict `HH:MM` parsing, ISO-8601 `at`
   resolution, strict RFC3339 cutoff parsing, and DST-correct
   next-occurrence computation
-- the trust boundary that binds all seven tools to the harness-injected
+- the trust boundary that binds all six tools to the harness-injected
   conversation key
 - the scheduler authorization model: creation-time membership verification for
   the harness-injected scheduling user, and the fire-time authorization gate
@@ -113,7 +116,7 @@ result to the engine without posting anything.
 ## Observable behavior
 
 Artemis registers the scheduler tools for every conversation kind (DM and
-guild) whenever a scheduled-prompt store is configured. The six management
+guild) whenever a scheduled-prompt store is configured. The five management
 tools are always registered; `run_scheduled_task` joins them only when the
 composition wired the execution engine's immediate-run executor.
 
@@ -175,13 +178,10 @@ permanent removal.
 
 `prune_scheduled_prompt` removes event records from the database entirely —
 a **hard delete that is not recoverable**. A pruned record can never be
-listed or resumed again. Parameters:
+listed or re-armed again. Parameters:
 
 - `id` (optional): schedule ID to remove; mutually exclusive with the bulk
   filters (passing both is a validation error and removes nothing).
-- `scope` (optional): must match the harness-injected conversation key;
-  anything else is refused before any store call. Omitted scope defaults to
-  the injected key.
 - `status` (optional, bulk): filters records to `ongoing`, `completed`, or
   `canceled` (the storage-level `cancelled` spelling is accepted too);
   omitted means all statuses.
@@ -199,61 +199,51 @@ conversation (any status), and an explicit "hard delete, not recoverable"
 note; a prune matching nothing is reported as a no-op (a missing single ID
 is named), and store failures surface as normal tool errors.
 
-`resume_scheduled_prompt` restores a canceled record to `ongoing` with a new
-schedule while preserving its original prompt, response type, and scheduling
-user. Parameters:
+`update_scheduled_prompt` handles the whole lifecycle of one of this
+conversation's records and dispatches on the target record's status: an
+**ongoing** record is rewired in place, a **canceled** record is re-armed,
+and a **completed** record is refused as retired history. It is the merge of
+the former in-place editor and the former `resume_scheduled_prompt` tool
+(removed in issue #72), so the scheduler surface is one tool smaller.
+Parameters:
 
-- `id` (required): schedule ID of a `canceled` record, typically from
-  `list_scheduled_prompts` with `include_history`.
-- `schedule` (required): the new schedule — identical recurrence parameters
-  to `schedule_prompt` (`once` with `at`, or `daily`/`weekly`/`monthly` with
-  `time` plus `day_of_week`/`day_of_month`, and the optional `timezone`).
-  It is validated exactly like a new schedule: a past `at` is refused.
-- `scope` (optional): same authorization rule as prune — must match the
-  injected conversation key; cross-group resume is rejected.
-
-On success the record's canceled flag and `canceled_at` are cleared, its
-schedule columns and `scheduled_at` are rewritten to the new schedule and
-the resume instant, its fire marker (`last_run_at`) is reset so the next
-occurrence is derived from the resume instant, and its status returns to
-`ongoing` — the job becomes due for the [execution
-engine](scheduler-execution.md) again. Only `canceled` records can be
-resumed: resuming an `ongoing` or `completed` record is refused with its
-current status named; resuming an unknown ID (including one already pruned,
-which no longer exists) is reported as an error with no mutation.
-
-`update_scheduled_prompt` edits an ongoing record **in place**: it replaces
-the prompt text and/or the schedule without cancelling and recreating, so
-the job's id, creation history, response type, and scheduling attribution
-survive. Parameters:
-
-- `id` (required): schedule ID of an `ongoing` record, from
-  `schedule_prompt` or `list_scheduled_prompts`.
+- `id` (required): schedule ID of the target record, from `schedule_prompt`
+  or `list_scheduled_prompts` (with `include_history` for canceled records).
 - `prompt` (optional): replacement prompt text; omitted keeps the stored
-  prompt. A blank prompt is refused.
-- `schedule` (optional): replacement schedule — identical recurrence
-  parameters to `schedule_prompt`, validated exactly like a new schedule
-  (a past `at` is refused; unresolvable recurrences are refused), resolved
-  against the same timezone default chain (explicit `timezone`, then the
-  channel's stored timezone, then UTC).
-- `scope` (optional): same authorization rule as prune and resume — must
-  match the injected conversation key; anything else is refused before any
-  store call.
+  prompt. A blank prompt is refused. On the re-arm path the original prompt
+  is always preserved, so a supplied `prompt` has no effect there.
+- `schedule` (optional for an ongoing record; **required** to re-arm a
+  canceled record): replacement schedule — identical recurrence parameters
+  to `schedule_prompt`, validated exactly like a new schedule on both
+  lifecycle paths (a past `at` is refused; unresolvable recurrences are
+  refused), resolved against the same timezone default chain (explicit
+  `timezone`, then the channel's stored timezone, then UTC).
 
-At least one of `prompt` and `schedule` must be supplied; a call with
-neither — and with any explicit `scope` other than the injected key — is a
-validation error that changes nothing. Only `active` (ongoing) records can
-be updated: a `canceled` record is refused with its status named and a
-pointer at `resume_scheduled_prompt`, a `completed` record is refused as
-retired history, and an unknown ID (including one already pruned, which no
-longer exists) is reported as an error with no mutation. On success the
-record's prompt and schedule columns are rewritten, while its id, status,
-`created_at` (`scheduled_at`), response type, scheduling attribution, and
-fire marker (`last_run_at`) are all preserved — so the [execution
-engine](scheduler-execution.md)'s at-most-once fire semantics survive the
-edit and a schedule change can never re-fire an already-consumed
-occurrence. The next run in the answer is derived from the new schedule
-(or recomputed from the stored one when only the prompt changed).
+**Ongoing** records are rewired **in place**: at least one of `prompt` and
+`schedule` must be supplied; a call with neither is a validation error that
+changes nothing. On success the record's prompt and schedule columns are
+rewritten, while its id, status, `created_at` (`scheduled_at`), response
+type, scheduling attribution, and fire marker (`last_run_at`) are all
+preserved — so the [execution engine](scheduler-execution.md)'s
+at-most-once fire semantics survive the edit and a schedule change can
+never re-fire an already-consumed occurrence. The next run in the answer is
+derived from the new schedule (or recomputed from the stored one when only
+the prompt changed).
+
+**Canceled** records are **re-armed** (the removed resume tool's behavior):
+a schedule is required — there is nothing else to derive the next fire
+from, so a prompt-only update against a canceled record is a validation
+error that changes nothing. The original prompt, response type, and
+scheduling user are preserved no matter what else was passed. On success
+the record's canceled flag and `canceled_at` are cleared, its schedule
+columns and `scheduled_at` are rewritten to the new schedule and the re-arm
+instant, its fire marker (`last_run_at`) is reset so the next occurrence is
+derived from the re-arm instant, and its status returns to `ongoing` — the
+job becomes due for the [execution engine](scheduler-execution.md) again.
+
+**Completed** records are refused as retired history, with no mutation. An
+unknown ID (including one already pruned, which no longer exists) is
+reported as an error with no mutation.
 
 `run_scheduled_task` executes one of this conversation's scheduled prompts
 **immediately**, through the same executor and framework that fire scheduled
@@ -285,11 +275,12 @@ generations themselves — a scheduled fire cannot trigger further on-demand
 runs, so scheduled execution cannot recurse.
 
 Error cases mirror the other scoped tools: an unknown or foreign `id`
-(partly another conversation's record, or already pruned) answers with an
-error naming the id and the harness-injected conversation and runs nothing;
-a blank id is refused; a canceled record is refused with a pointer at
-`resume_scheduled_prompt`; a completed record is refused as retired history.
-Only `active` records can run on demand.
+(pruned, or another conversation's record) answers with an error naming the
+id and the harness-injected conversation and runs nothing; a blank id is
+refused; a canceled record is refused with a pointer at
+`update_scheduled_prompt`'s re-arm path (a new schedule re-arms it first);
+a completed record is refused as retired history. Only `active` records can
+run on demand.
 
 ## Contracts and data flow
 
@@ -304,23 +295,27 @@ ScheduledPromptStore.createScheduledPrompt(key, input) --> one durable row
 listScheduledPromptHistory(key) -------------------------> audit view (all statuses)
 pruneScheduledPrompts(key, filter) ----------------------> hard delete + summary
 resumeScheduledPrompt(key, id, schedule) ----------------> canceled row -> ongoing
+                                                          (update tool's re-arm path)
 updateScheduledPrompt(key, id, changes) -----------------> in-place edit of an ongoing row
 runScheduledTaskNow(record) (engine, composition-wired) -> immediate on-demand fire
 ```
 
 Tool parameters have no channel-identity surface at all. Extra unknown
-parameters the model tries to pass (a `target`, `conversationKey`, or
-`channel`) are ignored; the injected key always wins. The prune, resume,
-and update tools' optional `scope` parameter is an explicit echo the
-harness-injected key must match exactly — it never overrides the injected
-key. Prune selects its targets through the `ScheduledPromptPruneFilter`
+parameters the model tries to pass (a `target`, `conversationKey`,
+`channel`, or a stray `scope`) are ignored; the injected key always wins.
+No scheduler tool exposes a `scope` parameter: cross-conversation operations
+are impossible because every store operation is keyed to the
+harness-injected conversation key, so a foreign id is simply not found.
+Prune selects its targets through the `ScheduledPromptPruneFilter`
 union (one record by `id`, or a bulk selection by status and/or a
-normalized-UTC `before` cutoff over `created_at`); resume locates a
-`cancelled` record and rewrites schedule, status, and lifecycle timestamps
-in one update; update takes a `ScheduledPromptUpdate` object (optional
-`prompt`, optional `schedule`) and rewrites only the supplied fields of an
-`active` row, leaving the id, `created_at`, response type, attribution,
-and `last_run_at` untouched. The run tool takes only an `id` and delegates
+normalized-UTC `before` cutoff over `created_at`); update locates its
+target in the conversation's audit history and dispatches on its status —
+an `active` row takes a `ScheduledPromptUpdate` object (optional `prompt`,
+optional `schedule`) and is rewired by rewriting only the supplied fields,
+leaving the id, `created_at`, response type, attribution, and `last_run_at`
+untouched, while a `cancelled` row is re-armed through the store's
+`resumeScheduledPrompt`, and a `completed` row is refused. The run tool
+takes only an `id` and delegates
 to the engine's `ScheduledTaskRunner` (the `SchedulerRunner`
 `runScheduledTaskNow` method, wired lazily by the composition because the
 engine is constructed after the PI gateway); it holds no dispatch, storage,
@@ -399,34 +394,37 @@ rows — `DELETE FROM scheduled_prompts` keyed by the conversation key —
 inside one transaction that first selects the matching IDs, removes them,
 and counts the records that remain in the conversation; single-id prunes
 match on both `id` and `conversation_key` so one conversation can never
-prune another's record. Resume is likewise scoped to `id` plus
-`conversation_key` plus `status = 'cancelled'`, rewriting the whole
-schedule-column set so the row-shape CHECK constraint stays satisfied,
-clearing `cancelled_at` and `last_run_at`, and moving `created_at` to the
-resume instant — the moment the event was re-scheduled. Update reads the
-`active` row first (scoped to `id` plus `conversation_key` plus
-`status = 'active'`), merges the changed fields over the stored values,
-and rewrites the prompt plus schedule-column set so the row-shape CHECK
-constraint stays satisfied; status, `cancelled_at`, `last_run_at`,
-`created_at`, `response_type`, and attribution columns are never written.
-Pruned records are unrecoverable; there is no undo and no tombstone.
+prune another's record. The store-level resume (the update tool's re-arm
+path) is likewise scoped to `id` plus `conversation_key` plus
+`status = 'cancelled'`, rewriting the whole schedule-column set so the
+row-shape CHECK constraint stays satisfied, clearing `cancelled_at` and
+`last_run_at`, and moving `created_at` to the re-arm instant — the moment
+the event was re-scheduled. The store-level update reads the `active` row
+first (scoped to `id` plus `conversation_key` plus `status = 'active'`),
+merges the changed fields over the stored values, and rewrites the prompt
+plus schedule-column set so the row-shape CHECK constraint stays satisfied;
+status, `cancelled_at`, `last_run_at`, `created_at`, `response_type`, and
+attribution columns are never written. Both store methods are unchanged by
+the tool merge: the tool-level dispatch (ongoing → update, canceled →
+resume, completed → refuse) lives entirely in the tool layer. Pruned
+records are unrecoverable; there is no undo and no tombstone.
 
 ## Security and privacy
 
 Both the DM or Channel Group identity and the scheduling-user identity are
 passed by the harness from derived Discord context, never supplied by the
 model. The mutation parameters contain no channel identity: the model cannot
-schedule, list, cancel, prune, resume, update, or run a job for a
-conversation it is not actually in, nor attribute a job to anyone other than
-the verified author. The prune, resume, and update tools accept an explicit
-`scope` parameter only as an authorization statement — a scope that does not
-exactly match the harness-injected conversation key is refused before any
-store call, so cross-conversation pruning, resuming, and updating are
-impossible regardless of what the model supplies. Prune, resume, and update
+schedule, list, cancel, prune, update, or run a job for a conversation it is
+not actually in, nor attribute a job to anyone other than the verified
+author. No scheduler tool exposes a `scope` parameter: cross-conversation
+pruning, re-arming, and updating are impossible because every store
+operation is keyed to the harness-injected conversation key, so a foreign id
+is simply not found and a stray `scope` value is an ignored unknown
+parameter. Prune and update
 do not re-run the creation-time membership check (matching
 `cancel_scheduled_prompt`): record management is bound to the injected
 conversation, and the fire-time gate re-checks the scheduling user's
-membership before any resumed or edited job actually runs.
+membership before any re-armed or edited job actually runs.
 `run_scheduled_task` takes no scope or identity parameter at all: its lookup
 is scoped to the injected key (a foreign id is simply not found), and the
 gate re-authorizes the stored scheduling user before anything runs, so a
@@ -443,14 +441,16 @@ before any Discord or generation work, and the membership re-check drops
 jobs whose user has provably lost access. The list tool's output — ongoing
 and, with `include_history`, historical records alike — is fenced as stored
 data so prompt text cannot masquerade as new instructions, and the system
-prompt's tool guidelines tell the model to schedule, cancel, prune, resume,
-update, and run only on explicit user requests. Prune is destructive to
+prompt's tool guidelines tell the model to schedule, cancel, prune, update,
+and run only on explicit user requests. Prune is destructive to
 records: it is validated to require an explicit selection (an ID or at least
 one filter), reports removed IDs, and refuses blanket deletes of an entire
 conversation. Update is intentionally non-destructive to both the record
-and its history: it only rewrites an ongoing row's prompt and schedule
-columns, so ids and creation instants never move and the fire marker's
-at-most-once guarantee survives every edit. No
+and its history: an ongoing row's rewire only rewrites the prompt and
+schedule columns, so ids and creation instants never move and the fire
+marker's at-most-once guarantee survives every edit, and a canceled row's
+re-arm only rotates the lifecycle bookkeeping the former resume tool
+managed, never deleting or re-typing history. No
 network access beyond the Discord API membership lookups and no external
 data is involved; stored schedules contain the prompt text the user wrote,
 the harness-derived identities, and nothing else.
@@ -474,9 +474,10 @@ the harness-derived identities, and nothing else.
 - Unknown or foreign `id` on cancel: error naming the id and conversation; no
   mutation.
 - `run_scheduled_task` with a blank `id`, an unknown or foreign `id`, a
-  canceled record (points at `resume_scheduled_prompt`), or a completed
-  record (retired history): descriptive error naming the id and conversation;
-  the runner is never invoked and nothing is consumed or generated.
+  canceled record (points at `update_scheduled_prompt`'s re-arm), or a
+  completed record (retired history): descriptive error naming the id and
+  conversation; the runner is never invoked and nothing is consumed or
+  generated.
 - `run_scheduled_task` when no immediate-run executor is wired: refusal
   naming the unavailability; nothing runs (the tool is not registered when
   no executor is configured, so this path only guards a misconfiguration).
@@ -491,26 +492,28 @@ the harness-derived identities, and nothing else.
   value; no mutation.
 - Unknown bulk `status` value: validation error listing the valid labels;
   no mutation.
-- Explicit `scope` that does not match the harness-injected conversation key
-  on prune or resume: refusal before any store call; no mutation.
 - Non-existent `id` on prune (including a foreign-conversation id): reported
   as a no-op naming the id; nothing removed. Bulk prunes remove exactly the
   matching records and report them; an empty match set is a clear no-op.
-- Resume on a record that is not canceled, on an unknown or pruned ID, or
-  across conversations: error with no mutation; pruned records no longer
-  exist, so they are reported as unknown.
-- `update_scheduled_prompt` with neither `prompt` nor `schedule`: validation
-  error telling the model what to pass; no mutation.
+- An update against a canceled record without a schedule (a prompt-only
+  update is not enough to re-arm): validation error naming the re-arm
+  requirement; no mutation.
+- An update against a completed record (retired history), an unknown or
+  pruned ID, or across conversations: error with no mutation; pruned records
+  no longer exist, so they are reported as unknown.
+- `update_scheduled_prompt` with neither `prompt` nor `schedule` on an
+  ongoing record: validation error telling the model what to pass; no
+  mutation.
 - Blank or missing `prompt` replacement on update: validation error; no
   mutation.
-- Update on a record that is not ongoing (a `canceled` record, which points
-  at `resume_scheduled_prompt`, a `completed` record, or an unknown or
-  pruned ID), or across conversations: error with no mutation; the store
-  additionally refuses any non-`active` row, so a record that stops being
-  ongoing between lookup and write is answered as a no-op.
+- A re-arm of a record that stops being canceled between lookup and write:
+  error reported as a no-op; the store additionally refuses any
+  non-`cancelled` row for the re-arm and any non-`active` row for the
+  rewire.
 - An invalid replacement schedule on update (missing `time`, missing
-  `day_of_week`/`day_of_month`, past `at`, invalid timezone): the exact
-  `schedule_prompt` validation error; no mutation.
+  `day_of_week`/`day_of_month`, past `at`, invalid timezone) on either the
+  rewire or the re-arm path: the exact `schedule_prompt` validation error;
+  no mutation.
 - An unparseable stored schedule surfaces as `next run unresolved` in listings
   rather than failing the turn.
 - At fire time: unparseable stored scope, non-allowlisted channel,
@@ -537,20 +540,23 @@ the harness-derived identities, and nothing else.
   validation), strict RFC3339 cutoff parsing (offsets, fractions, lowercase
   `t`/`z`, and every malformed or offset-less rejection), next-occurrence
   resolution across DST transitions and short months,
-  create/list/cancel/prune/resume behavior for every recurrence type, all
+  create/list/cancel/prune behavior for every recurrence type, all
   validation errors, the past-instant refusal, response-type defaulting, the
   history listing (default exclusion, status labels, timestamps, no next run
   on past rows, empty-history message, non-boolean `include_history`), the
   prune tool (id/bulk/mutual-exclusion/empty-selection validation, RFC3339
   normalization, unknown status, dry-run non-destruction, no-op reporting,
-  scope match and cross-scope refusal), the resume tool (canceled-only,
-  ongoing/completed/unknown-refused, channel-timezone resolution, schedule
-  validation parity, cross-scope refusal, blank-id refusal), the update tool
-  (prompt-only and schedule-only edits, combined edits, channel-timezone
-  resolution, schedule-validation parity, ongoing-only targeting with
-  canceled/completed/unknown refusals, blank-prompt and no-change
-  refusals, cross-scope refusal, no-op reporting when the row is no longer
-  active, and the registry metadata now advertising six scheduler tools), the
+  and ignored stray unknown parameters), the merged update tool
+  (prompt-only and schedule-only rewires of an ongoing record, combined
+  edits, channel-timezone resolution on both lifecycle paths,
+  schedule-validation parity with `schedule_prompt` for the rewire and the
+  re-arm, re-arm of a canceled record through the store's resume path with
+  the original prompt preserved and a required schedule, completed and
+  unknown-id refusals with no mutation, blank-prompt and no-change
+  refusals, ignored stray scope parameters with injected-key scoping, no-op
+  reporting when the row changes state between lookup and write, and the
+  registry metadata advertising five management tools without the runner and
+  six with it, none exposing a `scope` parameter), the
   run tool (registration only with a wired executor, posted content and
   lifecycle notes in the answer, silent/invalid/undelivered/not-run
   reporting, consumed-occurrence lifecycle notes on the one-time and

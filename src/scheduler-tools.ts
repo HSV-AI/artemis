@@ -456,13 +456,6 @@ function pruneMissingFiltersError(): string {
   );
 }
 
-function mismatchedScopeError(scope: string): string {
-  return (
-    `Error: scope "${scope}" is not authorized. Scheduled prompt records can only be ` +
-    "pruned, resumed, or updated in the conversation you are in; other conversations are always refused."
-  );
-}
-
 /**
  * Map a model-facing bulk status to the storage-level status. Both the
  * issue-specified `canceled` spelling and the storage-level `cancelled`
@@ -479,25 +472,6 @@ function normalizeBulkStatus(value: unknown): ScheduledPromptStatus | undefined 
     return "completed";
   }
   return undefined;
-}
-
-/**
- * Mutations run only inside the harness-injected conversation. An explicit
- * scope parameter must match it exactly (or be omitted, meaning the injected
- * key); anything else is refused before any store call.
- */
-function verifyRequestedScope(
-  context: SchedulerToolContext,
-  requested: unknown
-): string | undefined {
-  if (requested === undefined) {
-    return undefined;
-  }
-  const scope = typeof requested === "string" ? requested.trim() : "";
-  if (scope === "" || scope === context.conversationKey) {
-    return undefined;
-  }
-  return mismatchedScopeError(scope);
 }
 
 /**
@@ -523,7 +497,7 @@ export function selectPruneTargets(
   });
 }
 
-/** Recurrence parameters shared by `schedule_prompt`, `resume_scheduled_prompt`, and `update_scheduled_prompt`. */
+/** Recurrence parameters shared by `schedule_prompt` and `update_scheduled_prompt`. */
 interface ScheduleRequest {
   type?: unknown;
   at?: unknown;
@@ -540,9 +514,9 @@ type ResolvedScheduleRequest =
 
 /**
  * Validate a schedule request and resolve it to a storable schedule with its
- * next occurrence. Shared by `schedule_prompt` (creation),
- * `resume_scheduled_prompt` (re-scheduling of a canceled record), and
- * `update_scheduled_prompt` (in-place schedule rewrite) so all three accept
+ * next occurrence. Shared by `schedule_prompt` (creation) and
+ * `update_scheduled_prompt` (both the in-place schedule rewrite of an
+ * ongoing record and the re-arm of a canceled one) so both tools accept
  * exactly the same schedule surface and produce the same errors.
  */
 export function resolveScheduleRequest(
@@ -689,9 +663,9 @@ function createdPromptText(
 }
 
 /**
- * Typebox recurrence parameters shared verbatim by `schedule_prompt`,
- * `resume_scheduled_prompt`, and `update_scheduled_prompt`, so all three
- * tools accept exactly the same schedule surface.
+ * Typebox recurrence parameters shared verbatim by `schedule_prompt` and
+ * `update_scheduled_prompt`, so both tools accept exactly the same schedule
+ * surface.
  */
 const createScheduleParametersSchema = () =>
   Type.Object({
@@ -883,16 +857,13 @@ export function createSchedulerTools(
     promptSnippet: "Permanently remove scheduled prompt records of this conversation",
     promptGuidelines: [
       "Only prune when the current Discord user explicitly asks to delete scheduled prompt records.",
-      "Pruning hard-deletes database records and is not recoverable: a pruned record can never be listed or resumed again.",
+      "Pruning hard-deletes database records and is not recoverable: a pruned record can never be listed or re-armed again.",
       "Pass id to prune one record, or status and/or before (RFC3339) filters for a bulk prune - never both.",
       "Use dry_run=true first to preview what would be removed."
     ],
     parameters: Type.Object({
       id: Type.Optional(Type.String({
         description: "Schedule ID to remove permanently; mutually exclusive with the status/before bulk filters"
-      })),
-      scope: Type.Optional(Type.String({
-        description: "Must be this conversation; other conversations' records are always refused"
       })),
       status: Type.Optional(Type.Union([
         Type.Literal("ongoing"),
@@ -909,10 +880,6 @@ export function createSchedulerTools(
       }))
     }),
     async execute(_toolCallId, params) {
-      const scopeError = verifyRequestedScope(context, params.scope);
-      if (scopeError) {
-        return textResult(scopeError);
-      }
       const id = typeof params.id === "string" ? params.id.trim() : "";
       const rawBefore = typeof params.before === "string" ? params.before.trim() : "";
       const hasBulkFilters = params.status !== undefined || rawBefore !== "";
@@ -976,100 +943,29 @@ export function createSchedulerTools(
     }
   });
 
-  const resumeScheduledPrompt = defineTool({
-    name: "resume_scheduled_prompt",
-    label: "Resume Scheduled Prompt",
-    description:
-      "Resume one of this conversation's canceled scheduled prompts with a new schedule, keeping its original prompt text.",
-    promptSnippet: "Resume a canceled scheduled prompt in this conversation with a new schedule",
-    promptGuidelines: [
-      "Only resume when the current Discord user explicitly identifies the canceled prompt to resume.",
-      "Only canceled records can be resumed; ongoing and completed records cannot, and pruned (hard-deleted) records no longer exist.",
-      "The new schedule follows the same rules as schedule_prompt: once needs at, recurring types need time (and day_of_week or day_of_month).",
-      "Resuming preserves the original prompt text; it cannot be changed."
-    ],
-    parameters: Type.Object({
-      id: Type.String({
-        description: "ID of the canceled scheduled prompt to resume, from list_scheduled_prompts with include_history"
-      }),
-      schedule: createScheduleParametersSchema(),
-      scope: Type.Optional(Type.String({
-        description: "Must be this conversation; other conversations' records are always refused"
-      }))
-    }),
-    async execute(_toolCallId, params) {
-      const scopeError = verifyRequestedScope(context, params.scope);
-      if (scopeError) {
-        return textResult(scopeError);
-      }
-      const id = typeof params.id === "string" ? params.id.trim() : "";
-      if (id === "") {
-        return textResult("Error: id of the canceled scheduled prompt to resume is required.");
-      }
-      const target = store
-        .listScheduledPromptHistory(context.conversationKey)
-        .find((record) => record.id === id);
-      if (!target) {
-        return textResult(
-          `Error: no canceled scheduled prompt with id "${id}" in ${context.conversationKey}. ` +
-          "It may have been pruned (pruned records cannot be resumed), or it belongs to another conversation."
-        );
-      }
-      if (target.status !== "cancelled") {
-        return textResult(
-          `Error: only canceled scheduled prompts can be resumed; ${id} is currently ` +
-          `${describePromptStatus(target.status)}.`
-        );
-      }
-      const resolved = resolveScheduleRequest(params.schedule, context.defaultTimezone, now);
-      if ("error" in resolved) {
-        return textResult(resolved.error);
-      }
-      const resumed = store.resumeScheduledPrompt(context.conversationKey, id, resolved.schedule);
-      if (!resumed) {
-        return textResult(
-          `Error: no canceled scheduled prompt with id "${id}" in ${context.conversationKey}. Nothing was resumed.`
-        );
-      }
-      const zoned = formatZonedInstant(resolved.nextRun, resolved.timezone);
-      return textResult(
-        `Resumed scheduled prompt ${resumed.id}: ${describeSchedule(resumed.schedule)}\n` +
-        `Next run: ${resolved.nextRun.toISOString()} (local: ${zoned.local} ${zoned.weekday})\n` +
-        `Original prompt preserved: ${resumed.prompt}\n` +
-        `Conversation: ${resumed.conversationKey}`
-      );
-    }
-  });
-
   const updateScheduledPrompt = defineTool({
     name: "update_scheduled_prompt",
     label: "Update Scheduled Prompt",
     description:
-      "Update an ongoing scheduled prompt of this conversation in place by its id: change its prompt text and/or schedule without cancelling and recreating it.",
-    promptSnippet: "Edit an ongoing scheduled prompt's text or schedule in place",
+      "Update one of this conversation's scheduled prompts by its id: an ongoing record is rewired in place (new prompt text and/or schedule), and a canceled record is re-armed with a new schedule; completed records are retired history.",
+    promptSnippet: "Edit or re-arm a scheduled prompt in this conversation by id",
     promptGuidelines: [
       "Only update when the current Discord user explicitly identifies the scheduled prompt to change and asks for the new prompt text or schedule.",
-      "Only ongoing records can be updated in place; canceled records need resume_scheduled_prompt and completed records are retired history.",
-      "Pass the new prompt, the new schedule, or both; the schedule follows the same rules as schedule_prompt (once needs at, recurring types need time and day_of_week or day_of_month).",
-      "Updating preserves the job id, its creation history, and its scheduling attribution; ids never change."
+      "An ongoing record is rewired in place, preserving its id, creation history, attribution, and fire marker; ids never change.",
+      "A canceled record is re-armed by supplying a new schedule: the original prompt, response type, and scheduling user are preserved, so a supplied prompt has no effect on the re-arm path.",
+      "Completed records are retired history and can no longer be edited or re-armed.",
+      "The schedule follows the same rules as schedule_prompt: once needs at, recurring types need time (and day_of_week or day_of_month)."
     ],
     parameters: Type.Object({
       id: Type.String({
-        description: "ID of the ongoing scheduled prompt to update, from schedule_prompt or list_scheduled_prompts"
+        description: "ID of the scheduled prompt to update, from schedule_prompt or list_scheduled_prompts"
       }),
       prompt: Type.Optional(Type.String({
-        description: "Replacement prompt text; omitted keeps the stored prompt"
+        description: "Replacement prompt text for an ongoing record; omitted keeps the stored prompt (ignored when re-arming a canceled record, which preserves its original prompt)"
       })),
-      schedule: Type.Optional(createScheduleParametersSchema()),
-      scope: Type.Optional(Type.String({
-        description: "Must be this conversation; other conversations' records are always refused"
-      }))
+      schedule: Type.Optional(createScheduleParametersSchema())
     }),
     async execute(_toolCallId, params) {
-      const scopeError = verifyRequestedScope(context, params.scope);
-      if (scopeError) {
-        return textResult(scopeError);
-      }
       const id = typeof params.id === "string" ? params.id.trim() : "";
       if (id === "") {
         return textResult("Error: id of the scheduled prompt to update is required.");
@@ -1078,30 +974,65 @@ export function createSchedulerTools(
       if (params.prompt !== undefined && promptText === "") {
         return textResult("Error: prompt is required.");
       }
-      if (params.schedule === undefined && promptText === undefined) {
-        return textResult(
-          "Error: pass prompt, schedule, or both to update a scheduled prompt. Nothing was changed."
-        );
-      }
       // Locate the target in the conversation's audit history first, so an
       // unknown id (pruned or foreign) is named precisely before any
-      // schedule validation work happens.
+      // schedule validation work happens. The lookup is scoped to the
+      // harness-injected key, so another conversation's job is just "not
+      // found" here.
       const target = store
         .listScheduledPromptHistory(context.conversationKey)
         .find((record) => record.id === id);
       if (!target) {
         return textResult(
-          `Error: no ongoing scheduled prompt with id "${id}" in ${context.conversationKey}. ` +
-          "It may have been pruned (pruned records cannot be updated), or it belongs to another conversation."
+          `Error: no scheduled prompt with id "${id}" in ${context.conversationKey}. ` +
+          "It may have been pruned (pruned records no longer exist), or it belongs to another conversation."
         );
       }
-      if (target.status !== "active") {
-        const suffix = target.status === "cancelled"
-          ? "Use resume_scheduled_prompt to restore a canceled record with a new schedule."
-          : "Completed records are retired history and can no longer be edited.";
+      if (target.status === "completed") {
         return textResult(
-          `Error: only ongoing scheduled prompts can be updated in place; ${id} is currently ` +
-          `${describePromptStatus(target.status)}. ${suffix} Nothing was changed.`
+          `Error: scheduled prompt ${id} has completed and is retired history; it can no ` +
+          "longer be updated or re-armed. Nothing was changed."
+        );
+      }
+
+      // A canceled record is re-armed (today's resume behavior): the update
+      // restores it to ongoing with a new schedule. A schedule is required -
+      // there is nothing else to derive the next fire from - and the
+      // original prompt, response type, and scheduling user are preserved
+      // no matter what else was passed, so a supplied prompt is ignored here.
+      if (target.status === "cancelled") {
+        if (params.schedule === undefined) {
+          return textResult(
+            `Error: a new schedule is required to re-arm the canceled scheduled prompt ${id}. ` +
+            "Pass the schedule to re-arm it with (the original prompt is preserved). " +
+            "Nothing was changed."
+          );
+        }
+        const resolved = resolveScheduleRequest(params.schedule, context.defaultTimezone, now);
+        if ("error" in resolved) {
+          return textResult(resolved.error);
+        }
+        const resumed = store.resumeScheduledPrompt(context.conversationKey, id, resolved.schedule);
+        if (!resumed) {
+          return textResult(
+            `Error: no canceled scheduled prompt with id "${id}" in ${context.conversationKey}. ` +
+            "Nothing was changed."
+          );
+        }
+        const zoned = formatZonedInstant(resolved.nextRun, resolved.timezone);
+        return textResult(
+          `Resumed scheduled prompt ${resumed.id}: ${describeSchedule(resumed.schedule)}\n` +
+          `Next run: ${resolved.nextRun.toISOString()} (local: ${zoned.local} ${zoned.weekday})\n` +
+          `Original prompt preserved: ${resumed.prompt}\n` +
+          `Conversation: ${resumed.conversationKey} (harness-injected)`
+        );
+      }
+
+      // An ongoing record is rewired: at least one of prompt and schedule
+      // must be supplied, and only the supplied fields change.
+      if (params.schedule === undefined && promptText === undefined) {
+        return textResult(
+          "Error: pass prompt, schedule, or both to update a scheduled prompt. Nothing was changed."
         );
       }
       let scheduleChange: PromptSchedule | undefined;
@@ -1158,7 +1089,7 @@ export function createSchedulerTools(
     promptGuidelines: [
       "Only run when the current Discord user explicitly asks to execute a scheduled prompt now.",
       "Use an id from schedule_prompt or list_scheduled_prompts; only this conversation's scheduled prompts can run.",
-      "Only ongoing records can run immediately; canceled records need resume_scheduled_prompt first and completed records are retired history.",
+      "Only ongoing records can run immediately; canceled records need update_scheduled_prompt with a new schedule to re-arm them first, and completed records are retired history.",
       "The run consumes the task's next occurrence like a scheduled fire: a one-time task completes and will not fire again, a recurring task continues at its next occurrence.",
       "Response handling is identical to a scheduled fire: JSON-validated message content is posted, silent posts nothing, invalid responses post nothing."
     ],
@@ -1194,7 +1125,7 @@ export function createSchedulerTools(
       }
       if (target.status !== "active") {
         const suffix = target.status === "cancelled"
-          ? "Use resume_scheduled_prompt to restore it with a new schedule first."
+          ? "Re-arm it first with update_scheduled_prompt (it re-arms a canceled record with a new schedule)."
           : "Completed one-time records are retired history and cannot run again.";
         return textResult(
           `Error: only ongoing scheduled prompts can run immediately; ${id} is currently ` +
@@ -1250,7 +1181,6 @@ export function createSchedulerTools(
         listScheduledPrompts,
         cancelScheduledPrompt,
         pruneScheduledPrompt,
-        resumeScheduledPrompt,
         updateScheduledPrompt,
         runScheduledTask
       ] as const
@@ -1259,7 +1189,6 @@ export function createSchedulerTools(
         listScheduledPrompts,
         cancelScheduledPrompt,
         pruneScheduledPrompt,
-        resumeScheduledPrompt,
         updateScheduledPrompt
       ] as const;
 }
