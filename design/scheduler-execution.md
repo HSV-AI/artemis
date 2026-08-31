@@ -138,7 +138,8 @@ after the gateway). The executor mirrors a due-occurrence fire exactly:
 Every scheduler event carries a `trigger` field (`scheduled` for engine
 fires, `on-demand` for tool runs) so operators can distinguish the two paths
 in the audit log. Only `active` records can run on demand; the tool refuses
-canceled (pointing at `resume_scheduled_prompt`) and completed (retired
+canceled (pointing at `update_scheduled_prompt`, which re-arms a canceled
+record through a new schedule) and completed (retired
 history) records, and unknown or foreign ids answer as not found. Scheduler-
 fired generations are flagged `scheduledRun` on `PiGenerationInput` and the
 PI gateway omits `run_scheduled_task` from them (with its own cached system

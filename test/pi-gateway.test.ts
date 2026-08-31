@@ -787,7 +787,6 @@ describe("PiSdkGateway", () => {
         "list_scheduled_prompts",
         "cancel_scheduled_prompt",
         "prune_scheduled_prompt",
-        "resume_scheduled_prompt",
         "update_scheduled_prompt"
       ]),
       customTools: expect.arrayContaining([
@@ -795,7 +794,6 @@ describe("PiSdkGateway", () => {
         expect.objectContaining({ name: "list_scheduled_prompts" }),
         expect.objectContaining({ name: "cancel_scheduled_prompt" }),
         expect.objectContaining({ name: "prune_scheduled_prompt" }),
-        expect.objectContaining({ name: "resume_scheduled_prompt" }),
         expect.objectContaining({ name: "update_scheduled_prompt" })
       ])
     }));

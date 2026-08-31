@@ -279,8 +279,8 @@ export interface ScheduledPromptStore {
    * the changes object keep their stored values. Returns the updated
    * record, or undefined when the id does not exist in this conversation
    * or is not ongoing (only ongoing records can be edited in place;
-   * canceled records are restored by resume, completed records are retired
-   * history).
+   * canceled records are re-armed via resumeScheduledPrompt, and completed
+   * records are retired history).
    */
   updateScheduledPrompt(
     conversationKey: string,
