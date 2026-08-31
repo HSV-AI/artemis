@@ -8,7 +8,9 @@ Source: [HSV-AI/artemis issue #53](https://github.com/HSV-AI/artemis/issues/53);
 invalid-response correction retries from
 [issue #65](https://github.com/HSV-AI/artemis/issues/65); immediate on-demand
 execution via `run_scheduled_task` follows
-[issue #67](https://github.com/HSV-AI/artemis/issues/67).
+[issue #67](https://github.com/HSV-AI/artemis/issues/67); firing of the
+optional cron schedule surface follows
+[issue #73](https://github.com/HSV-AI/artemis/issues/73).
 
 ## Problem
 
@@ -45,7 +47,8 @@ This protocol owns:
   boundary (`listActiveScheduledPrompts`, `markScheduledPromptFired`,
   `completeScheduledPrompt`)
 - the `scheduled_prompts` schema extension (migration 9): `last_run_at` and the
-  `completed` status
+  `completed` status; migration 10's `cron` schedule type fires through the
+  same due-occurrence path with no engine-side branch
 
 It does not redefine the scheduler tools' parameters, validation, storage rules, or
 the authorization they enforce at fire time ([Scheduler
@@ -183,7 +186,12 @@ from a normal Discord turn.
 
 A recurring job's due occurrence is always resolved at evaluation time from the
 stored wall-clock definition, so daylight saving time stays correct across fall-back
-and spring-forward transitions. `last_run_at` is set to just after the fire instant
+and spring-forward transitions. This applies to every recurring shape: preset
+jobs (`daily`, `weekly`, `monthly`) resolve their wall-clock time, and cron
+jobs (`type: "cron"`) resolve the stored 5-field expression against the
+calendar in the schedule's timezone with standard cron
+day-of-month/day-of-week OR semantics through the same resolution helpers the
+presets use. `last_run_at` is set to just after the fire instant
 so the same occurrence can never become due twice. Occurrences missed while the
 process was down deliberately collapse into a single late run; the engine never
 backfills each missed occurrence.
@@ -213,13 +221,18 @@ table in one transaction (SQLite cannot alter a CHECK constraint):
   existing row is preserved.
 - The existing per-recurrence shape CHECK constraints are preserved verbatim.
 
-A fresh empty database bootstraps to migration 9 in one transaction. A verified
-migration-8 database receives the rebuild incrementally on its next startup; a
-verified migration-5 database receives 6, 7, 8, and 9 in order; a verified
+A fresh empty database bootstraps to the current schema in one transaction. A
+verified migration-9 database receives migration 10's cron columns
+incrementally on its next startup; a
+verified migration-8 database receives the rebuild incrementally on its next startup and then
+the cron columns; a verified
+migration-5 database receives 6, 7, 8, 9, and 10 in order; a verified
 migration-7 database is first attributed by migration 8 (legacy rows backfilled
 to an unattributed scheduler, which the gate refuses to run), then rebuilt by
-migration 9. Cancelled jobs stay cancelled with
-their rows intact; the engine never touches them.
+migration 9 and extended by migration 10. Cancelled jobs stay cancelled with
+their rows intact; the engine never touches them. Stored cron jobs fire
+exactly like the preset recurring shapes: they appear in active listings,
+re-arm via `last_run_at`, and never complete after a fire.
 
 A scheduler-fired run reuses the conversation's active durable session (creating
 one when the conversation has none, for example after `/clear-session` or before the
@@ -312,8 +325,10 @@ never double-post.
   and every invalid shape), the fired-prompt framing, the three-attempt
   `SCHEDULER_RESPONSE_MAX_ATTEMPTS` bound and the correction framing (both valid
   shapes, the required `content` field, JSON-only output), due-occurrence resolution
-  from creation and `last_run_at`, DST-correct weekly re-arms, missed-occurrence
-  collapse, consumption before execution (at-most-once), message posting, silent
+  from creation and `last_run_at` for every schedule shape including cron
+  (weekday windows, re-arm from `last_run_at` to the next weekday occurrence),
+  DST-correct weekly re-arms, missed-occurrence collapse, consumption before
+  execution (at-most-once), message posting, silent
   completion, posting through `sendToConversation` with the parsed identity, the
   invalid-response and delivery-failure paths (the engine submits the job once and
   never retries it itself), unroutable keys, the start/stop
@@ -351,10 +366,12 @@ never double-post.
   engine fires, `on-demand` for tool runs).
 - `test/repository.test.ts` covers the execution-store operations (cross-conversation
   listing, re-arm persistence across reopen, completion), the fresh-bootstrap schema
-  including `last_run_at` and `scheduled_by_user_id`, the incremental
-  migration-6-through-9 path, the additive migration-8 attribution upgrade, the
-  migration-9 rebuild that preserves jobs and history from a migration-8 database,
-  and deterministic creation-order listing (a `rowid` tiebreak keeps same-millisecond
+  including `last_run_at`, `scheduled_by_user_id`, and `cron_expression`, the
+  incremental migration-6-through-10 path, the additive migration-8 attribution
+  upgrade, the migration-9 rebuild that preserves jobs and history from a
+  migration-8 database, the migration-10 rebuild that adds the cron columns
+  while preserving every job, and deterministic creation-order listing (a
+  `rowid` tiebreak keeps same-millisecond
   records in insertion order).
 - `test/discord-gateway.test.ts` covers `sendToConversation`: suppression flags,
   per-channel embed allowlists, long-content splitting, non-sendable channels, and

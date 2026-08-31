@@ -14,6 +14,7 @@ import type {
 import {
   createSchedulerTools,
   nextOccurrenceUtc,
+  parseCronExpression,
   parseHhMmTime,
   parseRfc3339Timestamp,
   resolveOnceInstant,
@@ -275,6 +276,76 @@ describe("resolveOnceInstant", () => {
   });
 });
 
+describe("parseCronExpression", () => {
+  it("parses strict 5-field expressions into ascending unique value sets", () => {
+    const weekdays = parseCronExpression("15 9 * * 1-5");
+    if (!weekdays) {
+      throw new Error("expected a parse result");
+    }
+    expect(weekdays.minutes).toEqual([15]);
+    expect(weekdays.hours).toEqual([9]);
+    expect(weekdays.daysOfMonth).toEqual(Array.from({ length: 31 }, (_, index) => index + 1));
+    expect(weekdays.months).toEqual(Array.from({ length: 12 }, (_, index) => index + 1));
+    expect(weekdays.daysOfWeek).toEqual([1, 2, 3, 4, 5]);
+    expect(weekdays.domStar).toBe(true);
+    expect(weekdays.dowStar).toBe(false);
+  });
+
+  it("accepts lists, steps, stepped ranges, and full-star fields", () => {
+    const firstAndFifteenth = parseCronExpression("0 0 1,15 * *");
+    expect(firstAndFifteenth?.daysOfMonth).toEqual([1, 15]);
+    expect(firstAndFifteenth?.domStar).toBe(false);
+    expect(firstAndFifteenth?.dowStar).toBe(true);
+    expect(parseCronExpression("* * * * *")).toBeDefined();
+    const every5Minutes = parseCronExpression("*/5 * * * *");
+    expect(every5Minutes?.minutes).toEqual(
+      Array.from({ length: 12 }, (_, index) => index * 5)
+    );
+    const steppedRange = parseCronExpression("10-20/5 9-17 * * 1-3,5");
+    expect(steppedRange?.minutes).toEqual([10, 15, 20]);
+    expect(steppedRange?.hours).toEqual(
+      Array.from({ length: 9 }, (_, index) => index + 9)
+    );
+    expect(steppedRange?.daysOfWeek).toEqual([1, 2, 3, 5]);
+  });
+
+  it("normalizes day-of-week 7 to Sunday 0", () => {
+    expect(parseCronExpression("15 9 * * 7")?.daysOfWeek).toEqual([0]);
+    expect(parseCronExpression("15 9 * * 0,7")?.daysOfWeek).toEqual([0]);
+  });
+
+  it("rejects wrong field counts, blanks, and non-numeric tokens", () => {
+    expect(parseCronExpression("15 9 *")).toBeUndefined();
+    expect(parseCronExpression("15 9 * * * *")).toBeUndefined();
+    expect(parseCronExpression("")).toBeUndefined();
+    expect(parseCronExpression("   ")).toBeUndefined();
+    expect(parseCronExpression(undefined)).toBeUndefined();
+    expect(parseCronExpression("MON * * * *")).toBeUndefined();
+    expect(parseCronExpression("@daily")).toBeUndefined();
+    expect(parseCronExpression("15 9 * * ?")).toBeUndefined();
+  });
+
+  it("rejects out-of-range and malformed values", () => {
+    expect(parseCronExpression("60 9 * * *")).toBeUndefined();
+    expect(parseCronExpression("15 24 * * *")).toBeUndefined();
+    expect(parseCronExpression("15 9 0 * *")).toBeUndefined();
+    expect(parseCronExpression("15 9 32 * *")).toBeUndefined();
+    expect(parseCronExpression("15 9 * 0 *")).toBeUndefined();
+    expect(parseCronExpression("15 9 * 13 *")).toBeUndefined();
+    expect(parseCronExpression("15 9 * * 8")).toBeUndefined();
+    expect(parseCronExpression("1-2-3 * * * *")).toBeUndefined();
+    expect(parseCronExpression("1,,2 * * * *")).toBeUndefined();
+    expect(parseCronExpression("1- * * * *")).toBeUndefined();
+    expect(parseCronExpression("-1 * * * *")).toBeUndefined();
+    expect(parseCronExpression("*/ * * * *")).toBeUndefined();
+    expect(parseCronExpression("*/0 * * * *")).toBeUndefined();
+    expect(parseCronExpression("5/2 * * * *")).toBeUndefined();
+    expect(parseCronExpression("5-2 * * * *")).toBeUndefined();
+    expect(parseCronExpression("1-5/x * * * *")).toBeUndefined();
+    expect(parseCronExpression("1-5-10/2 * * * *")).toBeUndefined();
+  });
+});
+
 describe("nextOccurrenceUtc", () => {
   const dailyChicago: ScheduledPromptRecord["schedule"] =
     { type: "daily", time: "09:15", timezone: "America/Chicago" };
@@ -349,6 +420,108 @@ describe("nextOccurrenceUtc", () => {
 
   it("returns undefined for an unparseable stored schedule", () => {
     expect(nextOccurrenceUtc({ type: "once", atUtc: "not-a-date" }, new Date())).toBeUndefined();
+  });
+
+  it("resolves a weekday cron across a weekend", () => {
+    const weekdays: ScheduledPromptRecord["schedule"] =
+      { type: "cron", cron: "15 9 * * 1-5", timezone: "America/Chicago" };
+    // Friday 2026-08-28 17:00 CDT -> Monday 2026-08-31 09:15 CDT.
+    expect(nextOccurrenceUtc(weekdays, new Date("2026-08-28T22:00:00.000Z"))?.toISOString())
+      .toBe("2026-08-31T14:15:00.000Z");
+    // Saturday 09:30 CDT -> Monday 09:15 CDT.
+    expect(nextOccurrenceUtc(weekdays, new Date("2026-08-29T14:30:00.000Z"))?.toISOString())
+      .toBe("2026-08-31T14:15:00.000Z");
+    // Monday 09:15 CDT exactly is still due (at-or-after).
+    expect(nextOccurrenceUtc(weekdays, new Date("2026-08-31T14:15:00.000Z"))?.toISOString())
+      .toBe("2026-08-31T14:15:00.000Z");
+    // Monday 09:16 CDT -> Tuesday 09:15 CDT.
+    expect(nextOccurrenceUtc(weekdays, new Date("2026-08-31T14:16:00.000Z"))?.toISOString())
+      .toBe("2026-09-01T14:15:00.000Z");
+  });
+
+  it("resolves a first-and-fifteenth cron in UTC", () => {
+    const schedule: ScheduledPromptRecord["schedule"] =
+      { type: "cron", cron: "0 0 1,15 * *", timezone: "UTC" };
+    expect(nextOccurrenceUtc(schedule, new Date("2026-08-29T00:00:00.000Z"))?.toISOString())
+      .toBe("2026-09-01T00:00:00.000Z");
+    expect(nextOccurrenceUtc(schedule, new Date("2026-09-01T00:00:01.000Z"))?.toISOString())
+      .toBe("2026-09-15T00:00:00.000Z");
+  });
+
+  it("keeps the wall-clock minute across fall-back and spring-forward DST transitions", () => {
+    const everyDay: ScheduledPromptRecord["schedule"] =
+      { type: "cron", cron: "15 9 * * *", timezone: "America/Chicago" };
+    // Sat 2026-10-31 15:00 CDT -> Sunday 2026-11-01 09:15 CST (-6).
+    expect(nextOccurrenceUtc(everyDay, new Date("2026-10-31T20:00:00.000Z"))?.toISOString())
+      .toBe("2026-11-01T15:15:00.000Z");
+    // Sat 2026-03-07 08:00 CST -> today's 09:15 CDT (-5) is still ahead.
+    expect(nextOccurrenceUtc(everyDay, new Date("2026-03-07T14:00:00.000Z"))?.toISOString())
+      .toBe("2026-03-07T15:15:00.000Z");
+    // Just past Saturday 09:15 CDT -> Sunday 2026-03-08 09:15 CDT (-5).
+    expect(nextOccurrenceUtc(everyDay, new Date("2026-03-07T15:16:00.000Z"))?.toISOString())
+      .toBe("2026-03-08T14:15:00.000Z");
+  });
+
+  it("matches day-of-month and day-of-week with standard cron OR semantics", () => {
+    // Friday OR the 13th: from Tuesday 2026-09-01 the next match is Friday
+    // 2026-09-04 even though the 13th (a Sunday) comes later - AND semantics
+    // would wait for Friday 2026-11-13.
+    const fridayOr13th: ScheduledPromptRecord["schedule"] =
+      { type: "cron", cron: "0 12 13 * 5", timezone: "America/Chicago" };
+    expect(nextOccurrenceUtc(fridayOr13th, new Date("2026-09-01T14:00:00.000Z"))?.toISOString())
+      .toBe("2026-09-04T17:00:00.000Z");
+    // From Thursday 2026-10-01 (after that day's noon): the next Friday does
+    // not need to be the 13th under OR semantics, and Friday 2026-10-02 noon
+    // CDT wins over waiting for a Friday the 13th.
+    expect(nextOccurrenceUtc(fridayOr13th, new Date("2026-10-01T14:00:00.000Z"))?.toISOString())
+      .toBe("2026-10-02T17:00:00.000Z");
+  });
+
+  it("restricts matches to the listed months", () => {
+    const juneOnly: ScheduledPromptRecord["schedule"] =
+      { type: "cron", cron: "0 12 * 6 *", timezone: "UTC" };
+    expect(nextOccurrenceUtc(juneOnly, new Date("2026-08-29T00:00:00.000Z"))?.toISOString())
+      .toBe("2027-06-01T12:00:00.000Z");
+  });
+
+  it("resolves a leap-day cron to the next matching February 29", () => {
+    const leapDay: ScheduledPromptRecord["schedule"] =
+      { type: "cron", cron: "0 0 29 2 *", timezone: "UTC" };
+    expect(nextOccurrenceUtc(leapDay, new Date("2026-08-29T00:00:00.000Z"))?.toISOString())
+      .toBe("2028-02-29T00:00:00.000Z");
+    // A day-30 (or 31) February job never matches anything.
+    expect(nextOccurrenceUtc(
+      { type: "cron", cron: "0 0 30 2 *", timezone: "UTC" },
+      new Date("2026-08-29T00:00:00.000Z")
+    )).toBeUndefined();
+    expect(nextOccurrenceUtc(
+      { type: "cron", cron: "0 0 31 2 *", timezone: "UTC" },
+      new Date("2026-08-29T00:00:00.000Z")
+    )).toBeUndefined();
+  });
+
+  it("scans within a day for step lists after an early-morning start", () => {
+    const quarterHours: ScheduledPromptRecord["schedule"] =
+      { type: "cron", cron: "*/15 9 * * *", timezone: "UTC" };
+    expect(nextOccurrenceUtc(quarterHours, new Date("2026-08-29T07:20:00.000Z"))?.toISOString())
+      .toBe("2026-08-29T09:00:00.000Z");
+    expect(nextOccurrenceUtc(quarterHours, new Date("2026-08-29T09:02:00.000Z"))?.toISOString())
+      .toBe("2026-08-29T09:15:00.000Z");
+  });
+
+  it("uses day-of-week 7 as Sunday when resolving", () => {
+    const schedule: ScheduledPromptRecord["schedule"] =
+      { type: "cron", cron: "15 9 * * 7", timezone: "America/Chicago" };
+    // Saturday 15:00 CDT -> Sunday 2026-11-01 09:15 CST after fall-back.
+    expect(nextOccurrenceUtc(schedule, new Date("2026-10-31T20:00:00.000Z"))?.toISOString())
+      .toBe("2026-11-01T15:15:00.000Z");
+  });
+
+  it("returns undefined for an unparseable stored cron expression", () => {
+    expect(nextOccurrenceUtc(
+      { type: "cron", cron: "not a cron", timezone: "UTC" },
+      new Date("2026-08-29T00:00:00.000Z")
+    )).toBeUndefined();
   });
 });
 
@@ -683,6 +856,122 @@ describe("schedule_prompt", () => {
     }));
   });
 
+  it("stores a valid cron schedule and reports the cron expression and next run", async () => {
+    const store = storeMock();
+    const [schedulePrompt] = createTools(store);
+
+    const text = await executeTool(schedulePrompt, {
+      prompt: "Weekday standup note",
+      schedule: { cron: "15 9 * * 1-5", timezone: "America/Chicago" }
+    });
+
+    expect(store.createScheduledPrompt).toHaveBeenCalledWith(conversationKey, {
+      prompt: "Weekday standup note",
+      schedule: { type: "cron", cron: "15 9 * * 1-5", timezone: "America/Chicago" },
+      responseType: "message",
+      scheduledByUserId: schedulingUserId
+    });
+    expect(text).toContain(`Scheduled prompt`);
+    expect(text).toContain(`cron "15 9 * * 1-5" (America/Chicago)`);
+    // Fixed now is Saturday 2026-08-29 09:30 CDT - the next weekday is Monday.
+    expect(text).toContain("Next run: 2026-08-31T14:15:00.000Z");
+  });
+
+  it("defaults the cron timezone to the harness-provided channel timezone", async () => {
+    const store = storeMock();
+    const [schedulePrompt] = createTools(store, { defaultTimezone: "Europe/Berlin" });
+
+    const text = await executeTool(schedulePrompt, {
+      prompt: "First and fifteenth digest",
+      schedule: { cron: "0 0 1,15 * *" }
+    });
+
+    expect(store.createScheduledPrompt).toHaveBeenCalledWith(conversationKey, {
+      prompt: "First and fifteenth digest",
+      schedule: { type: "cron", cron: "0 0 1,15 * *", timezone: "Europe/Berlin" },
+      responseType: "message",
+      scheduledByUserId: schedulingUserId
+    });
+    expect(text).toContain(`cron "0 0 1,15 * *" (Europe/Berlin)`);
+  });
+
+  it("falls back to UTC for the cron timezone when no channel timezone exists", async () => {
+    const store = storeMock();
+    const [schedulePrompt] = createTools(store);
+
+    await executeTool(schedulePrompt, {
+      prompt: "Weekend digest",
+      schedule: { cron: "30 8 * * 0" }
+    });
+
+    expect(store.createScheduledPrompt).toHaveBeenCalledWith(conversationKey, expect.objectContaining({
+      schedule: { type: "cron", cron: "30 8 * * 0", timezone: "UTC" }
+    }));
+  });
+
+  it("refuses cron together with the preset schedule fields without storing", async () => {
+    const store = storeMock();
+    const [schedulePrompt] = createTools(store);
+
+    for (const preset of [
+      { type: "daily" },
+      { at: "2026-09-01T09:15:00Z" },
+      { time: "09:15" },
+      { day_of_week: 1 },
+      { day_of_month: 15 }
+    ] as const) {
+      const text = await executeTool(schedulePrompt, {
+        prompt: "p",
+        schedule: { cron: "15 9 * * 1-5", ...preset }
+      });
+      expect(text).toContain("Error:");
+      expect(text).toMatch(/mutually exclusive/i);
+    }
+    expect(store.createScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("refuses cron strings that fail strict validation without storing", async () => {
+    const store = storeMock();
+    const [schedulePrompt] = createTools(store);
+
+    for (const expression of ["15 9 *", "15 9 * * * *", "60 9 * * *", "MON * * * *", "15 9 1-2-3 * *"]) {
+      const text = await executeTool(schedulePrompt, {
+        prompt: "p",
+        schedule: { cron: expression }
+      });
+      expect(text).toContain("Error:");
+      expect(text).toContain(expression);
+    }
+    expect(store.createScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("refuses a blank cron value without storing", async () => {
+    const store = storeMock();
+    const [schedulePrompt] = createTools(store);
+
+    const text = await executeTool(schedulePrompt, {
+      prompt: "p",
+      schedule: { cron: "   " }
+    });
+
+    expect(text).toContain("Error:");
+    expect(store.createScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("refuses a cron expression that can never match without storing", async () => {
+    const store = storeMock();
+    const [schedulePrompt] = createTools(store);
+
+    const text = await executeTool(schedulePrompt, {
+      prompt: "p",
+      schedule: { cron: "0 0 31 2 *" }
+    });
+
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/could not be resolved to a future time/i);
+    expect(store.createScheduledPrompt).not.toHaveBeenCalled();
+  });
+
   it("ignores model-supplied channel identity and binds the injected key", async () => {
     const store = storeMock();
     const membership = membershipChecker();
@@ -935,6 +1224,23 @@ describe("list_scheduled_prompts", () => {
     const text = await executeTool(listScheduledPrompts, { include_history: true });
 
     expect(text).toMatch(/No scheduled prompts/i);
+  });
+
+  it("renders a cron job's expression and next run in the listing", async () => {
+    const store = storeMock([
+      record({
+        id: "job-cron",
+        schedule: { type: "cron", cron: "15 9 * * 1-5", timezone: "America/Chicago" },
+        prompt: "Weekday standup note"
+      })
+    ]);
+    const [, listScheduledPrompts] = createTools(store);
+
+    const text = await executeTool(listScheduledPrompts, {});
+
+    expect(text).toContain("job-cron");
+    expect(text).toContain(`cron "15 9 * * 1-5" (America/Chicago)`);
+    expect(text).toContain("next run 2026-08-31T14:15:00.000Z");
   });
 
   it("rejects a non-boolean include_history", async () => {
@@ -1277,6 +1583,55 @@ describe("update_scheduled_prompt", () => {
     );
   });
 
+  it("updates the schedule to a cron expression and preserves the prompt text", async () => {
+    const store = storeMock([record({ id: "job-live", prompt: "Standup summary" })]);
+    const [, , , , updateScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(updateScheduledPrompt, {
+      id: "job-live",
+      schedule: { cron: "30 8 * * 1-5", timezone: "America/Chicago" }
+    });
+
+    expect(store.updateScheduledPrompt).toHaveBeenCalledWith(
+      conversationKey,
+      "job-live",
+      { schedule: { type: "cron", cron: "30 8 * * 1-5", timezone: "America/Chicago" } }
+    );
+    expect(text).toContain(`cron "30 8 * * 1-5" (America/Chicago)`);
+    // Fixed now is Saturday 2026-08-29 09:30 CDT - the next weekday is Monday
+    // at 08:30 CDT.
+    expect(text).toContain("Next run: 2026-08-31T13:30:00.000Z");
+    expect(text).toContain("Standup summary");
+    expect(store.jobs[0]?.schedule)
+      .toEqual({ type: "cron", cron: "30 8 * * 1-5", timezone: "America/Chicago" });
+  });
+
+  it("validates cron schedules against the same rules as schedule_prompt", async () => {
+    const store = storeMock([record({ id: "job-live" })]);
+    const [, , , , updateScheduledPrompt] = createTools(store);
+
+    const combined = await executeTool(updateScheduledPrompt, {
+      id: "job-live",
+      schedule: { cron: "15 9 * * 1-5", time: "09:15" }
+    });
+    expect(combined).toMatch(/mutually exclusive/i);
+
+    const malformed = await executeTool(updateScheduledPrompt, {
+      id: "job-live",
+      schedule: { cron: "60 9 * * *" }
+    });
+    expect(malformed).toContain("60 9 * * *");
+
+    const neverMatches = await executeTool(updateScheduledPrompt, {
+      id: "job-live",
+      schedule: { cron: "0 0 30 2 *" }
+    });
+    expect(neverMatches).toMatch(/could not be resolved to a future time/i);
+
+    expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
+    expect(store.jobs[0]?.schedule).toEqual({ type: "daily", time: "09:15", timezone: "America/Chicago" });
+  });
+
   it("validates the new schedule exactly like schedule_prompt without mutating", async () => {
     const store = storeMock([record({ id: "job-live" })]);
     const [, , , , updateScheduledPrompt] = createTools(store);
@@ -1442,6 +1797,56 @@ describe("update_scheduled_prompt", () => {
 
     expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
     expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it("re-arms a canceled record with a cron schedule validated like schedule_prompt", async () => {
+    const store = storeMock([
+      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
+    ]);
+    const [, , , , updateScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      schedule: { cron: "0 0 1,15 * *", timezone: "UTC" }
+    });
+
+    expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
+      conversationKey,
+      "job-past",
+      { type: "cron", cron: "0 0 1,15 * *", timezone: "UTC" }
+    );
+    expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
+    expect(text).toContain("Resumed scheduled prompt job-past");
+    expect(text).toContain(`cron "0 0 1,15 * *" (UTC)`);
+  });
+
+  it("refuses an invalid cron re-arm without mutating", async () => {
+    const store = storeMock([
+      record({ id: "job-past", status: "cancelled", cancelledAt: "2026-08-29T15:00:00.000Z" })
+    ]);
+    const [, , , , updateScheduledPrompt] = createTools(store);
+
+    const combined = await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      schedule: { cron: "15 9 * * 1-5", type: "daily" }
+    });
+    expect(combined).toMatch(/mutually exclusive/i);
+
+    const malformed = await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      schedule: { cron: "15 9 *" }
+    });
+    expect(malformed).toContain("15 9 *");
+
+    const neverMatches = await executeTool(updateScheduledPrompt, {
+      id: "job-past",
+      schedule: { cron: "0 0 31 2 *" }
+    });
+    expect(neverMatches).toMatch(/could not be resolved to a future time/i);
+
+    expect(store.resumeScheduledPrompt).not.toHaveBeenCalled();
+    expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
+    expect(store.jobs[0]?.status).toBe("cancelled");
   });
 
   it("answers a clear no-op when a record stops being canceled before the re-arm lands", async () => {
@@ -1636,7 +2041,8 @@ describe("run_scheduled_task", () => {
   it("notes lifecycle consumption for one-time and recurring schedules", async () => {
     const store = storeMock([
       activeJob({ id: "job-once", schedule: { type: "once", atUtc: "2026-09-01T14:00:00.000Z" } }),
-      activeJob({ id: "job-daily" })
+      activeJob({ id: "job-daily" }),
+      activeJob({ id: "job-cron", schedule: { type: "cron", cron: "15 9 * * 1-5", timezone: "America/Chicago" } })
     ]);
     const runner = runnerMock();
     const runTool = runToolOf(store, runner);
@@ -1646,6 +2052,11 @@ describe("run_scheduled_task", () => {
 
     const dailyText = await executeTool(runTool, { id: "job-daily" });
     expect(dailyText).toContain("schedule continues");
+
+    // A cron job is a recurring schedule like the presets: the occurrence is
+    // consumed and the schedule continues after the run.
+    const cronText = await executeTool(runTool, { id: "job-cron" });
+    expect(cronText).toContain("schedule continues");
   });
 
   it("reports a silent outcome without posting", async () => {

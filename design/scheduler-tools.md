@@ -11,7 +11,9 @@ immediate on-demand execution through the engine follows
 [issue #67](https://github.com/HSV-AI/artemis/issues/67); merging
 `resume_scheduled_prompt` into `update_scheduled_prompt` (which dispatches on
 the target record's status) and removing the redundant `scope` parameter
-follows [issue #72](https://github.com/HSV-AI/artemis/issues/72).
+follows [issue #72](https://github.com/HSV-AI/artemis/issues/72); the
+optional cron schedule surface follows
+[issue #73](https://github.com/HSV-AI/artemis/issues/73).
 
 ## Problem
 
@@ -32,6 +34,12 @@ re-storing its prompt. And even a running job had no edit path: refining a
 scheduled prompt's text or changing its schedule meant cancelling and
 recreating it, which discarded the job's id and creation history.
 
+The preset grammar also cannot express every schedule a user might ask for:
+"weekdays at 09:15" or "the first and fifteenth of the month" require storing
+the same prompt twice, and a day-31 monthly job silently skips short months.
+A strict 5-field cron schedule, added as an optional, opt-in surface, closes
+that gap in a single job while the presets remain the default.
+
 ## Scope
 
 This protocol owns:
@@ -42,10 +50,10 @@ This protocol owns:
 - the `PromptSchedule`, `ScheduledPromptRecord`, `ScheduledPromptStatus`,
   `ScheduledPromptPruneFilter`, `ScheduledPromptPruneResult`,
   `ScheduledPromptUpdate`, and `ScheduledPromptStore` domain contracts
-- the `scheduled_prompts` SQLite table (schema migrations 7 through 9)
+- the `scheduled_prompts` SQLite table (schema migrations 7 through 10)
 - recurrence-resolution helpers: strict `HH:MM` parsing, ISO-8601 `at`
-  resolution, strict RFC3339 cutoff parsing, and DST-correct
-  next-occurrence computation
+  resolution, strict RFC3339 cutoff parsing, strict 5-field cron parsing, and
+  DST-correct next-occurrence computation
 - the trust boundary that binds all six tools to the harness-injected
   conversation key
 - the scheduler authorization model: creation-time membership verification for
@@ -121,7 +129,8 @@ tools are always registered; `run_scheduled_task` joins them only when the
 composition wired the execution engine's immediate-run executor.
 
 `schedule_prompt` takes `prompt`, `schedule`, and optional `response_type`
-(default `message`). The schedule is exactly one of:
+(default `message`). The schedule is either the preset surface — exactly one
+of:
 
 - `once` with `at`, an ISO-8601 datetime. An explicit offset (or `Z`) defines
   the instant directly; a naive datetime is resolved in the schedule timezone.
@@ -130,15 +139,39 @@ composition wired the execution engine's immediate-run executor.
 - `weekly` with `time` and `day_of_week` (integer 0-6, 0 = Sunday).
 - `monthly` with `time` and `day_of_month` (integer 1-31).
 
-An optional `timezone` string interprets recurring wall-clock times and naive
-`at` values; it defaults to the conversation's stored channel timezone and
-falls back to UTC. On success the tool stores the job and answers with the
-stored UTC form, the conversation the harness bound it to, and the next UTC
-run with a local rendering:
+— or the optional cron surface:
+
+- `cron` with `cron`, a strict 5-field cron expression (minute, hour,
+  day-of-month, month, day-of-week), e.g. `"15 9 * * 1-5"` for weekdays at
+  09:15. The `cron` string is mutually exclusive with every preset field
+  (`type`, `at`, `time`, `day_of_week`, `day_of_month`): supplying both is a
+  validation error and stores nothing. The expression is validated strictly
+  at creation — wrong field count, out-of-range values, and malformed lists,
+  ranges, or steps are rejected with a descriptive error naming the
+  expression — and a cron schedule that cannot resolve to a future occurrence
+  is refused exactly like an unresolvable preset recurrence. Cron has no
+  seconds or year field. Values are 0-59 (minute), 0-23 (hour), 1-31
+  (day-of-month), 1-12 (month), and 0-7 (day-of-week, where 0 and 7 both mean
+  Sunday); fields accept `*`, numbers, ranges `a-b`, comma-separated lists,
+  and steps `*/n` or `a-b/n`, and reject day names, `?`, and bare-number
+  steps. When both day-of-month and day-of-week are restricted, matching
+  follows standard cron's OR semantics: the day matches when either field
+  does; when only one field is restricted, that field alone governs. Cron
+  expressions are stored verbatim (trimmed) and re-evaluated at call time, so
+  a stored expression resolves against the calendar at each evaluation.
+
+The presets remain the default surface; cron is an additional, opt-in option.
+
+An optional `timezone` string applies to the cron fields exactly as it does
+to the presets: it interprets cron wall-clock times and naive `at` values;
+it defaults to the conversation's stored channel timezone and falls back to
+UTC. On success the tool stores the job and answers with the stored UTC form,
+the conversation the harness bound it to, and the next UTC run with a local
+rendering:
 
 ```text
-Scheduled prompt 7c1e…: daily at 09:15 (America/Chicago)
-Next run: 2026-08-30T14:15:00.000Z (local: 2026-08-30T09:15:00-05:00 Sun)
+Scheduled prompt 7c1e…: cron "15 9 * * 1-5" (America/Chicago)
+Next run: 2026-08-31T14:15:00.000Z (local: 2026-08-31T09:15:00-05:00 Mon)
 Conversation: guild:g1:channel:c1 (harness-injected)
 Response: message
 ```
@@ -214,8 +247,12 @@ Parameters:
   is always preserved, so a supplied `prompt` has no effect there.
 - `schedule` (optional for an ongoing record; **required** to re-arm a
   canceled record): replacement schedule — identical recurrence parameters
-  to `schedule_prompt`, validated exactly like a new schedule on both
-  lifecycle paths (a past `at` is refused; unresolvable recurrences are
+  to `schedule_prompt` (`once` with `at`, or `daily`/`weekly`/`monthly` with
+  `time` plus `day_of_week`/`day_of_month`, or a strict 5-field `cron` in
+  place of the preset fields, plus the optional `timezone`), validated
+  exactly like a new schedule on both lifecycle paths (a past `at` is
+  refused; cron and preset fields are mutually exclusive; an unresolvable
+  recurrence, including a cron expression that can never match, is
   refused), resolved against the same timezone default chain (explicit
   `timezone`, then the channel's stored timezone, then UTC).
 
@@ -322,14 +359,21 @@ engine is constructed after the PI gateway); it holds no dispatch, storage,
 or authorization logic of its own.
 
 A validated schedule is stored as either an absolute UTC instant (`once`,
-`atUtc`) or a zone-local wall-clock time (`time`, `HH:MM` 24-hour) plus the
-IANA timezone it is interpreted in, with `dayOfWeek` or `dayOfMonth` for
-weekly and monthly. Recurring occurrences are never pre-computed into UTC:
-`nextOccurrenceUtc` derives the next instant at evaluation time from the
-stored wall-clock definition, so daylight saving time stays correct across
-fall-back and spring-forward transitions. A monthly day that does not exist
-in a month is skipped for that month. One-time schedules store the resolved
-UTC instant directly (`atUtc`) and are the only jobs with a fixed next run.
+`atUtc`), a zone-local wall-clock definition (`time`, `HH:MM` 24-hour, plus
+`dayOfWeek` or `dayOfMonth` for weekly and monthly), or a strict 5-field cron
+expression (`cron`, stored verbatim as validated). Every recurring shape also
+stores the IANA timezone it is interpreted in. Recurring occurrences are never
+pre-computed into UTC: `nextOccurrenceUtc` derives the next instant at
+evaluation time from the stored definition, so daylight saving time stays
+correct across fall-back and spring-forward transitions. A monthly day that
+does not exist in a month is skipped for that month.
+`nextOccurrenceUtc` resolves a cron expression field by field over the local
+calendar, walking candidate days from `from`'s local date (bounded at ten
+years, which covers the eight-year worst-case gap between February 29
+matches; a never-matching expression resolves to undefined), and resolving
+each matching day's (hour, minute) wall clock through the same DST-correct
+zone resolution the presets use. One-time schedules store the resolved UTC
+instant directly (`atUtc`) and are the only jobs with a fixed next run.
 
 `response_type` is stored metadata for the [execution
 engine](scheduler-execution.md) (`message` posts the agent's response to the
@@ -347,17 +391,20 @@ absent in narrow unit tests that inject only a partial scheduler stub).
 
 ## Persistence
 
-A `scheduled_prompts` SQLite table (schema migrations 7 and 8) stores every job
+A `scheduled_prompts` SQLite table (schema migrations 7 through 10) stores every job
 scoped by the stable conversation key:
 
 - `id`: primary key, a random UUID.
 - `conversation_key`: the stable `dm:`/`guild:` conversation key.
 - `prompt`: the stored prompt text.
-- `schedule_type`: `once`, `daily`, `weekly`, or `monthly`.
-- `at_utc`, `time_of_day`, `day_of_week`, `day_of_month`, `timezone`:
-  nullable columns whose combination is locked to the schedule type by a
-  table CHECK constraint (for example, a weekly row requires `time_of_day`,
-  `day_of_week`, and `timezone` and forbids `at_utc`).
+- `schedule_type`: `once`, `daily`, `weekly`, `monthly`, or — after migration
+  10 — `cron`.
+- `at_utc`, `time_of_day`, `day_of_week`, `day_of_month`, `cron_expression`,
+  `timezone`: nullable columns whose combination is locked to the schedule
+  type by a table CHECK constraint (for example, a weekly row requires
+  `time_of_day`, `day_of_week`, and `timezone` and forbids `at_utc`; a cron
+  row requires `cron_expression` and `timezone` and forbids `at_utc`,
+  `time_of_day`, `day_of_week`, and `day_of_month`).
 - `response_type`: `message` or `silent`.
 - `scheduled_by_user_id`: the harness-injected Discord user id that requested
   the schedule (migration 8, `NOT NULL DEFAULT ''`). Pre-authorization rows are
@@ -376,17 +423,25 @@ ordered by creation time, and the `include_history` listing returns every
 record of the conversation across all statuses, also ordered by creation
 time. Cancellation is keyed by both `id` and `conversation_key`, so
 one conversation can never cancel another's job. Times are stored as UTC
-everywhere. A fresh empty database bootstraps migrations 1 through 9 in one
+everywhere. A fresh empty database bootstraps migrations 1 through 10 in one
 transaction; a verified migration-5 database receives the timezone table and
 the scheduler table (migrations 6, 7, 8) plus migration 9's execution-engine
-rebuild incrementally without touching its history, and a verified
-migration-7 database receives migration 8's attribution column additively
-with legacy rows backfilled to `''` before migration 9 rebuilds the table.
+rebuild and migration 10's cron columns incrementally without touching its
+history, and a verified migration-7 database receives migration 8's
+attribution column additively with legacy rows backfilled to `''` before
+migration 9 rebuilds the table and migration 10 adds the cron columns.
 Jobs survive restarts, container recreation, and `/clear-session`; there is
 no expiration. Migration 9 extends the table for the [execution
 engine](scheduler-execution.md): a `last_run_at` fire marker that re-arms
 recurring jobs, and a `completed` status that retires fired one-time jobs while
-keeping their rows for audit.
+keeping their rows for audit. Migration 10 extends the table for the optional
+cron surface: SQLite cannot alter a CHECK constraint, so the table is rebuilt
+in one transaction — a `scheduled_prompts_v10` copy with a `cron_expression`
+column, the `cron` schedule type in the type CHECK, and a row-shape CHECK
+branch requiring `cron_expression` plus `timezone` on cron rows and forbidding
+every preset column on them. Every pre-existing row is carried over verbatim
+(`cron_expression` starts NULL, since no pre-migration row can be a cron row),
+including the scheduling-user attribution and the fire bookkeeping.
 
 No schema change is required for the audit history, pruning, resume, or
 update: all lifecycle statuses already exist. Prune hard-deletes matching
@@ -464,13 +519,21 @@ the harness-derived identities, and nothing else.
 - Scheduling user definitively not a member of the conversation: authorization
   refusal naming the user and conversation; no mutation.
 - Missing, blank, or malformed prompt, schedule type, `at`, `time`,
-  `day_of_week`, `day_of_month`, or `response_type`: descriptive error text,
-  no mutation, no generation failure.
+  `day_of_week`, `day_of_month`, `cron`, or `response_type`: descriptive error
+  text, no mutation, no generation failure.
 - Invalid IANA timezone identifier (explicit or blank): error naming the
   value; no mutation.
 - One-time `at` in the past: refused; no mutation.
-- Recurring schedule that cannot resolve to a future occurrence: refused; no
-  mutation.
+- Recurring schedule that cannot resolve to a future occurrence, cron and
+  preset alike (including a cron expression that can never match, such as
+  day 31 of February): refused; no mutation.
+- `schedule.cron` supplied together with any preset field (`type`, `at`,
+  `time`, `day_of_week`, `day_of_month`): mutual-exclusion validation error
+  naming both surfaces; no mutation.
+- A cron request with a blank expression or one that fails strict validation
+  (wrong field count, out-of-range minute/hour/day/month/day-of-week, or a
+  malformed list, range, or step): a descriptive error naming the expression
+  and the offending field; no mutation.
 - Unknown or foreign `id` on cancel: error naming the id and conversation; no
   mutation.
 - `run_scheduled_task` with a blank `id`, an unknown or foreign `id`, a
@@ -511,11 +574,13 @@ the harness-derived identities, and nothing else.
   non-`cancelled` row for the re-arm and any non-`active` row for the
   rewire.
 - An invalid replacement schedule on update (missing `time`, missing
-  `day_of_week`/`day_of_month`, past `at`, invalid timezone) on either the
-  rewire or the re-arm path: the exact `schedule_prompt` validation error;
-  no mutation.
-- An unparseable stored schedule surfaces as `next run unresolved` in listings
-  rather than failing the turn.
+  `day_of_week`/`day_of_month`, past `at`, invalid timezone, malformed cron,
+  cron plus preset fields, or an unresolvable cron) on either the
+  rewire or the re-arm path: the exact
+  `schedule_prompt` validation error; no mutation.
+- An unparseable stored schedule (including a cron type whose stored
+  expression no longer parses or never matches) surfaces as
+  `next run unresolved` in listings rather than failing the turn.
 - At fire time: unparseable stored scope, non-allowlisted channel,
   unauthorized DM user, or missing scheduling user records
   `scheduled_prompt_rejected` and runs nothing. A definitive fire-time
@@ -538,9 +603,17 @@ the harness-derived identities, and nothing else.
 - `test/scheduler-tools.test.ts` covers `HH:MM` parsing, ISO-8601 `at`
   resolution (offsets, naive-in-zone, channel defaults, UTC fallbacks, strict
   validation), strict RFC3339 cutoff parsing (offsets, fractions, lowercase
-  `t`/`z`, and every malformed or offset-less rejection), next-occurrence
-  resolution across DST transitions and short months,
-  create/list/cancel/prune behavior for every recurrence type, all
+  `t`/`z`, and every malformed or offset-less rejection), strict 5-field cron
+  parsing (lists, ranges, steps, day-of-week 7 normalization, and every wrong
+  field count, out-of-range value, and malformed list/range/step rejection),
+  next-occurrence resolution across DST transitions and short months, cron
+  next-occurrence resolution (weekday windows, first-and-fifteenth,
+  DST-correct wall clocks, standard OR semantics for restricted day-of-month
+  and day-of-week, month restriction, leap-day, never-matching expressions),
+  create/list/cancel/prune behavior for every recurrence type, cron
+  creation (stored schedule, channel-timezone and UTC defaults, rendering),
+  cron mutual exclusion with the preset fields, cron syntax and
+  never-matching rejections without mutation, all
   validation errors, the past-instant refusal, response-type defaulting, the
   history listing (default exclusion, status labels, timestamps, no next run
   on past rows, empty-history message, non-boolean `include_history`), the
@@ -550,7 +623,8 @@ the harness-derived identities, and nothing else.
   (prompt-only and schedule-only rewires of an ongoing record, combined
   edits, channel-timezone resolution on both lifecycle paths,
   schedule-validation parity with `schedule_prompt` for the rewire and the
-  re-arm, re-arm of a canceled record through the store's resume path with
+  re-arm (including cron mutual exclusion, syntax, and never-matching
+  rejections on both paths), re-arm of a canceled record through the store's resume path with
   the original prompt preserved and a required schedule, completed and
   unknown-id refusals with no mutation, blank-prompt and no-change
   refusals, ignored stray scope parameters with injected-key scoping, no-op
@@ -580,13 +654,19 @@ the harness-derived identities, and nothing else.
   update semantics (prompt-only, schedule-only, and combined edits for every
   recurrence shape, preserved id/creation-instant/response/attribution/fire
   marker, single-row listings, non-ongoing and foreign refusals, and
-  durability across a repository reopen), the
+  durability across a repository reopen), cron round-trips (create/list,
+  cancel, resume-to-cron, update to and from a cron schedule, prune, and
+  durability across a repository reopen), the cron row-shape CHECK constraint
+  (a cron row requires `cron_expression` plus `timezone` and forbids every
+  preset column; unknown schedule types stay rejected), the
   fresh-database bootstrap including migrations 1
-  through 9, the incremental migration-6+7+8+9 path for a verified migration-5
+  through 10, the incremental migration-6-through-10 path for a verified migration-5
   database, the additive migration-8 upgrade of a migration-7 database
-  with legacy rows backfilled to an unattributed scheduler, and the
+  with legacy rows backfilled to an unattributed scheduler, the
   migration-9 rebuild that preserves jobs, attribution, and history while
-  adding `last_run_at` and the `completed` status.
+  adding `last_run_at` and the `completed` status, and the migration-10
+  rebuild that adds the `cron_expression` column and `cron` schedule type
+  while preserving every existing job.
 - `test/conversation-service.test.ts` covers the fire-time gate: scheduled
   runs resolve the conversation session and kind from the stored key, persist
   scheduler-attributed history and events, skip revoked members, enforce the

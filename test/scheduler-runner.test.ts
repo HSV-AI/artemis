@@ -254,6 +254,36 @@ describe("dueOccurrence", () => {
     expect(dueOccurrence(job({ createdAt: "not-a-date" }), new Date("2026-08-30T14:30:00.000Z")))
       .toBeUndefined();
   });
+
+  it("resolves a cron job's due weekday occurrence from creation", () => {
+    const weekdays = {
+      type: "cron" as const,
+      cron: "15 9 * * 1-5",
+      timezone: "America/Chicago"
+    };
+    // Created Friday 2026-08-28 17:00 CDT: Monday 09:15 CDT is the next due
+    // occurrence; it is not due before then.
+    expect(dueOccurrence(
+      job({ schedule: weekdays, createdAt: "2026-08-28T22:00:00.000Z" }),
+      new Date("2026-08-30T14:30:00.000Z")
+    )).toBeUndefined();
+    expect(dueOccurrence(
+      job({ schedule: weekdays, createdAt: "2026-08-28T22:00:00.000Z" }),
+      new Date("2026-08-31T14:30:00.000Z")
+    )?.toISOString()).toBe("2026-08-31T14:15:00.000Z");
+  });
+
+  it("re-arms a cron job from its last run to the next weekday occurrence", () => {
+    const due = dueOccurrence(
+      job({
+        schedule: { type: "cron", cron: "15 9 * * 1-5", timezone: "America/Chicago" },
+        createdAt: "2026-08-28T22:00:00.000Z",
+        lastRunAt: "2026-08-31T14:20:00.001Z"
+      }),
+      new Date("2026-09-01T14:20:00.500Z")
+    );
+    expect(due?.toISOString()).toBe("2026-09-01T14:15:00.000Z");
+  });
 });
 
 describe("SchedulerRunner", () => {
@@ -313,6 +343,50 @@ describe("SchedulerRunner", () => {
     expect(repository.markScheduledPromptFired).toHaveBeenCalledWith("job-1", "2026-08-30T14:20:00.001Z");
     expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
 
+    await runner.runOnce();
+    expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires a due cron job once with at-most-once re-arm and never completes it", async () => {
+    // Created Friday 2026-08-28 17:00 CDT; the next weekday occurrence is
+    // Monday 2026-08-31 09:15 CDT.
+    const cronJob = job({
+      schedule: { type: "cron", cron: "15 9 * * 1-5", timezone: "America/Chicago" },
+      createdAt: "2026-08-28T22:00:00.000Z"
+    });
+    const repository = repositoryMock([cronJob]);
+    const conversations = {
+      runExclusive: vi.fn(),
+      runScheduledPrompt: vi.fn().mockResolvedValue({
+        text: '{"type":"message","content":"Monday standup!"}',
+        model: "test-model"
+      }),
+      runScheduledPromptInline: vi.fn()
+    };
+    const dispatcher = { sendToConversation: vi.fn().mockResolvedValue(true) };
+    const clock = { value: new Date("2026-08-30T14:30:00.000Z") };
+    const runner = new SchedulerRunner({
+      repository: repository as unknown as ArtemisRepository,
+      conversations: conversations as never,
+      dispatcher: dispatcher as never,
+      logger: createLoggerMock(),
+      now: () => new Date(clock.value.getTime())
+    });
+
+    // Saturday: the next weekday occurrence is still in the future.
+    await runner.runOnce();
+    expect(conversations.runScheduledPrompt).not.toHaveBeenCalled();
+    expect(dispatcher.sendToConversation).not.toHaveBeenCalled();
+
+    // Monday after the occurrence: fires, re-arms via lastRunAt, never completes.
+    clock.value = new Date("2026-08-31T14:30:00.000Z");
+    await runner.runOnce();
+    expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
+    expect(repository.markScheduledPromptFired).toHaveBeenCalledWith("job-1", "2026-08-31T14:30:00.001Z");
+    expect(repository.completeScheduledPrompt).not.toHaveBeenCalled();
+    expect(dispatcher.sendToConversation).toHaveBeenCalledWith(CONVERSATION, "Monday standup!");
+
+    // The re-armed job is not due again on Monday; its next run is Tuesday.
     await runner.runOnce();
     expect(conversations.runScheduledPrompt).toHaveBeenCalledTimes(1);
   });

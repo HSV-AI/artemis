@@ -133,6 +133,244 @@ function daysInMonth(year: number, monthIndex: number): number {
   return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate();
 }
 
+/** Cron field names and their inclusive value ranges, in expression order. */
+const CRON_FIELD_NAMES = ["minute", "hour", "day-of-month", "month", "day-of-week"] as const;
+const CRON_FIELD_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0, 59],
+  [0, 23],
+  [1, 31],
+  [1, 12],
+  [0, 7]
+];
+
+/** The parsed value sets of a strict 5-field cron expression. */
+export interface ParsedCronExpression {
+  /** Ascending unique minutes (0-59). */
+  minutes: number[];
+  /** Ascending unique hours (0-23). */
+  hours: number[];
+  /** Ascending unique days of month (1-31). */
+  daysOfMonth: number[];
+  /** Ascending unique months (1-12). */
+  months: number[];
+  /** Ascending unique days of week (0-6, Sunday first; 7 normalizes to 0). */
+  daysOfWeek: number[];
+  /** True when the day-of-month field was exactly "*". */
+  domStar: boolean;
+  /** True when the day-of-week field was exactly "*". */
+  dowStar: boolean;
+}
+
+type CronFieldParse = { values: number[] } | { reason: string };
+
+/**
+ * Parse one cron field: "*", a number, a range "a-b", a comma-separated list
+ * of those, or a stepped form (star-slash-n or a-b-slash-n). Only digits are
+ * accepted; day names, "?", seconds, and bare-number steps are deliberately
+ * unsupported.
+ */
+function parseCronField(
+  part: string,
+  min: number,
+  max: number,
+  name: string
+): CronFieldParse {
+  const collected = new Set<number>();
+  for (const atom of part.split(",")) {
+    let start: number;
+    let end: number;
+    let step = 1;
+    const stepped = /^(\*|\d+-\d+)\/(\d+)$/.exec(atom);
+    const plain = /^(\d+)(?:-(\d+))?$/.exec(atom);
+    if (atom === "*") {
+      start = min;
+      end = max;
+    } else if (stepped) {
+      step = Number(stepped[2]);
+      if (step === 0) {
+        return {
+          reason: `field ${name} "${part}" uses a zero step; use a step of 1 or more`
+        };
+      }
+      if (stepped[1] === "*") {
+        start = min;
+        end = max;
+      } else {
+        start = Number(stepped[1]?.split("-")[0]);
+        end = Number(stepped[1]?.split("-")[1]);
+      }
+    } else if (plain) {
+      start = Number(plain[1]);
+      end = plain[2] === undefined ? Number(plain[1]) : Number(plain[2]);
+      if (plain[2] !== undefined && start > end) {
+        return {
+          reason: `field ${name} "${part}" is a malformed range; the start must not exceed the end`
+        };
+      }
+    } else {
+      return {
+        reason:
+          `field ${name} "${atom}" is malformed; each entry may be "*", a number, ` +
+          `a range "a-b", a list of them, or a step "*/n" or "a-b/n"`
+      };
+    }
+    if (start < min || end > max) {
+      return {
+        reason: `field ${name} "${part}" is out of range (${min}-${max})`
+      };
+    }
+    for (let value = start; value <= end; value += step) {
+      collected.add(value);
+    }
+  }
+  return { values: [...collected].sort((left, right) => left - right) };
+}
+
+/**
+ * Parse a strict 5-field cron expression (minute, hour, day-of-month, month,
+ * day-of-week). Returns undefined for anything malformed: wrong field count,
+ * out-of-range values, or malformed lists, ranges, and steps. Day-of-week 7
+ * is normalized to 0 (Sunday) and the DOM/DOW "star" flags are recorded so
+ * next-occurrence resolution can apply standard cron's OR semantics. Stepped
+ * fields use star-slash-n and range-slash-n forms.
+ */
+export function parseCronExpression(value: string | undefined): ParsedCronExpression | undefined {
+  const parts = (value ?? "").trim().split(/\s+/).filter((part) => part !== "");
+  if (parts.length !== 5) {
+    return undefined;
+  }
+  const values: number[][] = [];
+  for (const [index, part] of parts.entries()) {
+    const name = CRON_FIELD_NAMES[index] ?? "field";
+    const range = CRON_FIELD_RANGES[index] ?? [0, 0];
+    const field = parseCronField(part, range[0] ?? 0, range[1] ?? 0, name);
+    if ("reason" in field) {
+      return undefined;
+    }
+    values.push(field.values);
+  }
+  const daysOfWeek = (values[4] ?? []).map((day) => (day === 7 ? 0 : day));
+  return {
+    minutes: values[0] ?? [],
+    hours: values[1] ?? [],
+    daysOfMonth: values[2] ?? [],
+    months: values[3] ?? [],
+    daysOfWeek: [...new Set(daysOfWeek)].sort((left, right) => left - right),
+    domStar: parts[2] === "*",
+    dowStar: parts[4] === "*"
+  };
+}
+
+/**
+ * Build the full validation error for a rejected cron expression, naming the
+ * expression and the specific problem the strict parser found with it.
+ */
+export function cronValidationError(value: string | undefined): string {
+  const expression = (value ?? "").trim();
+  if (expression === "") {
+    return (
+      "Error: schedule.cron must be a 5-field cron expression " +
+      "(minute, hour, day-of-month, month, day-of-week), e.g. \"15 9 * * 1-5\". " +
+      "A blank expression is not valid."
+    );
+  }
+  const parts = expression.split(/\s+/).filter((part) => part !== "");
+  if (parts.length !== 5) {
+    return (
+      `Error: schedule.cron "${expression}" must have exactly 5 fields ` +
+      "(minute, hour, day-of-month, month, day-of-week) but has " +
+      `${parts.length}.`
+    );
+  }
+  for (const [index, part] of parts.entries()) {
+    const name = CRON_FIELD_NAMES[index] ?? "field";
+    const range = CRON_FIELD_RANGES[index] ?? [0, 0];
+    const field = parseCronField(part, range[0] ?? 0, range[1] ?? 0, name);
+    if ("reason" in field) {
+      return (
+        `Error: schedule.cron "${expression}" is not a valid cron expression: ` +
+        `${field.reason}.`
+      );
+    }
+  }
+  return `Error: schedule.cron "${expression}" is not a valid cron expression.`;
+}
+
+/** Whether one calendar day matches a cron's month and day fields, using standard cron DOM/DOW semantics. */
+function cronDayMatches(fields: ParsedCronExpression, date: Date): boolean {
+  if (!fields.months.includes(date.getUTCMonth() + 1)) {
+    return false;
+  }
+  if (fields.domStar && fields.dowStar) {
+    return true;
+  }
+  const byDayOfMonth = fields.daysOfMonth.includes(date.getUTCDate());
+  const byDayOfWeek = fields.daysOfWeek.includes(date.getUTCDay());
+  // Standard cron: when both day fields are restricted the day matches if
+  // EITHER does; otherwise only the restricted field governs, and an
+  // unrestricted field never forces a match.
+  if (fields.dowStar) {
+    return byDayOfMonth;
+  }
+  if (fields.domStar) {
+    return byDayOfWeek;
+  }
+  return byDayOfMonth || byDayOfWeek;
+}
+
+/**
+ * Resolve the next occurrence of a parsed cron expression at or after `from`,
+ * wall-clock in the schedule timezone so daylight saving time stays correct.
+ * Candidate days are scanned from `from`'s local date for up to ten years,
+ * which covers the 8-year worst-case gap between February 29 matches; a
+ * longer gap means the expression can never match and resolves to undefined.
+ */
+function nextCronOccurrence(
+  fields: ParsedCronExpression,
+  timezone: string,
+  from: Date
+): Date | undefined {
+  const zoned = formatZonedInstant(from, timezone);
+  const [datePart = "", timePart = ""] = zoned.local.split("T");
+  const [yearText = "", monthText = "", dayText = ""] = datePart.split("-");
+  const [hourText = "0", minuteText = "0"] = timePart.split(":");
+  const fromWallMinute = Date.UTC(
+    Number(yearText),
+    Number(monthText) - 1,
+    Number(dayText),
+    Number(hourText),
+    Number(minuteText),
+    0
+  );
+  const candidateDate = new Date(
+    Date.UTC(Number(yearText), Number(monthText) - 1, Number(dayText))
+  );
+  for (let checked = 0; checked < 3660; checked += 1) {
+    if (cronDayMatches(fields, candidateDate)) {
+      const year = candidateDate.getUTCFullYear();
+      const monthIndex = candidateDate.getUTCMonth();
+      const day = candidateDate.getUTCDate();
+      for (const hour of fields.hours) {
+        for (const minute of fields.minutes) {
+          const wall = Date.UTC(year, monthIndex, day, hour, minute, 0);
+          // On the first day, skip candidates strictly before the current
+          // wall-clock minute; the resolved-instant check below is still
+          // authoritative for equal and later candidates.
+          if (checked === 0 && wall < fromWallMinute) {
+            continue;
+          }
+          const instant = wallClockToInstant(timezone, wall);
+          if (instant.getTime() >= from.getTime()) {
+            return instant;
+          }
+        }
+      }
+    }
+    candidateDate.setUTCDate(candidateDate.getUTCDate() + 1);
+  }
+  return undefined;
+}
+
 function pad2(value: number): string {
   return value.toString().padStart(2, "0");
 }
@@ -230,11 +468,22 @@ export function resolveOnceInstant(at: string, timezone: string): Date | undefin
  * - recurring: the next local wall-clock match in the schedule timezone,
  *   derived at call time so daylight saving time stays correct. A monthly
  *   day that does not exist in a month is skipped for that month.
+ * - `cron`: the next wall-clock match of the stored 5-field expression in the
+ *   schedule timezone, with standard cron day-of-month/day-of-week OR
+ *   semantics. An unparseable or never-matching stored expression is
+ *   undefined (the job is skipped rather than failing the tick).
  */
 export function nextOccurrenceUtc(schedule: PromptSchedule, from: Date): Date | undefined {
   if (schedule.type === "once") {
     const instant = resolveOnceInstant(schedule.atUtc, "UTC");
     return instant && !Number.isNaN(instant.getTime()) ? instant : undefined;
+  }
+  if (schedule.type === "cron") {
+    const fields = parseCronExpression(schedule.cron);
+    if (!fields) {
+      return undefined;
+    }
+    return nextCronOccurrence(fields, schedule.timezone, from);
   }
   const time = parseHhMmTime(schedule.time);
   if (!time) {
@@ -313,6 +562,9 @@ export function nextOccurrenceUtc(schedule: PromptSchedule, from: Date): Date | 
 export function describeSchedule(schedule: PromptSchedule): string {
   if (schedule.type === "once") {
     return `once at ${schedule.atUtc}`;
+  }
+  if (schedule.type === "cron") {
+    return `cron "${schedule.cron}" (${schedule.timezone})`;
   }
   if (schedule.type === "daily") {
     return `daily at ${schedule.time} (${schedule.timezone})`;
@@ -422,7 +674,19 @@ function invalidDayOfMonthError(): string {
 }
 
 function invalidTypeError(): string {
-  return `Error: schedule.type must be one of: ${RECURRENCE_TYPES}.`;
+  return `Error: schedule.type must be one of: ${RECURRENCE_TYPES}, or pass schedule.cron for a cron schedule.`;
+}
+
+function cronMutuallyExclusiveError(presetFields: string[]): string {
+  return (
+    `Error: schedule.cron is mutually exclusive with the preset schedule fields ` +
+    `(${presetFields.join(", ")}). Pass either a cron expression or the preset ` +
+    "fields - not both. Nothing was scheduled."
+  );
+}
+
+function unresolvableScheduleError(): string {
+  return "Error: the schedule could not be resolved to a future time.";
 }
 
 function invalidResponseTypeError(): string {
@@ -505,6 +769,7 @@ interface ScheduleRequest {
   day_of_week?: unknown;
   day_of_month?: unknown;
   timezone?: unknown;
+  cron?: unknown;
 }
 
 /** A fully validated schedule with its next occurrence and resolved timezone. */
@@ -524,6 +789,48 @@ export function resolveScheduleRequest(
   defaultTimezone: string | undefined,
   now: () => Date
 ): ResolvedScheduleRequest {
+  // A cron request is detected by the cron parameter itself, not by the
+  // `type` field: cron and the preset surface are mutually exclusive by
+  // design, and `type` is not part of the cron surface at all.
+  const cronValue = typeof request?.cron === "string" ? request.cron.trim() : undefined;
+  if (cronValue !== undefined) {
+    const presetFields: string[] = [];
+    if (request?.type !== undefined) {
+      presetFields.push("type");
+    }
+    if (request?.at !== undefined) {
+      presetFields.push("at");
+    }
+    if (request?.time !== undefined) {
+      presetFields.push("time");
+    }
+    if (request?.day_of_week !== undefined) {
+      presetFields.push("day_of_week");
+    }
+    if (request?.day_of_month !== undefined) {
+      presetFields.push("day_of_month");
+    }
+    if (presetFields.length > 0) {
+      return { error: cronMutuallyExclusiveError(presetFields) };
+    }
+    const resolvedTimezone = resolveScheduleTimezone(
+      typeof request?.timezone === "string" ? request.timezone : undefined,
+      defaultTimezone
+    );
+    if ("error" in resolvedTimezone) {
+      return { error: resolvedTimezone.error };
+    }
+    const { timezone } = resolvedTimezone;
+    if (cronValue === "" || !parseCronExpression(cronValue)) {
+      return { error: cronValidationError(cronValue) };
+    }
+    const schedule: PromptSchedule = { type: "cron", cron: cronValue, timezone };
+    const nextRun = nextOccurrenceUtc(schedule, now());
+    if (!nextRun) {
+      return { error: unresolvableScheduleError() };
+    }
+    return { schedule, nextRun, timezone };
+  }
   if (request?.type !== "once" && request?.type !== "daily"
     && request?.type !== "weekly" && request?.type !== "monthly") {
     return { error: invalidTypeError() };
@@ -563,7 +870,7 @@ export function resolveScheduleRequest(
   const finalizeRecurring = (schedule: PromptSchedule): ResolvedScheduleRequest => {
     const nextRun = nextOccurrenceUtc(schedule, now());
     if (!nextRun) {
-      return { error: "Error: the schedule could not be resolved to a future time." };
+      return { error: unresolvableScheduleError() };
     }
     return { schedule, nextRun, timezone };
   };
@@ -669,12 +976,15 @@ function createdPromptText(
  */
 const createScheduleParametersSchema = () =>
   Type.Object({
-    type: Type.Union([
+    type: Type.Optional(Type.Union([
       Type.Literal("once"),
       Type.Literal("daily"),
       Type.Literal("weekly"),
       Type.Literal("monthly")
-    ], { description: "Recurrence type" }),
+    ], { description: "Recurrence type; omit when schedule.cron is supplied" })),
+    cron: Type.Optional(Type.String({
+      description: 'Strict 5-field cron expression (minute hour day-of-month month day-of-week), e.g. "15 9 * * 1-5"; mutually exclusive with the preset fields'
+    })),
     at: Type.Optional(Type.String({
       description: "ISO-8601 datetime for one-time schedules, e.g. 2026-09-01T09:15:00-05:00"
     })),
@@ -708,12 +1018,13 @@ export function createSchedulerTools(
     name: "schedule_prompt",
     label: "Schedule Prompt",
     description:
-      "Schedule a prompt to run in this conversation at a specific time: once, daily, weekly, or monthly, stored in UTC.",
-    promptSnippet: "Schedule a prompt to run once or repeatedly in this conversation",
+      "Schedule a prompt to run in this conversation at a specific time: once, daily, weekly, or monthly via preset fields, or a strict 5-field cron expression, stored in UTC.",
+    promptSnippet: "Schedule a prompt to run once, on a recurring preset, or on a cron schedule in this conversation",
     promptGuidelines: [
       "Schedule only when the current Discord user explicitly asks for a reminder or scheduled prompt.",
       "One-time schedules need schedule.at (ISO-8601 datetime); recurring schedules need schedule.time (HH:MM, 24-hour).",
       "Weekly schedules also need schedule.day_of_week (0-6, 0=Sunday); monthly schedules also need schedule.day_of_month (1-31).",
+      'Alternatively pass schedule.cron with a strict 5-field cron expression (e.g. "15 9 * * 1-5" for weekdays at 09:15) instead of the preset fields; cron and the preset fields are mutually exclusive.',
       "All times are stored as UTC; pass schedule.timezone or rely on this conversation's timezone for local wall-clock times.",
       "The target is always this conversation and the request is always attributed to the verified current user; neither can be supplied or overridden."
     ],
@@ -954,7 +1265,7 @@ export function createSchedulerTools(
       "An ongoing record is rewired in place, preserving its id, creation history, attribution, and fire marker; ids never change.",
       "A canceled record is re-armed by supplying a new schedule: the original prompt, response type, and scheduling user are preserved, so a supplied prompt has no effect on the re-arm path.",
       "Completed records are retired history and can no longer be edited or re-armed.",
-      "The schedule follows the same rules as schedule_prompt: once needs at, recurring types need time (and day_of_week or day_of_month)."
+      "The schedule follows the same rules as schedule_prompt: once needs at, recurring types need time (and day_of_week or day_of_month), or pass schedule.cron with a strict 5-field expression instead."
     ],
     parameters: Type.Object({
       id: Type.String({
