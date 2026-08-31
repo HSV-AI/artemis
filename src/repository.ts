@@ -88,11 +88,12 @@ interface ScheduledPromptRow {
   id: string;
   conversation_key: string;
   prompt: string;
-  schedule_type: "once" | "daily" | "weekly" | "monthly";
+  schedule_type: "once" | "daily" | "weekly" | "monthly" | "cron";
   at_utc: string | null;
   time_of_day: string | null;
   day_of_week: number | null;
   day_of_month: number | null;
+  cron_expression: string | null;
   timezone: string | null;
   response_type: "message" | "silent";
   status: ScheduledPromptStatus;
@@ -442,9 +443,9 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       .prepare(
         `INSERT INTO scheduled_prompts
          (id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
-          day_of_week, day_of_month, timezone, response_type, scheduled_by_user_id,
-          status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`
+          day_of_week, day_of_month, cron_expression, timezone, response_type,
+          scheduled_by_user_id, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`
       )
       .run(
         id,
@@ -452,9 +453,12 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
         input.prompt,
         schedule.type,
         schedule.type === "once" ? schedule.atUtc : null,
-        schedule.type === "once" ? null : schedule.time,
+        schedule.type === "daily" || schedule.type === "weekly" || schedule.type === "monthly"
+          ? schedule.time
+          : null,
         schedule.type === "weekly" ? schedule.dayOfWeek : null,
         schedule.type === "monthly" ? schedule.dayOfMonth : null,
+        schedule.type === "cron" ? schedule.cron : null,
         schedule.type === "once" ? null : schedule.timezone,
         input.responseType,
         input.scheduledByUserId,
@@ -562,16 +566,19 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       .prepare(
         `UPDATE scheduled_prompts
          SET schedule_type = ?, at_utc = ?, time_of_day = ?, day_of_week = ?,
-             day_of_month = ?, timezone = ?, status = 'active',
-             cancelled_at = NULL, last_run_at = NULL, created_at = ?
+             day_of_month = ?, cron_expression = ?, timezone = ?,
+             status = 'active', cancelled_at = NULL, last_run_at = NULL, created_at = ?
          WHERE id = ? AND conversation_key = ? AND status = 'cancelled'`
       )
       .run(
         schedule.type,
         schedule.type === "once" ? schedule.atUtc : null,
-        schedule.type === "once" ? null : schedule.time,
+        schedule.type === "daily" || schedule.type === "weekly" || schedule.type === "monthly"
+          ? schedule.time
+          : null,
         schedule.type === "weekly" ? schedule.dayOfWeek : null,
         schedule.type === "monthly" ? schedule.dayOfMonth : null,
+        schedule.type === "cron" ? schedule.cron : null,
         schedule.type === "once" ? null : schedule.timezone,
         resumedAt,
         id,
@@ -615,16 +622,19 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       .prepare(
         `UPDATE scheduled_prompts
          SET prompt = ?, schedule_type = ?, at_utc = ?, time_of_day = ?,
-             day_of_week = ?, day_of_month = ?, timezone = ?
+             day_of_week = ?, day_of_month = ?, cron_expression = ?, timezone = ?
          WHERE id = ? AND conversation_key = ? AND status = 'active'`
       )
       .run(
         prompt,
         schedule.type,
         schedule.type === "once" ? schedule.atUtc : null,
-        schedule.type === "once" ? null : schedule.time,
+        schedule.type === "daily" || schedule.type === "weekly" || schedule.type === "monthly"
+          ? schedule.time
+          : null,
         schedule.type === "weekly" ? schedule.dayOfWeek : null,
         schedule.type === "monthly" ? schedule.dayOfMonth : null,
+        schedule.type === "cron" ? schedule.cron : null,
         schedule.type === "once" ? null : schedule.timezone,
         id,
         conversationKey
@@ -680,6 +690,8 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
         dayOfWeek: row.day_of_week ?? 0,
         timezone: row.timezone ?? "UTC"
       };
+    } else if (row.schedule_type === "cron") {
+      schedule = { type: "cron", cron: row.cron_expression ?? "", timezone: row.timezone ?? "UTC" };
     } else {
       schedule = {
         type: "monthly",
@@ -799,6 +811,10 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
 
     if (!applied.has(9)) {
       this.applyMigration9();
+    }
+
+    if (!applied.has(10)) {
+      this.applyMigration10();
     }
 
     // A fully migrated database is the steady state. The bootstrap path
@@ -979,6 +995,80 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
     transaction();
   }
 
+  /**
+   * Migration 10 extends scheduled prompts with optional strict cron
+   * schedules: a `cron_expression` column and a `cron` schedule type, each
+   * locked by the row-shape CHECK constraint (a cron row requires the
+   * expression plus a timezone and forbids every preset column). SQLite
+   * cannot alter a CHECK constraint, so the table is rebuilt additively in
+   * one transaction with every existing row — including migration 9's fire
+   * bookkeeping — preserved verbatim; cron_expression starts NULL because no
+   * pre-migration row can be a cron row.
+   */
+  private applyMigration10(): void {
+    const timestamp = now();
+    const transaction = this.database.transaction(() => {
+      this.database.exec(`
+        CREATE TABLE scheduled_prompts_v10 (
+          id TEXT PRIMARY KEY,
+          conversation_key TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          schedule_type TEXT NOT NULL
+            CHECK (schedule_type IN ('once', 'daily', 'weekly', 'monthly', 'cron')),
+          at_utc TEXT,
+          time_of_day TEXT,
+          day_of_week INTEGER,
+          day_of_month INTEGER,
+          cron_expression TEXT,
+          timezone TEXT,
+          response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
+          scheduled_by_user_id TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL CHECK (status IN ('active', 'cancelled', 'completed')),
+          created_at TEXT NOT NULL,
+          cancelled_at TEXT,
+          last_run_at TEXT,
+          CHECK (
+            (schedule_type = 'once'
+              AND at_utc IS NOT NULL AND time_of_day IS NULL AND day_of_week IS NULL
+              AND day_of_month IS NULL AND cron_expression IS NULL AND timezone IS NULL)
+            OR (schedule_type = 'daily'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
+              AND day_of_month IS NULL AND cron_expression IS NULL AND timezone IS NOT NULL)
+            OR (schedule_type = 'weekly'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NOT NULL
+              AND day_of_month IS NULL AND cron_expression IS NULL AND timezone IS NOT NULL)
+            OR (schedule_type = 'monthly'
+              AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
+              AND day_of_month IS NOT NULL AND cron_expression IS NULL AND timezone IS NOT NULL)
+            OR (schedule_type = 'cron'
+              AND at_utc IS NULL AND time_of_day IS NULL AND day_of_week IS NULL
+              AND day_of_month IS NULL AND cron_expression IS NOT NULL
+              AND timezone IS NOT NULL)
+          )
+        );
+
+        INSERT INTO scheduled_prompts_v10
+          (id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
+           day_of_week, day_of_month, cron_expression, timezone, response_type,
+           scheduled_by_user_id, status, created_at, cancelled_at, last_run_at)
+        SELECT id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
+               day_of_week, day_of_month, NULL, timezone, response_type,
+               scheduled_by_user_id, status, created_at, cancelled_at, last_run_at
+        FROM scheduled_prompts;
+
+        DROP TABLE scheduled_prompts;
+        ALTER TABLE scheduled_prompts_v10 RENAME TO scheduled_prompts;
+
+        CREATE INDEX IF NOT EXISTS scheduled_prompts_by_conversation
+          ON scheduled_prompts(conversation_key, status, created_at);
+      `);
+      this.database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+        .run(10, timestamp);
+    });
+    transaction();
+  }
+
   private bootstrapFreshDatabase(): void {
     const timestamp = now();
     const transaction = this.database.transaction(() => {
@@ -1099,11 +1189,12 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
           conversation_key TEXT NOT NULL,
           prompt TEXT NOT NULL,
           schedule_type TEXT NOT NULL
-            CHECK (schedule_type IN ('once', 'daily', 'weekly', 'monthly')),
+            CHECK (schedule_type IN ('once', 'daily', 'weekly', 'monthly', 'cron')),
           at_utc TEXT,
           time_of_day TEXT,
           day_of_week INTEGER,
           day_of_month INTEGER,
+          cron_expression TEXT,
           timezone TEXT,
           response_type TEXT NOT NULL CHECK (response_type IN ('message', 'silent')),
           scheduled_by_user_id TEXT NOT NULL DEFAULT '',
@@ -1114,16 +1205,20 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
           CHECK (
             (schedule_type = 'once'
               AND at_utc IS NOT NULL AND time_of_day IS NULL AND day_of_week IS NULL
-              AND day_of_month IS NULL AND timezone IS NULL)
+              AND day_of_month IS NULL AND cron_expression IS NULL AND timezone IS NULL)
             OR (schedule_type = 'daily'
               AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
-              AND day_of_month IS NULL AND timezone IS NOT NULL)
+              AND day_of_month IS NULL AND cron_expression IS NULL AND timezone IS NOT NULL)
             OR (schedule_type = 'weekly'
               AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NOT NULL
-              AND day_of_month IS NULL AND timezone IS NOT NULL)
+              AND day_of_month IS NULL AND cron_expression IS NULL AND timezone IS NOT NULL)
             OR (schedule_type = 'monthly'
               AND at_utc IS NULL AND time_of_day IS NOT NULL AND day_of_week IS NULL
-              AND day_of_month IS NOT NULL AND timezone IS NOT NULL)
+              AND day_of_month IS NOT NULL AND cron_expression IS NULL AND timezone IS NOT NULL)
+            OR (schedule_type = 'cron'
+              AND at_utc IS NULL AND time_of_day IS NULL AND day_of_week IS NULL
+              AND day_of_month IS NULL AND cron_expression IS NOT NULL
+              AND timezone IS NOT NULL)
           )
         );
 
@@ -1133,7 +1228,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       const insert = this.database.prepare(
         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)"
       );
-      for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
+      for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
         insert.run(version, timestamp);
       }
     });

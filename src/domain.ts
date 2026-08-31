@@ -151,14 +151,16 @@ export type ScheduledPromptStatus = "active" | "cancelled" | "completed";
 /**
  * A validated prompt schedule. One-time schedules carry an absolute UTC
  * instant; recurring schedules carry a zone-local wall-clock time plus the
- * IANA timezone it is interpreted in. Recurring UTC instants are derived at
- * evaluation time so daylight saving time stays correct.
+ * IANA timezone it is interpreted in; cron schedules carry a strict 5-field
+ * cron expression. Recurring UTC instants are derived at evaluation time so
+ * daylight saving time stays correct.
  */
 export type PromptSchedule =
   | { type: "once"; atUtc: string }
   | { type: "daily"; time: string; timezone: string }
   | { type: "weekly"; time: string; dayOfWeek: number; timezone: string }
-  | { type: "monthly"; time: string; dayOfMonth: number; timezone: string };
+  | { type: "monthly"; time: string; dayOfMonth: number; timezone: string }
+  | { type: "cron"; cron: string; timezone: string };
 
 export interface ScheduledPromptRecord {
   id: string;
