@@ -183,6 +183,17 @@ export interface ScheduledPromptRecord {
    * the next occurrence is derived from the resume instant.
    */
   lastRunAt?: string;
+  /**
+   * Persisted snapshot of the engine's next occurrence (UTC ISO-8601),
+   * written whenever the record's next run is established or rewritten —
+   * creation, each engine claim of a recurring job, resume, and schedule
+   * updates — and cleared when a job is cancelled or completed. Rewritten at
+   * every claim so the listing reflects what the engine will actually honor,
+   * including a due-but-unfired pending occurrence, and so daylight saving
+   * transitions stay correct. Absent on legacy rows written before this
+   * field existed; display recomputes from the schedule when absent.
+   */
+  nextRun?: string;
   cancelledAt?: string;
   /**
    * Instant a completed one-time job fired and retired. Derived from the
@@ -198,6 +209,13 @@ export interface ScheduledPromptInput {
   responseType: PromptResponseType;
   /** Harness-injected Discord user who requested the schedule. */
   scheduledByUserId: string;
+  /**
+   * Engine-resolved next occurrence (UTC ISO-8601) stored as a display
+   * snapshot on creation, so listings show the run the engine will honor
+   * instead of recomputing a fresh guess from the current time. Rewritten
+   * at every engine claim.
+   */
+  nextRun?: string;
 }
 
 /**
@@ -229,6 +247,14 @@ export interface ScheduledPromptUpdate {
   prompt?: string;
   /** Replacement schedule. Absent preserves the stored schedule. */
   schedule?: PromptSchedule;
+  /**
+   * Engine-resolved next occurrence (UTC ISO-8601) to persist alongside the
+   * change. Supply it with a replacement schedule (the tool already resolved
+   * the instant); absent preserves the stored snapshot on a prompt-only edit
+   * and clears a stale one when the schedule was rewritten without resolving
+   * a new instant (the snapshot belonged to the replaced schedule).
+   */
+  nextRun?: string;
 }
 
 /**
@@ -267,13 +293,17 @@ export interface ScheduledPromptStore {
   ): ScheduledPromptPruneResult;
   /**
    * Restores a canceled record to `active` with a new schedule, preserving
-   * its original prompt. Returns the updated record, or undefined when the
-   * id does not exist in this conversation or is not canceled.
+   * its original prompt. `nextRunUtc`, when supplied, persists the tool's
+   * resolved next occurrence as the record's display snapshot; absent leaves
+   * it unset (listing recomputes it from the schedule). Returns the updated
+   * record, or undefined when the id does not exist in this conversation or
+   * is not canceled.
    */
   resumeScheduledPrompt(
     conversationKey: string,
     id: string,
-    schedule: PromptSchedule
+    schedule: PromptSchedule,
+    nextRunUtc?: string
   ): ScheduledPromptRecord | undefined;
   /**
    * Rewrites an ongoing record's prompt text and/or schedule in place,
@@ -316,9 +346,14 @@ export interface SchedulerExecutionStore {
   claimScheduledPrompt(id: string, claimedUntilUtc: string, nowUtc: string): boolean;
   /** Clears a job's claim so a denied or failed run can retry on a later tick. */
   releaseScheduledPromptClaim(id: string): void;
-  /** Records the moment a recurring job was last armed, blocking re-fires. */
-  markScheduledPromptFired(id: string, firedAtUtc: string): void;
-  /** Marks a one-time job completed after it fired. */
+  /**
+   * Records the moment a recurring job was last armed, blocking re-fires.
+   * `nextRunUtc`, when supplied, persists the engine's derived next
+   * occurrence as the record's display snapshot; omitting it clears the
+   * snapshot (the legacy row shape listing recomputation covers).
+   */
+  markScheduledPromptFired(id: string, firedAtUtc: string, nextRunUtc?: string): void;
+  /** Marks a one-time job completed after it fired, clearing its next run. */
   completeScheduledPrompt(id: string, completedAtUtc: string): void;
 }
 

@@ -81,6 +81,7 @@ function record(overrides: Partial<ScheduledPromptRecord> = {}): ScheduledPrompt
     status: overrides.status ?? "active",
     createdAt: overrides.createdAt ?? "2026-08-29T14:30:00.000Z",
     ...(overrides.cancelledAt ? { cancelledAt: overrides.cancelledAt } : {}),
+    ...(overrides.nextRun ? { nextRun: overrides.nextRun } : {}),
     ...(overrides.completedAt ? { completedAt: overrides.completedAt } : {})
   };
 }
@@ -97,7 +98,8 @@ function storeMock(initial: ScheduledPromptRecord[] = []): ScheduledPromptStore 
         prompt: input.prompt,
         schedule: input.schedule,
         responseType: input.responseType,
-        scheduledByUserId: input.scheduledByUserId
+        scheduledByUserId: input.scheduledByUserId,
+        ...(input.nextRun ? { nextRun: input.nextRun } : {})
       });
       jobs.push(created);
       return created;
@@ -144,22 +146,30 @@ function storeMock(initial: ScheduledPromptRecord[] = []): ScheduledPromptStore 
         remainingCount: jobs.filter((job) => job.conversationKey === key).length
       };
     }),
-    resumeScheduledPrompt: vi.fn((key: string, id: string, schedule: PromptSchedule) => {
-      const job = jobs.find(
-        (entry) => entry.id === id && entry.conversationKey === key && entry.status === "cancelled"
-      );
-      if (!job) {
-        return undefined;
+    resumeScheduledPrompt: vi.fn(
+      (key: string, id: string, schedule: PromptSchedule, nextRunUtc?: string) => {
+        const job = jobs.find(
+          (entry) => entry.id === id && entry.conversationKey === key && entry.status === "cancelled"
+        );
+        if (!job) {
+          return undefined;
+        }
+        job.status = "active";
+        job.schedule = schedule;
+        delete job.cancelledAt;
+        job.createdAt = "2026-08-29T16:00:00.000Z";
+        if (nextRunUtc !== undefined) {
+          job.nextRun = nextRunUtc;
+        } else {
+          delete job.nextRun;
+        }
+        return job;
       }
-      job.status = "active";
-      job.schedule = schedule;
-      delete job.cancelledAt;
-      job.createdAt = "2026-08-29T16:00:00.000Z";
-      return job;
-    }),
+    ),
     // Mirrors the real store's update contract: rewrites an ongoing record
     // in place, preserving id, creation instant, and every field absent
-    // from the changes object.
+    // from the changes object. A schedule rewrite without a resolved next
+    // run drops the stale snapshot, so listing falls back to recomputation.
     updateScheduledPrompt: vi.fn((key: string, id: string, changes: ScheduledPromptUpdate) => {
       const job = jobs.find(
         (entry) => entry.id === id && entry.conversationKey === key && entry.status === "active"
@@ -172,6 +182,11 @@ function storeMock(initial: ScheduledPromptRecord[] = []): ScheduledPromptStore 
       }
       if (changes.schedule !== undefined) {
         job.schedule = changes.schedule;
+        if (changes.nextRun !== undefined) {
+          job.nextRun = changes.nextRun;
+        } else {
+          delete job.nextRun;
+        }
       }
       return job;
     })
@@ -541,7 +556,8 @@ describe("schedule_prompt", () => {
       prompt: "Summarize the calendar",
       schedule: { type: "once", atUtc: "2026-09-01T14:15:00.000Z" },
       responseType: "message",
-      scheduledByUserId: schedulingUserId
+      scheduledByUserId: schedulingUserId,
+      nextRun: "2026-09-01T14:15:00.000Z"
     });
     expect(text).toContain("Scheduled prompt");
     expect(text).toContain("once at 2026-09-01T14:15:00.000Z");
@@ -563,7 +579,8 @@ describe("schedule_prompt", () => {
       prompt: "Say hi",
       schedule: { type: "once", atUtc: "2026-09-01T14:15:00.000Z" },
       responseType: "message",
-      scheduledByUserId: schedulingUserId
+      scheduledByUserId: schedulingUserId,
+      nextRun: "2026-09-01T14:15:00.000Z"
     });
   });
 
@@ -580,7 +597,8 @@ describe("schedule_prompt", () => {
       prompt: "Say hi",
       schedule: { type: "once", atUtc: "2026-09-01T07:15:00.000Z" },
       responseType: "message",
-      scheduledByUserId: schedulingUserId
+      scheduledByUserId: schedulingUserId,
+      nextRun: "2026-09-01T07:15:00.000Z"
     });
   });
 
@@ -598,7 +616,8 @@ describe("schedule_prompt", () => {
       prompt: "Say hi",
       schedule: { type: "once", atUtc: "2026-09-01T09:15:00.000Z" },
       responseType: "message",
-      scheduledByUserId: schedulingUserId
+      scheduledByUserId: schedulingUserId,
+      nextRun: "2026-09-01T09:15:00.000Z"
     });
   });
 
@@ -617,7 +636,8 @@ describe("schedule_prompt", () => {
       prompt: "Daily standup note",
       schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
       responseType: "silent",
-      scheduledByUserId: schedulingUserId
+      scheduledByUserId: schedulingUserId,
+      nextRun: "2026-08-30T14:15:00.000Z"
     });
     expect(text).toContain("daily at 09:15 (America/Chicago)");
     expect(text).toContain("Next run: 2026-08-30T14:15:00.000Z");
@@ -638,7 +658,8 @@ describe("schedule_prompt", () => {
       prompt: "Daily standup note",
       schedule: { type: "daily", time: "09:15", timezone: "America/Chicago" },
       responseType: "message",
-      scheduledByUserId: schedulingUserId
+      scheduledByUserId: schedulingUserId,
+      nextRun: "2026-08-30T14:15:00.000Z"
     });
   });
 
@@ -869,7 +890,8 @@ describe("schedule_prompt", () => {
       prompt: "Weekday standup note",
       schedule: { type: "cron", cron: "15 9 * * 1-5", timezone: "America/Chicago" },
       responseType: "message",
-      scheduledByUserId: schedulingUserId
+      scheduledByUserId: schedulingUserId,
+      nextRun: "2026-08-31T14:15:00.000Z"
     });
     expect(text).toContain(`Scheduled prompt`);
     expect(text).toContain(`cron "15 9 * * 1-5" (America/Chicago)`);
@@ -890,7 +912,8 @@ describe("schedule_prompt", () => {
       prompt: "First and fifteenth digest",
       schedule: { type: "cron", cron: "0 0 1,15 * *", timezone: "Europe/Berlin" },
       responseType: "message",
-      scheduledByUserId: schedulingUserId
+      scheduledByUserId: schedulingUserId,
+      nextRun: "2026-08-31T22:00:00.000Z"
     });
     expect(text).toContain(`cron "0 0 1,15 * *" (Europe/Berlin)`);
   });
@@ -1147,6 +1170,69 @@ describe("list_scheduled_prompts", () => {
     const text = await executeTool(listScheduledPrompts, {});
 
     expect(text).toMatch(/No scheduled prompts/i);
+  });
+
+  it("surfaces the stored next run so a due-but-unfired job shows its pending occurrence", async () => {
+    // Daily 09:15 America/Chicago created 09:00 CDT (14:00Z); listed at
+    // 14:30Z before a poll consumed the pending occurrence. Recomputing from
+    // now would answer tomorrow 14:15Z; the stored snapshot is the
+    // occurrence the engine will actually fire today.
+    const store = storeMock([
+      record({
+        createdAt: "2026-08-29T14:00:00.000Z",
+        nextRun: "2026-08-29T14:15:00.000Z"
+      })
+    ]);
+    const [, listScheduledPrompts] = createTools(store);
+
+    const text = await executeTool(listScheduledPrompts, {});
+
+    expect(text).toContain("next run 2026-08-29T14:15:00.000Z");
+    expect(text).not.toContain("next run 2026-08-30T14:15:00.000Z");
+  });
+
+  it("falls back to recomputation for legacy ongoing rows without a stored next run", async () => {
+    const store = storeMock([record()]);
+    const [, listScheduledPrompts] = createTools(store);
+
+    const text = await executeTool(listScheduledPrompts, {});
+
+    // Fixed now is 2026-08-29T14:30:00.000Z: the next 09:15 America/Chicago
+    // occurrence is tomorrow, 2026-08-30T14:15:00.000Z.
+    expect(text).toContain("next run 2026-08-30T14:15:00.000Z");
+  });
+
+  it("falls back to recomputation when a stored next run cannot be parsed", async () => {
+    // A corrupt stored snapshot behaves like an absent one: the tool
+    // recomputes from the schedule instead of showing garbage.
+    const store = storeMock([record({ nextRun: "not-a-timestamp" })]);
+    const [, listScheduledPrompts] = createTools(store);
+
+    const text = await executeTool(listScheduledPrompts, {});
+
+    expect(text).toContain("next run 2026-08-30T14:15:00.000Z");
+    expect(text).not.toContain("unresolved");
+  });
+
+  it("never shows a next run on canceled or completed rows, even with a stale stored snapshot", async () => {
+    const store = storeMock([
+      record({
+        id: "job-past",
+        status: "cancelled",
+        cancelledAt: "2026-08-29T15:00:00.000Z",
+        nextRun: "2026-08-29T14:15:00.000Z"
+      }),
+      record({ id: "job-live" })
+    ]);
+    const [, listScheduledPrompts] = createTools(store);
+
+    const text = await executeTool(listScheduledPrompts, { include_history: true });
+
+    const pastRow = text.split("\n").find((line) => line.includes("job-past"));
+    expect(pastRow).toBeDefined();
+    expect(pastRow).not.toContain("next run");
+    const liveRow = text.split("\n").find((line) => line.includes("job-live"));
+    expect(liveRow).toContain("next run 2026-08-30T14:15:00.000Z");
   });
 
   it("ignores a model-supplied channel identity when listing", async () => {
@@ -1527,6 +1613,25 @@ describe("update_scheduled_prompt", () => {
     expect(job?.id).toBe("job-live");
   });
 
+  it("shows the stored next run on a prompt-only update instead of recomputing from now", async () => {
+    // Daily 09:15 America/Chicago created at 14:00Z with its engine snapshot
+    // of today's 09:15 (14:15Z); updated at 14:30Z before a poll fired it.
+    const store = storeMock([
+      record({
+        id: "job-live",
+        prompt: "Old text",
+        createdAt: "2026-08-29T14:00:00.000Z",
+        nextRun: "2026-08-29T14:15:00.000Z"
+      })
+    ]);
+    const [, , , , updateScheduledPrompt] = createTools(store);
+
+    const text = await executeTool(updateScheduledPrompt, { id: "job-live", prompt: "New text" });
+
+    expect(text).toContain("Next run: 2026-08-29T14:15:00.000Z");
+    expect(text).not.toContain("2026-08-30T14:15:00.000Z");
+  });
+
   it("updates only the schedule and preserves the prompt text", async () => {
     const store = storeMock([record({ id: "job-live", prompt: "Standup summary" })]);
     const [, , , , updateScheduledPrompt] = createTools(store);
@@ -1539,7 +1644,10 @@ describe("update_scheduled_prompt", () => {
     expect(store.updateScheduledPrompt).toHaveBeenCalledWith(
       conversationKey,
       "job-live",
-      { schedule: { type: "weekly", time: "08:30", dayOfWeek: 1, timezone: "America/Chicago" } }
+      {
+        schedule: { type: "weekly", time: "08:30", dayOfWeek: 1, timezone: "America/Chicago" },
+        nextRun: "2026-08-31T13:30:00.000Z"
+      }
     );
     expect(text).toContain("weekly on Monday at 08:30 (America/Chicago)");
     // The untouched prompt text is echoed back as preserved.
@@ -1561,7 +1669,8 @@ describe("update_scheduled_prompt", () => {
 
     expect(store.updateScheduledPrompt).toHaveBeenCalledWith(conversationKey, "job-live", {
       prompt: "Revised task",
-      schedule: { type: "monthly", time: "07:30", dayOfMonth: 15, timezone: "UTC" }
+      schedule: { type: "monthly", time: "07:30", dayOfMonth: 15, timezone: "UTC" },
+      nextRun: "2026-09-15T07:30:00.000Z"
     });
     expect(text).toContain("monthly on day 15 at 07:30 (UTC)");
     expect(text).toContain("Revised task");
@@ -1579,7 +1688,10 @@ describe("update_scheduled_prompt", () => {
     expect(store.updateScheduledPrompt).toHaveBeenCalledWith(
       conversationKey,
       "job-live",
-      { schedule: { type: "once", atUtc: "2026-09-01T14:15:00.000Z" } }
+      {
+        schedule: { type: "once", atUtc: "2026-09-01T14:15:00.000Z" },
+        nextRun: "2026-09-01T14:15:00.000Z"
+      }
     );
   });
 
@@ -1595,7 +1707,10 @@ describe("update_scheduled_prompt", () => {
     expect(store.updateScheduledPrompt).toHaveBeenCalledWith(
       conversationKey,
       "job-live",
-      { schedule: { type: "cron", cron: "30 8 * * 1-5", timezone: "America/Chicago" } }
+      {
+        schedule: { type: "cron", cron: "30 8 * * 1-5", timezone: "America/Chicago" },
+        nextRun: "2026-08-31T13:30:00.000Z"
+      }
     );
     expect(text).toContain(`cron "30 8 * * 1-5" (America/Chicago)`);
     // Fixed now is Saturday 2026-08-29 09:30 CDT - the next weekday is Monday
@@ -1697,16 +1812,19 @@ describe("update_scheduled_prompt", () => {
     expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
       conversationKey,
       "job-past",
-      { type: "daily", time: "08:30", timezone: "America/Chicago" }
+      { type: "daily", time: "08:30", timezone: "America/Chicago" },
+      "2026-08-30T13:30:00.000Z"
     );
     expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
     expect(text).toContain("Resumed scheduled prompt job-past");
     expect(text).toContain("daily at 08:30 (America/Chicago)");
     expect(text).toContain("Standup summary");
     expect(text).toContain(conversationKey);
-    // Mocked store contract: status back to active, cancel bookkeeping cleared.
+    // Mocked store: status back to active, cancel bookkeeping cleared,
+    // and the resolved next run persisted on the re-armed record.
     expect(store.jobs[0]?.status).toBe("active");
     expect(store.jobs[0]?.cancelledAt).toBeUndefined();
+    expect(store.jobs[0]?.nextRun).toBe("2026-08-30T13:30:00.000Z");
   });
 
   it("resolves a re-arm's naive once schedule in the channel timezone like schedule_prompt", async () => {
@@ -1723,7 +1841,8 @@ describe("update_scheduled_prompt", () => {
     expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
       conversationKey,
       "job-past",
-      { type: "once", atUtc: "2026-09-01T14:15:00.000Z" }
+      { type: "once", atUtc: "2026-09-01T14:15:00.000Z" },
+      "2026-09-01T14:15:00.000Z"
     );
   });
 
@@ -1747,7 +1866,8 @@ describe("update_scheduled_prompt", () => {
     expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
       conversationKey,
       "job-past",
-      { type: "weekly", time: "08:30", dayOfWeek: 1, timezone: "UTC" }
+      { type: "weekly", time: "08:30", dayOfWeek: 1, timezone: "UTC" },
+      "2026-08-31T08:30:00.000Z"
     );
     expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
     expect(text).toContain("Original text");
@@ -1813,7 +1933,8 @@ describe("update_scheduled_prompt", () => {
     expect(store.resumeScheduledPrompt).toHaveBeenCalledWith(
       conversationKey,
       "job-past",
-      { type: "cron", cron: "0 0 1,15 * *", timezone: "UTC" }
+      { type: "cron", cron: "0 0 1,15 * *", timezone: "UTC" },
+      "2026-09-01T00:00:00.000Z"
     );
     expect(store.updateScheduledPrompt).not.toHaveBeenCalled();
     expect(text).toContain("Resumed scheduled prompt job-past");

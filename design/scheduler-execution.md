@@ -12,7 +12,9 @@ execution via `run_scheduled_task` follows
 optional cron schedule surface follows
 [issue #73](https://github.com/HSV-AI/artemis/issues/73); the claim-and-
 reconcile lifecycle replacing consume-before-gate follows
-[issue #75](https://github.com/HSV-AI/artemis/issues/75).
+[issue #75](https://github.com/HSV-AI/artemis/issues/75); persisting the
+engine's derived next occurrence on the record at claim time follows
+[issue #74](https://github.com/HSV-AI/artemis/issues/74).
 
 ## Problem
 
@@ -52,7 +54,8 @@ This protocol owns:
   `completeScheduledPrompt`)
 - the `scheduled_prompts` schema extensions for execution: migration 9's
   `last_run_at` and `completed` status, migration 10's `cron` schedule type,
-  and migration 11's `claimed_until` claim-deadline column
+  migration 11's `claimed_until` claim-deadline column, and migration 12's
+  `next_run` persisted-occurrence column, written at every claim
 
 It does not redefine the scheduler tools' parameters, validation, storage rules, or
 the authorization they enforce at fire time ([Scheduler
@@ -127,6 +130,18 @@ after posting but before reconciling leaves its claim set, and once the claim ex
 the job fires again — the crash-recovery edge is at-least-once, a deliberate exchange
 so no crashed run is ever permanently lost.
 
+Settling a recurring job also persists the engine's own next occurrence —
+resolved from the re-armed basis (`last_run_at` plus one millisecond) through
+the same DST-correct zone resolution — on the record's `next_run` column, so
+the model-facing listing shows the occurrence the engine will actually honor
+next (including a job that is due but not yet polled, whose stored snapshot
+still names the pending occurrence instead of a fresh guess after now).
+`next_run` is a display snapshot only: due detection always recomputes from
+`last_run_at`/`created_at`, and the snapshot is rewritten at every claim so
+daylight saving transitions stay correct. One-time jobs clear the snapshot
+when they complete, and cancel, resume, and schedule updates maintain it
+alongside their own writes (see [Scheduler tools](scheduler-tools.md)).
+
 ### On-demand execution (`run_scheduled_task`)
 
 An interactive turn can also run a stored job immediately through the same
@@ -181,7 +196,7 @@ same gate as interactive traffic:
 ```text
 discordReady() gate (Discord gateway ready handshake) ---------------> defer whole ticks while not ready
 repository.listActiveScheduledPrompts() (engine process boundary) ----> due jobs
-dueOccurrence(job, now) from schedule + lastRunAt ?? createdAt -------> due check
+dueOccurrence(job, now) from schedule + lastRunAt ?? createdAt -------> due check (stored next_run is display-only)
 repository.claimScheduledPrompt(id, deadline, now) (atomic) ----------> claim occurrence (one winner)
 ConversationService.runScheduledPrompt(job) --------------------------> authorization gate
   checkScheduledPromptScope (pure allow-lists + attribution) ---------> scope decision
@@ -191,7 +206,9 @@ ConversationService.runScheduledPrompt(job) --------------------------> authoriz
   gate-side reply validation + correction prompts -------------------> up to 3 tries in the durable session
 parseScheduledResponse(agent text) ------------------------------------> message | silent | invalid (engine re-validates before posting)
 DiscordGateway.sendToConversation(identity, content) ------------------> Discord post
-claim reconcile: markScheduledPromptFired / completeScheduledPrompt ---> settled (posted | silent | unroutable)
+claim reconcile: markScheduledPromptFired(id, fired, next) -----------> settled (posted | silent | unroutable);
+                                       completeScheduledPrompt --------> next_run snapshot stored (recurring),
+                                                                        cleared (one-time)
 claim reconcile: releaseScheduledPromptClaim --------------------------> released (denied | failed | invalid | undelivered)
 
 run_scheduled_task(id) (interactive turn only) ------------------------> conversation-scoped lookup (active only)
@@ -217,7 +234,8 @@ jobs (`type: "cron"`) resolve the stored 5-field expression against the
 calendar in the schedule's timezone with standard cron
 day-of-month/day-of-week OR semantics through the same resolution helpers the
 presets use. `last_run_at` is set to just after the fire instant so the same occurrence can
-never become due twice. Occurrences missed while the
+never become due twice, and the same re-armed basis resolves the occurrence
+stored as the record's `next_run` snapshot. Occurrences missed while the
 process was down deliberately collapse into a single late run; the engine never
 backfills each missed occurrence. A recurring job whose run failed keeps its
 occurrence due and retries on later ticks until a run succeeds (the missed
@@ -271,18 +289,35 @@ model-facing record surface or in scheduler tool listings, and resume clears it
 alongside the cancel flag and fire marker so a re-armed record is immediately
 claimable.
 
+Migration 12 persists the engine's derived next occurrence on the record by
+adding `next_run`: a nullable UTC timestamp with no CHECK-constraint change,
+applied like migration 11 as a plain additive `ALTER TABLE` that preserves
+every existing row verbatim. The engine writes it at every settle of a
+recurring job (the occurrence resolved from the re-armed basis) and clears it
+when a one-time job completes; creation, resume, and schedule updates write it
+through the tool's own resolution (see [Scheduler
+tools](scheduler-tools.md)). Pre-migration rows carry NULL until their next
+claim, and listings fall back to recomputation for the legacy shape. The
+snapshot is display data only — due detection always resolves from
+`last_run_at` (or `created_at`) — so at-most-once semantics and DST-correct
+wall-clock resolution are unchanged; the snapshot is simply rewritten at each
+claim, keeping it truthful across transitions.
+
 A fresh empty database bootstraps to the current schema in one transaction. A
-verified migration-10 database receives migration 11's claim column
+verified migration-11 database receives migration 12's next-run column
 incrementally on its next startup; a
+verified migration-10 database receives migration 11's claim column
+incrementally on its next startup and then the next-run column; a
 verified migration-9 database receives the rebuild incrementally on its next startup and then
-the cron columns and the claim column; a verified
-migration-5 database receives 6, 7, 8, 9, 10, and 11 in order; a verified
+the cron columns, the claim column, and the next-run column; a verified
+migration-5 database receives 6, 7, 8, 9, 10, 11, and 12 in order; a verified
 migration-7 database is first attributed by migration 8 (legacy rows backfilled
 to an unattributed scheduler, which the gate refuses to run), then rebuilt by
-migration 9 and extended by migrations 10 and 11. Cancelled jobs stay cancelled with
+migration 9 and extended by migrations 10 through 12. Cancelled jobs stay cancelled with
 their rows intact; the engine never touches them. Stored cron jobs fire
 exactly like the preset recurring shapes: they appear in active listings,
-re-arm via `last_run_at`, and never complete after a fire.
+re-arm via `last_run_at` with the snapshot rewritten, and never complete after
+a fire.
 
 A scheduler-fired run reuses the conversation's active durable session (creating
 one when the conversation has none, for example after `/clear-session` or before the
@@ -410,11 +445,16 @@ future extension behind this same contract.
   shapes, the required `content` field, JSON-only output), due-occurrence resolution
   from creation and `last_run_at` for every schedule shape including cron
   (weekday windows, re-arm from `last_run_at` to the next weekday occurrence),
-  DST-correct weekly re-arms, missed-occurrence collapse, claim-before-gate
+  DST-correct weekly re-arms, missed-occurrence collapse, due detection
+  ignoring the stored next-run snapshot, claiming-before-gate
   ordering with the fixed `SCHEDULER_CLAIM_TIMEOUT_MS` deadline, the finding-1
   regression (a denied or failed gate leaves a one-time job claimable — not
   `completed` — and it fires again on a later tick, then settles exactly once on
-  success), recurring re-arm on success without double-fires, release-on-failure
+  success), recurring re-arm on success without double-fires (persisting the
+  engine's derived next occurrence as the record's snapshot on daily, cron,
+  and on-demand paths alike; one-time completions carry no next-run argument;
+  an end-to-end fire against a real repository lists the persisted snapshot),
+  release-on-failure
   for denied, invalid-response, and delivery-failure outcomes (with the retry
   visible on the next tick), self-healing release and settle storage failures,
   message posting, silent
@@ -460,13 +500,15 @@ future extension behind this same contract.
   active-only eligibility, release returning a job to the claimable pool,
   claim persistence across reopen, resume clearing a stale claim, re-arm
   persistence across reopen, completion), the fresh-bootstrap schema
-  including `last_run_at`, `scheduled_by_user_id`, `cron_expression`, and
-  `claimed_until` across migrations 1 through 11, the
-  incremental migration-6-through-11 path, the additive migration-8 attribution
+  including `last_run_at`, `scheduled_by_user_id`, `cron_expression`,
+  `claimed_until`, and `next_run` across migrations 1 through 12, the
+  incremental migration-6-through-12 path, the additive migration-8 attribution
   upgrade, the migration-9 rebuild that preserves jobs and history from a
   migration-8 database, the migration-10 rebuild that adds the cron columns
   while preserving every job, the additive migration-11 claim column that
-  upgrades a migration-10 database without a rebuild, and deterministic
+  upgrades a migration-10 database without a rebuild, the additive
+  migration-12 next-run column that upgrades a migration-11 database without
+  a rebuild, and deterministic
   creation-order listing (a
   `rowid` tiebreak keeps same-millisecond
   records in insertion order).

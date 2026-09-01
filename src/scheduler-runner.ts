@@ -177,11 +177,12 @@ export interface SchedulerRunnerOptions {
  * a due job is claimed atomically in storage before the gate runs (two
  * pollers can never both claim, and only claimed jobs execute), and the claim
  * is reconciled after the run — settled (one-time jobs complete, recurring
- * jobs re-arm via `last_run_at`) when a valid response posted or completed
- * silently, released on denial, generation failure, invalid response, or
- * delivery failure so the job can fire again on a later tick. The gate
- * generates in the target conversation's durable session with full tool
- * access and returns the result unposted; the engine then validates the
+ * jobs re-arm via `last_run_at` and persist the engine's next occurrence as
+ * the record's `next_run` display snapshot) when a valid response posted or
+ * completed silently, released on denial, generation failure, invalid
+ * response, or delivery failure so the job can fire again on a later tick.
+ * The gate generates in the target conversation's durable session with full
+ * tool access and returns the result unposted; the engine then validates the
  * strict JSON response and only posts JSON-conforming `message` content.
  *
  * A claim left behind by a crashed run expires at its deadline
@@ -397,18 +398,26 @@ export class SchedulerRunner {
   /**
    * Settle a successfully fired occurrence: one-time jobs complete and never
    * run again, recurring jobs re-arm so the same occurrence cannot become due
-   * twice. Storage failures are logged; the outstanding claim then expires at
-   * its deadline, making the settled occurrence reclaimable (the documented
-   * at-least-once crash edge) rather than wedging the job.
+   * twice — recording the engine's own next occurrence (derived from the
+   * re-armed basis) as the record's persisted `next_run` display snapshot, so
+   * listings show the run the engine will honor next. Storage failures are
+   * logged; the outstanding claim then expires at its deadline, making the
+   * settled occurrence reclaimable (the documented at-least-once crash edge)
+   * rather than wedging the job.
    */
   private settleFired(job: ScheduledPromptRecord, now: Date): void {
     try {
       if (job.schedule.type === "once") {
         this.options.repository.completeScheduledPrompt(job.id, now.toISOString());
       } else {
+        // Re-arm from just after the fire instant — the same basis as the new
+        // last_run_at — and persist the resulting occurrence on the record.
+        const reArmedAt = new Date(now.getTime() + 1);
+        const nextRun = nextOccurrenceUtc(job.schedule, reArmedAt);
         this.options.repository.markScheduledPromptFired(
           job.id,
-          new Date(now.getTime() + 1).toISOString()
+          reArmedAt.toISOString(),
+          nextRun?.toISOString()
         );
       }
     } catch (error) {

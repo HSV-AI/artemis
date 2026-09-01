@@ -102,6 +102,7 @@ interface ScheduledPromptRow {
   scheduled_by_user_id: string | null;
   last_run_at: string | null;
   claimed_until: string | null;
+  next_run: string | null;
 }
 
 function now(): string {
@@ -445,8 +446,8 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
         `INSERT INTO scheduled_prompts
          (id, conversation_key, prompt, schedule_type, at_utc, time_of_day,
           day_of_week, day_of_month, cron_expression, timezone, response_type,
-          scheduled_by_user_id, status, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`
+          scheduled_by_user_id, status, created_at, next_run)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`
       )
       .run(
         id,
@@ -463,7 +464,8 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
         schedule.type === "once" ? null : schedule.timezone,
         input.responseType,
         input.scheduledByUserId,
-        createdAt
+        createdAt,
+        input.nextRun ?? null
       );
     return {
       id,
@@ -473,7 +475,8 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       responseType: input.responseType,
       scheduledByUserId: input.scheduledByUserId,
       status: "active",
-      createdAt
+      createdAt,
+      ...(input.nextRun ? { nextRun: input.nextRun } : {})
     };
   }
 
@@ -503,7 +506,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
     const result = this.database
       .prepare(
         `UPDATE scheduled_prompts
-         SET status = 'cancelled', cancelled_at = ?
+         SET status = 'cancelled', cancelled_at = ?, next_run = NULL
          WHERE id = ? AND conversation_key = ? AND status = 'active'`
       )
       .run(now(), id, conversationKey);
@@ -555,14 +558,16 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
   public resumeScheduledPrompt(
     conversationKey: string,
     id: string,
-    schedule: PromptSchedule
+    schedule: PromptSchedule,
+    nextRunUtc?: string
   ): ScheduledPromptRecord | undefined {
     // Resume is a single-row repair of a canceled record: the schedule
     // columns are rewritten as a set so the row-shape CHECK constraint stays
-    // satisfied, the cancel bookkeeping, fire marker, and any stale claim are
-    // cleared (so the next occurrence derives from the resume instant and is
-    // immediately claimable), and created_at moves to the resume instant — the
-    // moment the event was re-scheduled.
+    // satisfied, the cancel bookkeeping, fire marker, next-run snapshot, and
+    // any stale claim are cleared (so the next occurrence derives from the
+    // resume instant and is immediately claimable), and created_at moves to
+    // the resume instant — the moment the event was re-scheduled. The caller
+    // may persist its resolved next occurrence as the new display snapshot.
     const resumedAt = now();
     const result = this.database
       .prepare(
@@ -570,7 +575,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
          SET schedule_type = ?, at_utc = ?, time_of_day = ?, day_of_week = ?,
              day_of_month = ?, cron_expression = ?, timezone = ?,
              status = 'active', cancelled_at = NULL, last_run_at = NULL,
-             claimed_until = NULL, created_at = ?
+             claimed_until = NULL, next_run = ?, created_at = ?
          WHERE id = ? AND conversation_key = ? AND status = 'cancelled'`
       )
       .run(
@@ -583,6 +588,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
         schedule.type === "monthly" ? schedule.dayOfMonth : null,
         schedule.type === "cron" ? schedule.cron : null,
         schedule.type === "once" ? null : schedule.timezone,
+        nextRunUtc ?? null,
         resumedAt,
         id,
         conversationKey
@@ -621,11 +627,19 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
     const existing = this.mapScheduledPrompt(existingRow);
     const prompt = changes.prompt ?? existing.prompt;
     const schedule = changes.schedule ?? existing.schedule;
+    // The next-run snapshot follows the schedule: a caller-supplied resolved
+    // instant wins; a schedule rewrite without one clears the stale snapshot
+    // (it belonged to the replaced schedule, and listing recomputes from the
+    // new definition); a prompt-only edit preserves the stored snapshot.
+    const nextRun = changes.nextRun !== undefined
+      ? changes.nextRun
+      : (changes.schedule !== undefined ? null : existingRow.next_run ?? null);
     this.database
       .prepare(
         `UPDATE scheduled_prompts
          SET prompt = ?, schedule_type = ?, at_utc = ?, time_of_day = ?,
-             day_of_week = ?, day_of_month = ?, cron_expression = ?, timezone = ?
+             day_of_week = ?, day_of_month = ?, cron_expression = ?, timezone = ?,
+             next_run = ?
          WHERE id = ? AND conversation_key = ? AND status = 'active'`
       )
       .run(
@@ -639,6 +653,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
         schedule.type === "monthly" ? schedule.dayOfMonth : null,
         schedule.type === "cron" ? schedule.cron : null,
         schedule.type === "once" ? null : schedule.timezone,
+        nextRun,
         id,
         conversationKey
       );
@@ -684,21 +699,25 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       .run(id);
   }
 
-  public markScheduledPromptFired(id: string, firedAtUtc: string): void {
+  public markScheduledPromptFired(id: string, firedAtUtc: string, nextRunUtc?: string): void {
+    // The settle writes both the fire marker and — for recurring jobs — the
+    // engine's derived next occurrence, so the record's display snapshot
+    // matches what the engine will honor next. Omitting nextRunUtc clears
+    // the snapshot (the legacy row shape).
     this.database
       .prepare(
         `UPDATE scheduled_prompts
-         SET last_run_at = ?
+         SET last_run_at = ?, next_run = ?
          WHERE id = ? AND status = 'active'`
       )
-      .run(firedAtUtc, id);
+      .run(firedAtUtc, nextRunUtc ?? null, id);
   }
 
   public completeScheduledPrompt(id: string, completedAtUtc: string): boolean {
     const result = this.database
       .prepare(
         `UPDATE scheduled_prompts
-         SET status = 'completed', last_run_at = ?
+         SET status = 'completed', last_run_at = ?, next_run = NULL
          WHERE id = ? AND status = 'active'`
       )
       .run(completedAtUtc, id);
@@ -738,6 +757,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       status: row.status,
       createdAt: row.created_at,
       ...(row.last_run_at ? { lastRunAt: row.last_run_at } : {}),
+      ...(row.next_run ? { nextRun: row.next_run } : {}),
       ...(row.cancelled_at ? { cancelledAt: row.cancelled_at } : {}),
       // For completed one-time jobs the storage-level last_run_at is by
       // construction the instant the job fired and retired.
@@ -847,6 +867,10 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
 
     if (!applied.has(11)) {
       this.applyMigration11();
+    }
+
+    if (!applied.has(12)) {
+      this.applyMigration12();
     }
 
     // A fully migrated database is the steady state. The bootstrap path
@@ -1127,6 +1151,34 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
     transaction();
   }
 
+  /**
+   * Migration 12 persists the engine's next occurrence on every scheduled
+   * prompt: the nullable `next_run` snapshot column stores the occurrence
+   * the engine derives at each claim (and the tool surfaces at creation,
+   * resume, and update), so listings show the pending occurrence the engine
+   * will actually honor instead of recomputing a fresh guess from the
+   * current time. The column is additive — a nullable timestamp, no CHECK
+   * constraint change — so a plain ALTER TABLE preserves every existing row
+   * verbatim; pre-migration rows carry no snapshot and listings fall back to
+   * recomputation until the next claim writes one.
+   */
+  private applyMigration12(): void {
+    const timestamp = now();
+    const transaction = this.database.transaction(() => {
+      const columns = this.database.prepare("PRAGMA table_info(scheduled_prompts)").all() as {
+        name: string;
+      }[];
+      const hasColumn = columns.some((column) => column.name === "next_run");
+      if (!hasColumn) {
+        this.database.exec("ALTER TABLE scheduled_prompts ADD COLUMN next_run TEXT;");
+      }
+      this.database
+        .prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
+        .run(12, timestamp);
+    });
+    transaction();
+  }
+
   private bootstrapFreshDatabase(): void {
     const timestamp = now();
     const transaction = this.database.transaction(() => {
@@ -1261,6 +1313,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
           cancelled_at TEXT,
           last_run_at TEXT,
           claimed_until TEXT,
+          next_run TEXT,
           CHECK (
             (schedule_type = 'once'
               AND at_utc IS NOT NULL AND time_of_day IS NULL AND day_of_week IS NULL
@@ -1287,7 +1340,7 @@ export class ArtemisRepository implements ChannelTimezoneStore, ScheduledPromptS
       const insert = this.database.prepare(
         "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)"
       );
-      for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]) {
+      for (const version of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
         insert.run(version, timestamp);
       }
     });
