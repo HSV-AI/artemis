@@ -296,6 +296,40 @@ export class ConversationService {
   }
 
   /**
+   * Preview one scheduled prompt for a caller that already holds the
+   * conversation's queue slot — the default (non-firing) path of the
+   * `run_scheduled_task` tool. The same fire-time authorization gate applies
+   * (scope allow-lists and the live membership re-check), and the stored
+   * prompt is run as a plain preview turn in the conversation's durable
+   * session: a normal generation with no scheduled-framing, no strict JSON
+   * response contract, no correction retries, and no posting. The turn is
+   * persisted and attributed exactly like the fire path, and the generation is
+   * flagged `scheduledRun` so the gateway omits the run tool — a preview can
+   * never recurse. The occurrence is left pending: consumption of any kind is
+   * the caller's separate, explicit decision (the fire executor).
+   */
+  public async runScheduledPromptPreviewInline(
+    record: ScheduledPromptRecord
+  ): Promise<PiGenerationResult | null> {
+    const decision = await this.authorizeScheduledRun(record);
+    if (!decision.allowed) {
+      this.schedulerLog("scheduled_prompt_rejected", record, "on-demand", {
+        code: decision.code,
+        reason: decision.detail
+      });
+      return null;
+    }
+    if (!decision.membershipVerified) {
+      this.logger.warn("scheduled_prompt_membership_unverified", {
+        conversationKey: record.conversationKey,
+        jobId: record.id,
+        scheduledByUserId: record.scheduledByUserId
+      });
+    }
+    return this.executeScheduledPromptPreview(record, decision.identity, "on-demand");
+  }
+
+  /**
    * Shared fire-time authorization: the pure scope gate first (no Discord
    * traffic, so an allow-list denial never reaches the membership endpoint),
    * then the live membership re-check where feasible.
@@ -424,6 +458,70 @@ export class ConversationService {
         conversationKey: identity.key,
         sessionId: session.id,
         trigger,
+        ...details
+      });
+      return null;
+    }
+  }
+
+  /**
+   * The fire-time gate's execution half for a plain preview turn: one
+   * generation of the stored prompt verbatim — no scheduler framing, no JSON
+   * response contract, no correction retries — persisted like any exchange and
+   * attributed to the scheduling user. The `scheduledRun` flag keeps the run
+   * tool out of the generation, so a preview cannot recurse. Nothing is ever
+   * posted by this path: the response returns to the caller for review.
+   */
+  private async executeScheduledPromptPreview(
+    record: ScheduledPromptRecord,
+    identity: ConversationIdentity,
+    trigger: ScheduledPromptTrigger
+  ): Promise<PiGenerationResult | null> {
+    const session = this.repository.getOrCreateSession(identity, this.options.model);
+    const sourceMessageId = `scheduled:preview:${record.id}:${randomUUID()}`;
+    try {
+      const result = await this.generateScheduledTurn(
+        session.id,
+        record,
+        identity,
+        sourceMessageId,
+        record.prompt,
+        record.prompt
+      );
+      this.repository.insertAssistant(session.id, result);
+      this.repository.recordEvent("scheduled_prompt_succeeded", {
+        sessionId: session.id,
+        conversationKey: identity.key,
+        details: {
+          jobId: record.id,
+          scheduledByUserId: record.scheduledByUserId,
+          scheduleType: record.schedule.type,
+          trigger,
+          mode: "preview",
+          model: result.model
+        }
+      });
+      this.logger.info("scheduled_prompt_succeeded", {
+        conversationKey: identity.key,
+        jobId: record.id,
+        sessionId: session.id,
+        trigger,
+        mode: "preview"
+      });
+      return result;
+    } catch (error) {
+      const details = safeError(error);
+      this.repository.recordEvent("scheduled_prompt_failed", {
+        sessionId: session.id,
+        conversationKey: identity.key,
+        details: { jobId: record.id, trigger, mode: "preview", ...details }
+      });
+      this.logger.error("scheduled_prompt_failed", {
+        jobId: record.id,
+        conversationKey: identity.key,
+        sessionId: session.id,
+        trigger,
+        mode: "preview",
         ...details
       });
       return null;

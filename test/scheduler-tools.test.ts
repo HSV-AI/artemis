@@ -24,11 +24,19 @@ import {
 /**
  * Immediate-run executor fake wired by the harness in tests; records the
  * record it was handed so trust-boundary tests can assert the lookup scope.
+ * Both executors resolve the same configured result, so a preview-default
+ * regression (a fire running instead of a preview) cannot hide.
  */
 function runnerMock(
   result: ScheduledTaskRunResult = { status: "posted", content: "Good morning!" }
-): ScheduledTaskRunner & { runScheduledTaskNow: ReturnType<typeof vi.fn> } {
-  return { runScheduledTaskNow: vi.fn(async () => result) };
+): ScheduledTaskRunner & {
+  runScheduledTaskNow: ReturnType<typeof vi.fn>;
+  runScheduledTaskPreview: ReturnType<typeof vi.fn>;
+} {
+  return {
+    runScheduledTaskNow: vi.fn(async () => result),
+    runScheduledTaskPreview: vi.fn(async () => result)
+  };
 }
 
 /** Discord user id of the scheduling user, injected by the harness in tests. */
@@ -2116,6 +2124,9 @@ describe("tool registry metadata", () => {
     expect(runTool?.promptSnippet).toBeTruthy();
     expect(runTool?.promptGuidelines?.join("\n")).toMatch(/explicitly/i);
     expect(runTool?.promptGuidelines?.join("\n")).toMatch(/ongoing/i);
+    // The tool's default is a preview, and firing is an explicit opt-in.
+    expect(runTool?.promptGuidelines?.join("\n")).toMatch(/consume_next/i);
+    expect(runTool?.promptGuidelines?.join("\n")).toMatch(/preview/i);
     // The other scheduler tools are unaffected by the added runner.
     expect(tools.map((tool) => tool.name)).toContain("schedule_prompt");
     expect(tools).toHaveLength(6);
@@ -2142,7 +2153,7 @@ describe("run_scheduled_task", () => {
     return runTool;
   }
 
-  it("hands the conversation's active record to the runner and reports the posted content", async () => {
+  it("fires and hands the conversation's active record to the runner on consume_next=true", async () => {
     const target = activeJob({ id: "job-run" });
     const store = storeMock([
       target,
@@ -2150,13 +2161,95 @@ describe("run_scheduled_task", () => {
     ]);
     const runner = runnerMock({ status: "posted", content: "Standup posted on demand" });
 
-    const text = await executeTool(runToolOf(store, runner), { id: "job-run" });
+    const text = await executeTool(runToolOf(store, runner), { id: "job-run", consume_next: true });
 
     expect(runner.runScheduledTaskNow).toHaveBeenCalledTimes(1);
     expect(runner.runScheduledTaskNow).toHaveBeenCalledWith(target);
+    expect(runner.runScheduledTaskPreview).not.toHaveBeenCalled();
     expect(text).toContain("Ran scheduled prompt job-run");
     expect(text).toContain("Standup posted on demand");
     expect(text).toContain(conversationKey);
+  });
+
+  it("previews by default: returns the response, consumes nothing, and posts nothing", async () => {
+    const target = activeJob({ id: "job-preview" });
+    const store = storeMock([target]);
+    const runner = runnerMock({ status: "previewed", content: "Here is what the task would do." });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-preview" });
+
+    expect(runner.runScheduledTaskPreview).toHaveBeenCalledTimes(1);
+    expect(runner.runScheduledTaskPreview).toHaveBeenCalledWith(target);
+    expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+    expect(text).toContain("Here is what the task would do.");
+    // The preview must be explicit about its no-consumption, no-post nature.
+    expect(text).toMatch(/nothing was posted/i);
+    expect(text).toMatch(/not consumed|left pending/i);
+  });
+
+  it("previews the same way when consume_next is explicitly false", async () => {
+    const target = activeJob({ id: "job-preview-false" });
+    const store = storeMock([target]);
+    const runner = runnerMock({ status: "previewed", content: "preview output" });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-preview-false", consume_next: false });
+
+    expect(runner.runScheduledTaskPreview).toHaveBeenCalledTimes(1);
+    expect(runner.runScheduledTaskPreview).toHaveBeenCalledWith(target);
+    expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+    expect(text).toMatch(/nothing was posted/i);
+    expect(text).toMatch(/not consumed|left pending/i);
+  });
+
+  it("states a one-time task stays scheduled after a preview", async () => {
+    const store = storeMock([
+      activeJob({ id: "job-once-preview", schedule: { type: "once", atUtc: "2026-09-01T14:00:00.000Z" } })
+    ]);
+    const runner = runnerMock({ status: "previewed", content: "draft run" });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-once-preview" });
+
+    expect(text).toContain("draft run");
+    expect(text).toMatch(/remains ongoing/i);
+    expect(text).toMatch(/will fire at its scheduled time/i);
+    expect(text).not.toMatch(/will not fire again/i);
+  });
+
+  it("states a recurring schedule continues unchanged after a preview", async () => {
+    const store = storeMock([activeJob({ id: "job-daily-preview" })]);
+    const runner = runnerMock({ status: "previewed", content: "draft run" });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-daily-preview" });
+
+    expect(text).toMatch(/unchanged/i);
+    expect(text).not.toMatch(/consumed the occurrence/i);
+  });
+
+  it("never makes a second runner call when a fire returns the preview outcome", async () => {
+    // Defensive contract: runScheduledTaskNow never returns "previewed". If it
+    // did, the tool must answer the pending occurrence rather than invoking
+    // the preview executor after the fire.
+    const store = storeMock([activeJob({ id: "job-weird-fire" })]);
+    const runner = runnerMock({ status: "previewed", content: "draft run" });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-weird-fire", consume_next: true });
+
+    expect(runner.runScheduledTaskNow).toHaveBeenCalledTimes(1);
+    expect(runner.runScheduledTaskPreview).not.toHaveBeenCalled();
+    expect(text).toMatch(/pending/i);
+  });
+
+  it("reports a preview denial with nothing run, posted, or consumed", async () => {
+    const store = storeMock([activeJob({ id: "job-preview-denied" })]);
+    const runner = runnerMock({ status: "not-run" });
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-preview-denied" });
+
+    expect(runner.runScheduledTaskPreview).toHaveBeenCalledTimes(1);
+    expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/nothing was (run|posted|consumed)/i);
+    expect(text).toMatch(/pending/i);
   });
 
   it("notes lifecycle consumption for one-time and recurring schedules", async () => {
@@ -2168,15 +2261,15 @@ describe("run_scheduled_task", () => {
     const runner = runnerMock();
     const runTool = runToolOf(store, runner);
 
-    const onceText = await executeTool(runTool, { id: "job-once" });
+    const onceText = await executeTool(runTool, { id: "job-once", consume_next: true });
     expect(onceText).toContain("completed and will not fire again");
 
-    const dailyText = await executeTool(runTool, { id: "job-daily" });
+    const dailyText = await executeTool(runTool, { id: "job-daily", consume_next: true });
     expect(dailyText).toContain("schedule continues");
 
     // A cron job is a recurring schedule like the presets: the occurrence is
     // consumed and the schedule continues after the run.
-    const cronText = await executeTool(runTool, { id: "job-cron" });
+    const cronText = await executeTool(runTool, { id: "job-cron", consume_next: true });
     expect(cronText).toContain("schedule continues");
   });
 
@@ -2184,7 +2277,7 @@ describe("run_scheduled_task", () => {
     const store = storeMock([activeJob({ id: "job-silent" })]);
     const runner = runnerMock({ status: "silent" });
 
-    const text = await executeTool(runToolOf(store, runner), { id: "job-silent" });
+    const text = await executeTool(runToolOf(store, runner), { id: "job-silent", consume_next: true });
 
     expect(text).toContain("Ran scheduled prompt job-silent");
     expect(text).toMatch(/silent/i);
@@ -2196,7 +2289,7 @@ describe("run_scheduled_task", () => {
     const preview = "x".repeat(500);
     const runner = runnerMock({ status: "invalid-response", responsePreview: preview });
 
-    const text = await executeTool(runToolOf(store, runner), { id: "job-bad" });
+    const text = await executeTool(runToolOf(store, runner), { id: "job-bad", consume_next: true });
 
     expect(text).toMatch(/not a valid scheduled-task JSON reply/i);
     expect(text).toMatch(/nothing was posted/i);
@@ -2210,7 +2303,7 @@ describe("run_scheduled_task", () => {
     const store = storeMock([activeJob({ id: "job-undelivered" })]);
     const runner = runnerMock({ status: "undelivered" });
 
-    const text = await executeTool(runToolOf(store, runner), { id: "job-undelivered" });
+    const text = await executeTool(runToolOf(store, runner), { id: "job-undelivered", consume_next: true });
 
     expect(text).toContain("Error:");
     expect(text).toMatch(/could not be delivered/i);
@@ -2223,7 +2316,7 @@ describe("run_scheduled_task", () => {
     const store = storeMock([activeJob({ id: "job-denied" })]);
     const runner = runnerMock({ status: "not-run" });
 
-    const text = await executeTool(runToolOf(store, runner), { id: "job-denied" });
+    const text = await executeTool(runToolOf(store, runner), { id: "job-denied", consume_next: true });
 
     expect(text).toContain("Error:");
     expect(text).toMatch(/could not be executed/i);
@@ -2239,24 +2332,29 @@ describe("run_scheduled_task", () => {
 
     // The denied run releases its claim, so the one-time task must be left
     // sounding like it will still fire later — the occurrence was not consumed.
-    const onceText = await executeTool(runTool, { id: "job-once-denied" });
+    const onceText = await executeTool(runTool, { id: "job-once-denied", consume_next: true });
     expect(onceText).toContain("Error:");
     expect(onceText).toMatch(/remains scheduled/i);
     expect(onceText).not.toMatch(/completed and will not fire again/i);
 
-    const dailyText = await executeTool(runTool, { id: "job-daily-denied" });
+    const dailyText = await executeTool(runTool, { id: "job-daily-denied", consume_next: true });
     expect(dailyText).toContain("Error:");
     expect(dailyText).toMatch(/remains scheduled/i);
   });
 
-  it("reports an unroutable conversation key as an error without a lifecycle claim", async () => {
-    const store = storeMock([activeJob({ id: "job-unroutable" })]);
+  it("reports an unroutable conversation key as an error and states the occurrence was consumed", async () => {
+    const store = storeMock([
+      activeJob({ id: "job-unroutable", schedule: { type: "once", atUtc: "2026-09-01T14:00:00.000Z" } })
+    ]);
     const runner = runnerMock({ status: "unroutable" });
 
-    const text = await executeTool(runToolOf(store, runner), { id: "job-unroutable" });
+    const text = await executeTool(runToolOf(store, runner), { id: "job-unroutable", consume_next: true });
 
     expect(text).toContain("Error:");
     expect(text).toMatch(/could not be resolved/i);
+    // The unroutable outcome settles (consumes) the occurrence: the answer
+    // must say so rather than implying the task will fire again.
+    expect(text).toMatch(/completed and will not fire again/i);
   });
 
   it("errors on an unknown or foreign id without touching the runner", async () => {
@@ -2271,6 +2369,7 @@ describe("run_scheduled_task", () => {
     const foreignText = await executeTool(runTool, { id: "foreign" });
     expect(foreignText).toContain('no scheduled prompt with id "foreign"');
     expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+    expect(runner.runScheduledTaskPreview).not.toHaveBeenCalled();
   });
 
   it("requires an id", async () => {
@@ -2280,16 +2379,18 @@ describe("run_scheduled_task", () => {
     const text = await executeTool(runTool, { id: "   " });
     expect(text).toContain("Error:");
     expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+    expect(runner.runScheduledTaskPreview).not.toHaveBeenCalled();
   });
 
   it("refuses canceled records and points at update_scheduled_prompt for a re-arm", async () => {
     const store = storeMock([record({ id: "job-cancelled", status: "cancelled" })]);
     const runner = runnerMock();
 
-    const text = await executeTool(runToolOf(store, runner), { id: "job-cancelled" });
+    const text = await executeTool(runToolOf(store, runner), { id: "job-cancelled", consume_next: true });
     expect(text).toContain("Error:");
     expect(text).toMatch(/update_scheduled_prompt/i);
     expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+    expect(runner.runScheduledTaskPreview).not.toHaveBeenCalled();
   });
 
   it("refuses completed records as retired history", async () => {
@@ -2299,6 +2400,18 @@ describe("run_scheduled_task", () => {
     const text = await executeTool(runToolOf(store, runner), { id: "job-completed" });
     expect(text).toContain("Error:");
     expect(text).toMatch(/retired history/i);
+    expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+    expect(runner.runScheduledTaskPreview).not.toHaveBeenCalled();
+  });
+
+  it("refuses a canceled record on the preview path without invoking either executor", async () => {
+    const store = storeMock([record({ id: "job-cancelled-preview", status: "cancelled" })]);
+    const runner = runnerMock();
+
+    const text = await executeTool(runToolOf(store, runner), { id: "job-cancelled-preview" });
+    expect(text).toContain("Error:");
+    expect(text).toMatch(/update_scheduled_prompt/i);
+    expect(runner.runScheduledTaskPreview).not.toHaveBeenCalled();
     expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
   });
 
@@ -2318,5 +2431,6 @@ describe("run_scheduled_task", () => {
     expect(text).toContain('no scheduled prompt with id "foreign-job"');
     expect(text).toContain(conversationKey);
     expect(runner.runScheduledTaskNow).not.toHaveBeenCalled();
+    expect(runner.runScheduledTaskPreview).not.toHaveBeenCalled();
   });
 });

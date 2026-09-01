@@ -367,9 +367,12 @@ export type ScheduledPromptTrigger = "scheduled" | "on-demand";
 
 /**
  * Outcome of one on-demand scheduled-task run (the `run_scheduled_task` tool's
- * executor path). Mirrors a normal scheduled fire: the response contract is
- * validated identically, `message` content is posted, `silent` posts nothing,
- * and invalid or undeliverable responses post nothing.
+ * executor paths). The fire path mirrors a normal scheduled fire: the response
+ * contract is validated identically, `message` content is posted, `silent`
+ * posts nothing, and invalid or undeliverable responses post nothing. The
+ * preview path is a plain generation (`previewed`): it never consumes the
+ * occurrence and never posts; the response text is returned to the caller for
+ * review.
  */
 export type ScheduledTaskRunResult =
   | { status: "posted"; content: string }
@@ -377,16 +380,22 @@ export type ScheduledTaskRunResult =
   | { status: "invalid-response"; responsePreview: string }
   | { status: "unroutable" }
   | { status: "undelivered" }
-  | { status: "not-run" };
+  | { status: "not-run" }
+  | { status: "previewed"; content: string };
 
 /**
  * Immediate-run executor for stored scheduled prompts, implemented by the
  * scheduler execution engine and wired into the scheduler tools by the
- * composition. Runs the same framework as a due-occurrence fire: consumption,
- * fire-time authorization gate, strict JSON response validation, and posting.
+ * composition. The default preview path (`runScheduledTaskPreview`) runs the
+ * stored prompt as a plain generation through the fire-time gate and returns
+ * the response without consuming the occurrence or posting anything; the
+ * explicit fire path (`runScheduledTaskNow`) consumes the occurrence and runs
+ * the same framework as a due-occurrence fire: fire-time authorization gate,
+ * strict JSON response validation, and posting.
  */
 export interface ScheduledTaskRunner {
   runScheduledTaskNow(record: ScheduledPromptRecord): Promise<ScheduledTaskRunResult>;
+  runScheduledTaskPreview(record: ScheduledPromptRecord): Promise<ScheduledTaskRunResult>;
 }
 
 export interface PiGateway {
@@ -421,6 +430,16 @@ export interface ConversationWorkQueue {
    * the queue would deadlock. Returns null for denied or failed runs.
    */
   runScheduledPromptInline(record: ScheduledPromptRecord): Promise<PiGenerationResult | null>;
+  /**
+   * The fire-time gate and a plain (unframed, unparsed) generation in the
+   * job's conversation session, without the queue wait, for a caller that
+   * already holds the conversation's queue slot — the preview path of the
+   * `run_scheduled_task` tool. The turn persists like any other exchange but
+   * skips the scheduled JSON response framing and correction retries, and
+   * nothing is returned to a channel by this call. Returns null for denied or
+   * failed runs.
+   */
+  runScheduledPromptPreviewInline(record: ScheduledPromptRecord): Promise<PiGenerationResult | null>;
 }
 
 /**

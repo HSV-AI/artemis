@@ -14,7 +14,10 @@ optional cron schedule surface follows
 reconcile lifecycle replacing consume-before-gate follows
 [issue #75](https://github.com/HSV-AI/artemis/issues/75); persisting the
 engine's derived next occurrence on the record at claim time follows
-[issue #74](https://github.com/HSV-AI/artemis/issues/74).
+[issue #74](https://github.com/HSV-AI/artemis/issues/74); decoupling the
+on-demand path into a default preview (plain review turn, consumes and posts
+nothing) with an explicit `consume_next=true` fire follows
+[issue #76](https://github.com/HSV-AI/artemis/issues/76).
 
 ## Problem
 
@@ -40,8 +43,10 @@ This protocol owns:
   through the fire-time authorization gate
   (`ConversationService.runScheduledPrompt`)
 - the immediate on-demand execution path
-  (`SchedulerRunner.runScheduledTaskNow` + the inline gate
-  `ConversationService.runScheduledPromptInline`) behind the
+  (`SchedulerRunner.runScheduledTaskPreview` as the default preview and
+  `SchedulerRunner.runScheduledTaskNow` as the explicit fire, both through the
+  inline gate of `ConversationService.runScheduledPromptInline` and the
+  preview gate of `runScheduledPromptPreviewInline` respectively) behind the
   `run_scheduled_task` tool, including the recursion guard that keeps the
   tool out of scheduler-fired generations
 - the scheduler-fired prompt framing and its strict JSON response contract
@@ -144,17 +149,51 @@ alongside their own writes (see [Scheduler tools](scheduler-tools.md)).
 
 ### On-demand execution (`run_scheduled_task`)
 
-An interactive turn can also run a stored job immediately through the same
-framework. The `run_scheduled_task` tool (issue #51's tool surface, wired in
-[issue #67](https://github.com/HSV-AI/artemis/issues/67)) takes only the
-job's `id`, locates the record among its own conversation's history, and —
-for an `active` record — hands it to the engine's immediate-run executor,
-`SchedulerRunner.runScheduledTaskNow`, which the composition wires into the
-PI gateway as a lazily resolved `ScheduledTaskRunner` (the engine is built
-after the gateway). The executor mirrors a due-occurrence fire exactly:
+An interactive turn can also run a stored job immediately, in one of two
+modes. The `run_scheduled_task` tool (issue #51's tool surface, wired in
+[issue #67](https://github.com/HSV-AI/artemis/issues/67)) takes the job's
+`id` plus an optional `consume_next` parameter (default `false`), locates the
+record among its own conversation's history, and — for an `active` record —
+hands it to the engine's immediate-run executor for the requested mode. Both
+executors are wired into the PI gateway as the same lazily resolved
+`ScheduledTaskRunner` (the engine is built after the gateway). Only `active`
+records can run in either mode; the tool refuses canceled (pointing at
+`update_scheduled_prompt`, which re-arms a canceled record through a new
+schedule) and completed (retired history) records, and unknown or foreign ids
+answer as not found, before either executor is invoked.
+
+The **default is the preview** (`SchedulerRunner.runScheduledTaskPreview`):
+the stored prompt runs as a plain preview turn through the fire-time gate and
+the occurrence is never consumed or posted. Concretely:
+
+1. Nothing is claimed or reconciled. The occurrence stays pending: a one-time
+   task remains active and will fire at its scheduled time; a recurring
+   task's next occurrence is unchanged. A preview therefore never interferes
+   with lifecycle bookkeeping, and a crashed preview cannot block a due fire.
+2. The gate runs as `ConversationService.runScheduledPromptPreviewInline`: the
+   same scope allow-lists and live membership re-check as every scheduled
+   run, followed by one plain generation of the stored prompt verbatim in the
+   target conversation's durable session — no `buildSchedulerPrompt` framing,
+   no strict JSON contract, no correction retries — flagged `scheduledRun` so
+   the run tool is unavailable inside it (a preview cannot recurse) and
+   persisted like any exchange (one user row attributed to the scheduling
+   user, one assistant row). Like the fire path's inline variant, no queue
+   wait: the tool executes inside the live turn that already holds the
+   conversation's queue slot.
+3. The response text is returned to the tool as a `previewed` result and
+   echoed to the caller; nothing is delivered to any channel. The gate's
+   events record the run with `trigger: on-demand` and `mode: preview`
+   (`scheduled_prompt_succeeded`, or `scheduled_prompt_failed` when
+   generation fails and `scheduled_prompt_rejected` when the gate denies), so
+   preview runs are distinguishable in the audit trail without ever posting.
+
+The explicit **fire** (`consume_next=true`) is the reversible default's
+inverse: it mirrors a due-occurrence fire exactly, which is what makes a
+preview request safe — nothing irreversible happens unless the user asks for
+it.
 
 1. The occurrence is claimed first with the identical `claim` path — so an
-   on-demand run and a pending due occurrence (or another instance's fire)
+   on-demand fire and a pending due occurrence (or another instance's fire)
    can never double-run the same job. A record someone else holds a live
    claim on answers `not-run` without doing any work.
 2. The gate runs as `ConversationService.runScheduledPromptInline`: the same
@@ -178,14 +217,14 @@ after the gateway). The executor mirrors a due-occurrence fire exactly:
 
 Every scheduler event carries a `trigger` field (`scheduled` for engine
 fires, `on-demand` for tool runs) so operators can distinguish the two paths
-in the audit log. Only `active` records can run on demand; the tool refuses
-canceled (pointing at `update_scheduled_prompt`, which re-arms a canceled
-record through a new schedule) and completed (retired
-history) records, and unknown or foreign ids answer as not found. Scheduler-
-fired generations are flagged `scheduledRun` on `PiGenerationInput` and the
-PI gateway omits `run_scheduled_task` from them (with its own cached system
-prompt registry), so a fired task can never trigger further runs — on-demand
-execution is reachable only from interactive turns and never recurses.
+in the audit log. The
+run tool is only registered for interactive turns and only when the
+composition wired the executors; scheduler-fired generations are flagged
+`scheduledRun` on `PiGenerationInput` (preview generations included, set by
+the conversation service) and the PI gateway omits `run_scheduled_task` from
+them (with its own cached system prompt registry), so a fired task can never
+trigger further runs — neither on-demand mode is reachable from scheduler-
+fired turns, so scheduled execution never recurses.
 
 ## Contracts and data flow
 
@@ -211,9 +250,12 @@ claim reconcile: markScheduledPromptFired(id, fired, next) -----------> settled 
                                                                         cleared (one-time)
 claim reconcile: releaseScheduledPromptClaim --------------------------> released (denied | failed | invalid | undelivered)
 
-run_scheduled_task(id) (interactive turn only) ------------------------> conversation-scoped lookup (active only)
+run_scheduled_task(id, consume_next=true) (interactive turn) ----------> conversation-scoped lookup (active only)
 SchedulerRunner.runScheduledTaskNow(record) ---------------------------> claim + inline gate + shared deliver + reconcile
 ConversationService.runScheduledPromptInline(record) ------------------> same gates, no queue wait (caller holds the slot)
+run_scheduled_task(id) (preview default; consumes/posts nothing) -------> conversation-scoped lookup (active only)
+SchedulerRunner.runScheduledTaskPreview(record) ------------------------> no claim + preview gate + response returned unposted
+ConversationService.runScheduledPromptPreviewInline(record) ------------> same gates, plain prompt (no JSON contract), no queue wait
 ScheduledTaskRunner (composition-wired lazy handle) -------------------> engine executor for the tool
 ```
 
@@ -342,8 +384,11 @@ interactive pipeline applies — so a job whose scheduling user has lost access 
 neither generate nor post. The on-demand path inherits all of this: the tool's
 lookup is scoped to the harness-injected conversation key (a foreign id is not
 found, not run), the gate re-authorizes the stored scheduling user's live
-membership, and the run can never widen its permissions beyond its own
-conversation. The `run_scheduled_task` tool is registered only for interactive
+membership before previewing or firing, and a run can never widen its
+permissions beyond its own conversation. The default preview is lifecycle-
+neutral by construction (no claim, no consumption, no posting), so a review
+request can never spend a one-time job; only the explicit `consume_next=true`
+fire consumes the occurrence. The `run_scheduled_task` tool is registered only for interactive
 generations and only when the composition wired the executor; scheduler-fired
 generations are flagged `scheduledRun` and never see the tool, so a fired task
 cannot trigger further runs and on-demand execution cannot recurse. Response
@@ -412,11 +457,20 @@ future extension behind this same contract.
   occurrence is consumed without a post (one-time jobs complete, recurring jobs
   re-arm) to prevent an unfixable retry loop.
 - On-demand run requested for an unknown, foreign, canceled, or completed record:
-  the tool refuses with a descriptive error before the executor is invoked; nothing
-  is claimed or generated. A stale record slipping to a non-active status between
-  lookup and run is refused by the executor itself
-  (`scheduled_task_run_refused_inactive`) and reported as `not-run`.
-- On-demand run while another engine holds a live claim on the same job: the claim
+  the tool refuses with a descriptive error before either executor is invoked;
+  nothing is claimed, generated, or consumed. A stale record slipping to a
+  non-active status between lookup and run is refused by the executor itself
+  (`scheduled_task_run_refused_inactive`) and reported as `not-run` — the fire
+  executor then never claims the refused record, and the preview executor
+  never claims at all, so its refusal leaves storage state untouched.
+- On-demand preview whose gate denies the run or whose generation fails:
+  reported as `not-run` with an answer stating nothing was run, posted, or
+  consumed and the occurrence stays pending; the gate's rejection or failure
+  event carries `trigger: on-demand` and `mode: preview`. A preview whose
+  gate throws is logged and recorded by the preview executor the same way,
+  with no claim to release and nothing to reconcile.
+- On-demand fire (consume_next=true) while another engine holds a live claim
+  on the same job: the claim
   fails and the executor answers `not-run` without doing any work.
 - Discord not ready (gateway still connecting — login alone is not ready): the tick
   is deferred with `scheduler_deferred_not_ready` debug logging; jobs are neither
@@ -465,12 +519,16 @@ future extension behind this same contract.
   interval lifecycle with in-flight tick skipping, deferral of whole ticks until the
   Discord readiness gate passes (nothing listed or claimed pre-ready, then the full
   chain claim → fire → valid JSON → posted once ready), unchanged firing when no gate is
-  wired, and the on-demand executor `runScheduledTaskNow` (claim-then-gate
+  wired, and the on-demand executors: `runScheduledTaskNow` (claim-then-gate
   ordering with the identical reconcile semantics, posted/silent/
   invalid-response/unroutable/undelivered/not-run outcomes with their events and logs,
   inactive-record refusal, claim-contention refusal, storage-failure and gate-throw
   handling without
-  rejecting, and the engine's queued fire path staying on `runScheduledPrompt`).
+  rejecting, and the engine's queued fire path staying on `runScheduledPrompt`)
+  and `runScheduledTaskPreview` (no claim, no consumption, no posting, no
+  dispatcher call; a `previewed` result carrying the gate's plain response,
+  `not-run` on denial / failure / gate-throw with no lifecycle mutation, and an
+  inactive-record refusal without calling the preview gate).
 - `test/discord-gateway.test.ts` covers `sendToConversation`: suppression flags,
   per-channel embed allowlists, long-content splitting, non-sendable channels,
   unresolvable channels, a null channel resolution logged as
@@ -494,7 +552,14 @@ future extension behind this same contract.
   variant (`runScheduledPromptInline`) applies the same gates without queueing,
   completes while an interactive turn holds the conversation queue, flags its
   generation `scheduledRun`, and events carry the `trigger` (`scheduled` for
-  engine fires, `on-demand` for tool runs).
+  engine fires, `on-demand` for tool runs). The preview variant
+  (`runScheduledPromptPreviewInline`) applies the same gate without queueing,
+  generates the stored prompt verbatim with `scheduledRun: true` (no JSON
+  framing, no correction retries), persists the turn attributed to the
+  scheduling user, refuses members the gate revokes without generating,
+  proceeds logged-unverified on unreachable checks, and records
+  `scheduled_prompt_succeeded` with `mode: preview` or
+  `scheduled_prompt_failed` on generation failures without posting anything.
 - `test/repository.test.ts` covers the execution-store operations (cross-conversation
   listing, atomic claiming — one winner per due job, expired-claim reclaim,
   active-only eligibility, release returning a job to the claimable pool,
@@ -520,17 +585,21 @@ future extension behind this same contract.
   composed engine defers polling until the Discord gateway reports ready and
   resumes once it does. `test/pi-gateway.test.ts` covers the on-demand wiring:
   `run_scheduled_task` registers only when a `ScheduledTaskRunner` resolves, its
-  execution delegates to the engine executor, scheduler-fired generations
+  execution delegates by mode — the default call to the preview executor and a
+  `consume_next=true` call to the fire executor — scheduler-fired generations
   (`scheduledRun`) omit the tool and cache their own reduced prompt registry, and
   the management tools stay registered when no executor is wired.
 - `test/scheduler-tools.test.ts` covers `run_scheduled_task`'s outcome reporting
-  under the claim-and-reconcile lifecycle: posted and silent runs keep the
-  completion note (one-time completed, recurring schedule continues), while
+  across both modes: the default call previews (echoing the response with
+  explicit nothing-posted and left-pending notes for one-time and recurring
+  schedules, invoking only the preview executor), while `consume_next=true`
+  fires under the claim-and-reconcile lifecycle — posted and silent runs keep
+  the completion note (one-time completed, recurring schedule continues),
   invalid-response, undelivered, and not-run answers state that the task was not
   consumed, its claim was released, and it remains scheduled to fire again; the
-  unroutable outcome reports an unresolvable stored key without a lifecycle
-  claim; and unknown, foreign, canceled, and completed ids are refused before any
-  executor work.
+  unroutable outcome reports an unresolvable stored key and states the
+  occurrence was consumed; and unknown, foreign, canceled, and completed ids
+  are refused before either executor runs.
 - `npm run guardrail` remains the completion gate.
 
 ## References

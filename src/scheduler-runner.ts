@@ -353,6 +353,54 @@ export class SchedulerRunner {
   }
 
   /**
+   * Preview a stored scheduled prompt — the default (non-firing) path of the
+   * `run_scheduled_task` tool. The occurrence is neither claimed nor consumed:
+   * storage state is untouched, so a one-time task stays active and a
+   * recurring task's next occurrence is unchanged. The stored prompt runs as a
+   * plain preview turn through the fire-time authorization gate via the inline
+   * preview variant (the tool already holds the conversation's queue slot, so
+   * re-entering it would deadlock the live turn): no scheduler framing, no
+   * strict JSON contract, and nothing posted — the response text returns to
+   * the caller for review. Rejections and generation failures are logged by
+   * the gate and reported as `not-run` without any lifecycle mutation.
+   *
+   * Only `active` records are accepted, mirroring the fire executor: canceled
+   * and completed records are refused by the tool before this runs, and the
+   * check is repeated here so a stale record can never generate.
+   */
+  public async runScheduledTaskPreview(record: ScheduledPromptRecord): Promise<ScheduledTaskRunResult> {
+    if (record.status !== "active") {
+      this.options.logger.warn("scheduled_task_run_refused_inactive", {
+        jobId: record.id,
+        conversationKey: record.conversationKey,
+        status: record.status
+      });
+      return { status: "not-run" };
+    }
+    try {
+      const result = await this.options.conversations.runScheduledPromptPreviewInline(record);
+      if (!result) {
+        // Denied or failed previews are already logged by the gate; nothing
+        // was generated, posted, or consumed.
+        return { status: "not-run" };
+      }
+      return { status: "previewed", content: result.text };
+    } catch (error) {
+      this.options.logger.error("scheduled_prompt_failed", {
+        jobId: record.id,
+        conversationKey: record.conversationKey,
+        mode: "preview",
+        ...safeError(error)
+      });
+      this.options.repository.recordEvent("scheduled_prompt_failed", {
+        conversationKey: record.conversationKey,
+        details: { jobId: record.id, mode: "preview", ...safeError(error) }
+      });
+      return { status: "not-run" };
+    }
+  }
+
+  /**
    * Atomically claim the occurrence for this run. Contention (another engine
    * already holds a live claim) returns false silently — that is the normal
    * multi-instance guard, not an error. Also returns false when storage
