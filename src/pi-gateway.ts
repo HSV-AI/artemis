@@ -39,6 +39,7 @@ import {
 import { createSchedulerTools } from "./scheduler-tools.js";
 import { createChannelTimezoneTools } from "./timezone-tools.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
+import { createWebSearchTool } from "./web-search-tool.js";
 
 /**
  * Maximum number of Discord messages Artemis may split a single response into
@@ -139,6 +140,7 @@ function createCustomTools(
 ) {
   return [
     createWebFetchTool({ fetchImplementation }),
+    createWebSearchTool({ fetchImplementation }),
     createModelInfoTool({ resolveModelInfo }),
     ...createGitHubTools({
       token: config.githubToken ?? "",
