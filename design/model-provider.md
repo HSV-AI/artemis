@@ -42,6 +42,8 @@ HTTP GET instead of calling the model provider. HTML responses are reduced to a
 title, readable text, and resolved links; other text responses are passed
 through directly. Content is bounded to 100,000 characters, labeled as
 untrusted, sanitized, and limited to ten displayed links before PI sees it.
+The `web_search` tool reuses the same direct-fetch mechanism to read
+search-results pages for web searches; see [Web search](web-search.md).
 Artemis also registers `model_info`, a self-introspection tool that reports the
 registered provider and model from the live PI state; see
 [Model self-introspection](model-self-introspection.md).
@@ -113,7 +115,9 @@ written to the model JSON example. The key is sent only to model discovery,
 completion, and never to `web_fetch` targets.
 
 `web_fetch` permits HTTP and HTTPS URLs and follows redirects. It therefore has
-network reachability equal to the Artemis process. Operators must apply runtime
+network reachability equal to the Artemis process, as does `web_search` (its
+fixed search-engine endpoints see the same egress identity and never the model
+API key). Operators must apply runtime
 egress controls when internal addresses should not be reachable. Fetched data
 is bounded, stripped of script and style bodies for HTML, labeled as external,
 and sanitized before entering model context.

@@ -507,6 +507,7 @@ describe("PiSdkGateway", () => {
       expect.objectContaining({
         customTools: expect.arrayContaining([
           expect.objectContaining({ name: "web_fetch" }),
+          expect.objectContaining({ name: "web_search" }),
           expect.objectContaining({ name: "memory_remember" })
         ]),
         thinkingLevel: "medium"
@@ -530,6 +531,11 @@ describe("PiSdkGateway", () => {
     expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(
       expect.objectContaining({
         systemPrompt: expect.stringContaining("- web_fetch: Fetch and extract text from a specific URL")
+      })
+    );
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemPrompt: expect.stringContaining("- web_search: ")
       })
     );
     expect(mocks.session.dispose).toHaveBeenCalledOnce();
@@ -1025,6 +1031,10 @@ describe("PiSdkGateway", () => {
       | undefined;
     expect(systemPrompt?.systemPrompt).toContain("- schedule_prompt: ");
     expect(systemPrompt?.systemPrompt).not.toContain("- run_scheduled_task: ");
+    // Scheduled generations keep the shared custom tools (web search included)
+    // so scheduled prompts can search the web, and the registry advertises it.
+    expect(sessionOptions?.tools).toContain("web_search");
+    expect(systemPrompt?.systemPrompt).toContain("- web_search: ");
   });
 
   it("omits run_scheduled_task while keeping the management tools when no executor is wired", async () => {
