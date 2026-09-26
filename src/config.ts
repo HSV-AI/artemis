@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolvePersonaProfile, type PersonaProfile } from "./persona-profiles.js";
 
-export const DEFAULT_OLLAMA_MODEL = "deepseek-v4-flash:0731-cloud";
+export const DEFAULT_OLLAMA_MODEL = "deepseek-v4.1-flash:cloud";
 export const DEFAULT_OLLAMA_BASE_URL = "http://ollama:11434/v1";
 export const DEFAULT_SQLITE_PATH = "/data/artemis.sqlite";
 export const DEFAULT_DGRAPH_URL = "http://dgraph:8080";
