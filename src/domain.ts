@@ -124,6 +124,58 @@ export interface ChannelTimezoneStore {
   setChannelTimezone(conversationKey: string, timezone: string): void;
 }
 
+/** One historical Discord message of the current conversation, normalized. */
+export interface ChannelHistoryMessage {
+  messageId: string;
+  authorId: string;
+  /** ISO-8601 UTC instant the message was created. */
+  timestamp: string;
+  /** Plain-text message content. Untrusted user data. */
+  content: string;
+  /** Canonicalized (scheme + host + path) links extracted from the content. */
+  urls: string[];
+}
+
+/**
+ * Query for the current conversation's Discord history. There is deliberately
+ * no conversation selector: the conversation is the harness-injected key, and
+ * every parameter here only narrows what is read within it.
+ */
+export interface ChannelHistoryQuery {
+  /** Maximum number of messages to return (1-200). Default 50. */
+  limit?: number;
+  /** Optional backwards cursor: a Discord message id or ISO-8601 instant. */
+  before?: string;
+  /** Optional author filter applied within the current conversation. */
+  authorId?: string;
+}
+
+/**
+ * Outcome of reading the current conversation's Discord history. A failed read
+ * is always an explicit status — an `ok` result with an empty list means the
+ * range genuinely holds no messages.
+ */
+export type ChannelHistoryReadResult =
+  | { status: "ok"; messages: ChannelHistoryMessage[]; truncated: boolean }
+  | { status: "unresolvable" }
+  | { status: "permission" }
+  | { status: "rate-limited"; retryAfterSeconds?: number }
+  | { status: "error" };
+
+/**
+ * Read-only, harness-side authority for the current conversation's Discord
+ * message history. Backed by live Discord state (guild channel or DM), so a
+ * read is always bound to the conversation Artemis is actually talking in;
+ * the model has no input that can select any other channel, user, or DM.
+ * Deliberately exposes no send, edit, delete, or reaction capability.
+ */
+export interface ChannelHistoryReader {
+  readChannelHistory(
+    conversationKey: string,
+    query: ChannelHistoryQuery
+  ): Promise<ChannelHistoryReadResult>;
+}
+
 export type PromptResponseType = "message" | "silent";
 
 /**

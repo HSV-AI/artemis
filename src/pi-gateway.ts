@@ -10,6 +10,7 @@ import type { AssistantMessage, ThinkingContent } from "@earendil-works/pi-ai";
 import { DEFAULT_DGRAPH_URL, type ArtemisConfig } from "./config.js";
 import { DgraphClient, GraphMemory } from "./dgraph-memory.js";
 import type {
+  ChannelHistoryReader,
   ChannelMembershipChecker,
   ChannelTimezoneStore,
   ConversationKind,
@@ -37,6 +38,7 @@ import {
   SqlitePiSessionManager
 } from "./pi-session-manager.js";
 import { createSchedulerTools } from "./scheduler-tools.js";
+import { createDiscordChannelHistoryTool } from "./discord-history-tool.js";
 import { createChannelTimezoneTools } from "./timezone-tools.js";
 import { createWebFetchTool } from "./web-fetch-tool.js";
 import { createWebSearchTool } from "./web-search-tool.js";
@@ -183,6 +185,7 @@ export class PiSdkGateway implements PiGateway {
   private readonly timezoneStore: ChannelTimezoneStore | undefined;
   private readonly schedulerStore: ScheduledPromptStore | undefined;
   private readonly scheduledTaskRunner: (() => ScheduledTaskRunner | undefined) | undefined;
+  private readonly historyReader: ChannelHistoryReader | undefined;
 
   public constructor(
     private readonly config: Pick<ArtemisConfig, "model" | "persona"> &
@@ -209,7 +212,14 @@ export class PiSdkGateway implements PiGateway {
      * registered when this resolves, and never for scheduler-fired
      * generations, so scheduled execution cannot recurse.
      */
-    scheduledTaskRunner?: () => ScheduledTaskRunner | undefined
+    scheduledTaskRunner?: () => ScheduledTaskRunner | undefined,
+    /**
+     * Read-only Discord-backed reader for the current conversation's message
+     * history, backed by live Discord state. When wired, the
+     * discord_channel_history tool is registered for every conversation kind;
+     * its reads are bound to the harness-injected conversation key.
+     */
+    historyReader?: ChannelHistoryReader
   ) {
     const dgraph = new DgraphClient(
       config.dgraphUrl ?? DEFAULT_DGRAPH_URL,
@@ -230,6 +240,7 @@ export class PiSdkGateway implements PiGateway {
     this.timezoneStore = timezoneStore;
     this.schedulerStore = schedulerStore;
     this.scheduledTaskRunner = scheduledTaskRunner;
+    this.historyReader = historyReader;
     const sourceCachePath = config.sqlitePath && config.sqlitePath !== ":memory:"
       ? join(dirname(config.sqlitePath), "hsvai-source-cache.json")
       : undefined;
@@ -321,6 +332,15 @@ export class PiSdkGateway implements PiGateway {
             ...(this.membership === undefined ? {} : { membership: this.membership }),
             ...(scheduledTaskRunner === undefined ? {} : { runner: scheduledTaskRunner })
           })
+        : []),
+      // The channel history tool reads only the conversation it is invoked
+      // in: the conversation comes from the harness-injected key and the
+      // reader exposes no write path. Registered for every conversation kind
+      // (DMs and guild channels alike) whenever a reader is wired.
+      ...(this.historyReader
+        ? [createDiscordChannelHistoryTool(this.historyReader, {
+            conversationKey: input.conversationKey
+          })]
         : [])
     ];
     const modelRuntime = this.modelRuntime;

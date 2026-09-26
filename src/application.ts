@@ -6,7 +6,8 @@ import {
 import type { ArtemisConfig } from "./config.js";
 import { ConversationService } from "./conversation-service.js";
 import { DiscordGateway } from "./discord-gateway.js";
-import type { ChannelMembershipChecker, Logger, PiGateway } from "./domain.js";
+import { readChannelHistory, type ChannelHistoryEndpoint } from "./discord-history.js";
+import type { ChannelHistoryReader, ChannelMembershipChecker, Logger, PiGateway } from "./domain.js";
 import { JsonLogger, safeError } from "./logger.js";
 import { PiSdkGateway } from "./pi-gateway.js";
 import { ArtemisRepository } from "./repository.js";
@@ -73,7 +74,10 @@ export class ArtemisApplication {
         // The scheduler execution engine is built below, after this gateway;
         // the lazy handle resolves once it exists, giving run_scheduled_task
         // the same immediate-run executor that fires due occurrences.
-        () => this.scheduler
+        () => this.scheduler,
+        // Discord-backed read-only history reader for the current conversation;
+        // shares the same live Discord state the gateway itself uses.
+        this.discordHistoryReader(discordClient)
       );
     const conversations = new ConversationService(
       {
@@ -123,6 +127,25 @@ export class ArtemisApplication {
           fetchGuild: async (guildId) => client.guilds.fetch(guildId)
         };
         return resolveChannelMembership(endpoint, conversationKey, userId);
+      }
+    };
+  }
+
+  /**
+   * Read-only Discord history reader backed by the shared Discord client. The
+   * conversation is always resolved from the harness-derived conversation key
+   * inside {@link readChannelHistory}; no model-supplied input can select any
+   * other channel, user, or DM. The bot's user id resolves lazily, after the
+   * ready handshake, so guild permission checks use live identity.
+   */
+  private discordHistoryReader(client: Client): ChannelHistoryReader {
+    return {
+      readChannelHistory: (conversationKey, query) => {
+        const endpoint: ChannelHistoryEndpoint = {
+          fetchChannel: async (channelId) => client.channels.fetch(channelId),
+          selfUserId: () => client.user?.id
+        };
+        return readChannelHistory(endpoint, conversationKey, query);
       }
     };
   }
