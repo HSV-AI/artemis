@@ -343,7 +343,7 @@ The default workflow remains:
 
 - Provider ID: `ollama`
 - Base URL: `http://ollama:11434/v1`
-- Model: `deepseek-v4-flash:0731-cloud`
+- Model: `deepseek-v4.1-flash:cloud`
 - API key: `OLLAMA_API_KEY`, default `ollama`
 
 When `MODEL_CONFIG_PATH` is selected, the operator-provided JSON provider
@@ -524,7 +524,7 @@ Load local environment configuration from `.env` or the process environment, opt
 | `DISCORD_SUPPRESS_EMBEDS` | No | `true` | When `true`, Artemis sends every outbound Discord message with the `SuppressEmbeds` flag so link-preview cards are not rendered. When `false`, embeds render normally. Must be `true` or `false`. |
 | `DISCORD_EMBEDS_ALLOWED_CHANNEL_ID` | No | Empty list | Comma-separated channel IDs where link embeds are re-enabled even when `DISCORD_SUPPRESS_EMBEDS` is `true`. Threads resolve through their parent channel. Blank re-enables embeds nowhere. |
 | `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | Existing default model endpoint. |
-| `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Existing default selected model. |
+| `OLLAMA_MODEL` | No | `deepseek-v4.1-flash:cloud` | Existing default selected model. |
 | `OLLAMA_API_KEY` | No | `ollama` | Existing placeholder or bearer credential. |
 | `MODEL_CONFIG_PATH` | No | Empty | Optional local JSON provider definition that replaces the Ollama settings. |
 | `MODEL_API_KEY` | No | `local` | Bearer value for the selected provider definition; blank sends no authorization header. |

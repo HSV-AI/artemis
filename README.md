@@ -27,7 +27,7 @@ The product and implementation baseline is documented in [design/baseline.md](de
 
 - Docker with Docker Compose.
 - A Discord application and bot token.
-- An Ollama account that can use `deepseek-v4-flash:0731-cloud`, another configured Ollama model, or access to an OpenAI-compatible endpoint through the optional model config.
+- An Ollama account that can use `deepseek-v4.1-flash:cloud`, another configured Ollama model, or access to an OpenAI-compatible endpoint through the optional model config.
 
 For host-based development, Node.js 24 or newer is also required.
 
@@ -62,7 +62,7 @@ before Artemis starts.
 | `DISCORD_SUPPRESS_EMBEDS` | No | `true` | When `true`, Artemis sends every outbound Discord message with link embeds suppressed, so Discord does not render link-preview cards. Set to `false` to re-enable embeds globally. |
 | `DISCORD_EMBEDS_ALLOWED_CHANNEL_ID` | No | Empty | Comma-separated channel IDs where link embeds are re-enabled even when `DISCORD_SUPPRESS_EMBEDS` is `true`. Threads use their parent channel ID. |
 | `OLLAMA_BASE_URL` | No | `http://ollama:11434/v1` | Existing Ollama OpenAI-compatible endpoint. Base Compose enforces this internal URL. |
-| `OLLAMA_MODEL` | No | `deepseek-v4-flash:0731-cloud` | Model selected by the existing Ollama workflow. |
+| `OLLAMA_MODEL` | No | `deepseek-v4.1-flash:cloud` | Model selected by the existing Ollama workflow. |
 | `OLLAMA_API_KEY` | No | `ollama` | Existing Ollama placeholder or bearer credential. |
 | `MODEL_CONFIG_PATH` | No | Empty | Runtime path to an optional JSON provider definition. When absent, Artemis uses the existing `OLLAMA_*` settings. |
 | `MODEL_API_KEY` | No | `local` | Bearer value used only with `MODEL_CONFIG_PATH`. A blank value sends no authorization header. |
