@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import type {
+  ChannelHistoryReader,
   ChannelMembershipChecker,
   ChannelTimezoneStore,
   PiGenerationInput,
@@ -746,6 +747,81 @@ describe("PiSdkGateway", () => {
     expect(sessionOptions?.tools).not.toContain("get_current_datetime");
     expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain("set_channel_timezone");
     expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain("get_current_datetime");
+  });
+
+  it("registers discord_channel_history bound to the harness-injected conversation key", async () => {
+    const readChannelHistory = vi.fn(async () => ({
+      status: "ok" as const,
+      truncated: false,
+      messages: []
+    }));
+    const historyReader: ChannelHistoryReader = { readChannelHistory };
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      healthyFetch(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      historyReader
+    );
+    await gateway.checkHealth();
+    await gateway.generate(generationInput({ conversationKey: "guild:g1:channel:c1", conversationKind: "guild" }));
+
+    expect(mocks.createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      tools: expect.arrayContaining(["discord_channel_history"]),
+      customTools: expect.arrayContaining([
+        expect.objectContaining({ name: "discord_channel_history" })
+      ])
+    }));
+    expect(mocks.resourceLoaderConstructor).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringContaining("- discord_channel_history: ")
+    }));
+
+    type CapturedTool = {
+      name: string;
+      execute: (id: string, params: unknown, ...rest: unknown[]) => Promise<{
+        content: ReadonlyArray<{ type: string; text?: string }>;
+      }>;
+    };
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { customTools?: CapturedTool[] }
+      | undefined;
+    const tool = sessionOptions?.customTools?.find((entry) => entry.name === "discord_channel_history");
+    expect(tool).toBeDefined();
+
+    const result = await tool!.execute(
+      "call",
+      { limit: 5, channel_id: "dm:someone-else", conversation_key: "dm:someone-else" },
+      undefined,
+      undefined,
+      {} as never
+    );
+    // The read is bound to the injected conversation key; model-supplied
+    // channel selectors are ignored and cannot widen the scope.
+    expect(readChannelHistory).toHaveBeenCalledWith(
+      "guild:g1:channel:c1",
+      { limit: 5 }
+    );
+    expect(result.content[0]?.text).toContain("guild:g1:channel:c1");
+  });
+
+  it("omits discord_channel_history when no history reader is configured", async () => {
+    const gateway = new PiSdkGateway(
+      artemisGatewayConfig(modelConfig({ baseUrl: "http://inference/v1", modelId: "model" })),
+      createSessionStore(),
+      healthyFetch()
+    );
+    await gateway.checkHealth();
+    await gateway.generate(generationInput({ conversationKind: "dm", conversationKey: "dm:dm1" }));
+
+    const sessionOptions = mocks.createAgentSession.mock.calls.at(-1)?.[0] as
+      | { tools?: string[]; customTools?: Array<{ name: string }> }
+      | undefined;
+    expect(sessionOptions?.tools).not.toContain("discord_channel_history");
+    expect(sessionOptions?.customTools?.map((tool) => tool.name)).not.toContain("discord_channel_history");
   });
 
   it("registers scheduler tools bound to the harness-injected conversation key and scheduling user", async () => {
