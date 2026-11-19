@@ -1,6 +1,10 @@
-FROM node:24-bookworm-slim AS dependencies
+FROM node:26-bookworm-slim AS dependencies
 
 WORKDIR /app
+# better-sqlite3 ships prebuilt binaries for linux-x64, but npm's implicit
+# `node-gyp rebuild` (npm's built-in handling of the bundled binding.gyp) still
+# runs during `npm ci`, so the build toolchain remains required here. Verified:
+# `npm ci` fails without it (node-gyp cannot find Python).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -14,7 +18,7 @@ COPY src ./src
 RUN npm run build
 RUN npm prune --omit=dev
 
-FROM node:24-bookworm-slim AS runtime
+FROM node:26-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
 WORKDIR /app

@@ -2,16 +2,22 @@ import { randomUUID } from "node:crypto";
 import {
   buildContextEntries,
   buildSessionContext,
+  buildSessionProjection,
   CURRENT_SESSION_VERSION,
   migrateSessionEntries,
+  type ContextEditEntry,
   type FileEntry,
   type SessionContext,
   type SessionEntry,
   type SessionHeader,
   type SessionManager,
   type SessionMessageEntry,
+  type SessionProjection,
   type SessionTreeNode
 } from "@earendil-works/pi-coding-agent";
+
+/** PI 1.5.2 does not re-export UsageEntry; derive it from the SDK surface. */
+type UsageEntry = ReturnType<SessionManager["appendUsage"]>;
 import type {
   ImageContent,
   TextContent,
@@ -44,6 +50,8 @@ type PiSessionManagerRuntimeContract = Pick<
   | "appendSessionInfo"
   | "getSessionName"
   | "appendCustomMessageEntry"
+  | "appendContextEdit"
+  | "appendUsage"
   | "getLeafId"
   | "getLeafEntry"
   | "getEntry"
@@ -52,6 +60,7 @@ type PiSessionManagerRuntimeContract = Pick<
   | "appendLabelChange"
   | "getBranch"
   | "buildContextEntries"
+  | "buildSessionProjection"
   | "buildSessionContext"
   | "getHeader"
   | "getEntries"
@@ -263,6 +272,33 @@ export class SqlitePiSessionManager implements PiSessionManagerRuntimeContract {
     });
   }
 
+  public appendContextEdit(targetId: string, replacement: ContextEditEntry["replacement"]): string {
+    return this.appendEntry({
+      type: "context_edit",
+      id: this.nextId(),
+      parentId: this.leafId,
+      timestamp: new Date().toISOString(),
+      targetId,
+      replacement
+    });
+  }
+
+  public appendUsage(kind: string, provider: string, model: string, usage: Usage, note?: string): UsageEntry {
+    const entry: UsageEntry = {
+      type: "usage",
+      id: this.nextId(),
+      parentId: this.leafId,
+      timestamp: new Date().toISOString(),
+      kind,
+      provider,
+      model,
+      usage,
+      ...(note !== undefined ? { note } : {})
+    };
+    const id = this.appendEntry(entry);
+    return { ...entry, id };
+  }
+
   public getLeafId(): string | null {
     return this.leafId;
   }
@@ -318,6 +354,10 @@ export class SqlitePiSessionManager implements PiSessionManagerRuntimeContract {
 
   public buildContextEntries(): SessionEntry[] {
     return buildContextEntries(this.getEntries(), this.leafId, this.byId);
+  }
+
+  public buildSessionProjection(): SessionProjection {
+    return buildSessionProjection(this.getEntries(), this.leafId, this.byId);
   }
 
   public buildSessionContext(): SessionContext {

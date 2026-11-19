@@ -51,6 +51,100 @@ describe("SqlitePiSessionManager", () => {
     while (repositories.length > 0) repositories.pop()?.close();
   });
 
+  it("appends usage entries that persist but stay out of model context", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "artemis-pi-session-")), "artemis.sqlite");
+    const repository = new ArtemisRepository(path);
+    repositories.push(repository);
+    const session = createSession(repository);
+    const manager = SqlitePiSessionManager.open(repository, "/app", session.id);
+
+    const messageId = manager.appendMessage(user("hello"));
+    const usageEntry = manager.appendUsage("cache_warm", "test-provider", "test-model", exactUsage, "extension override");
+    const usageId = usageEntry.id;
+
+    expect(usageEntry).toMatchObject({
+      type: "usage",
+      id: usageId,
+      parentId: messageId,
+      kind: "cache_warm",
+      provider: "test-provider",
+      model: "test-model",
+      usage: exactUsage,
+      note: "extension override"
+    });
+    expect(manager.getLeafId()).toBe(usageId);
+
+    const reloaded = SqlitePiSessionManager.open(repository, "/app", session.id);
+    expect(reloaded.getEntry(usageId)).toEqual(usageEntry);
+    // Usage entries never participate in LLM context.
+    expect(reloaded.buildSessionProjection().messages).toHaveLength(1);
+  });
+
+  it("appends usage entries without an optional note", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "artemis-pi-session-")), "artemis.sqlite");
+    const repository = new ArtemisRepository(path);
+    repositories.push(repository);
+    const session = createSession(repository);
+    const manager = SqlitePiSessionManager.open(repository, "/app", session.id);
+
+    const usageEntry = manager.appendUsage("cache_warm", "test-provider", "test-model", exactUsage);
+    expect(usageEntry).toMatchObject({
+      type: "usage",
+      kind: "cache_warm",
+      provider: "test-provider",
+      model: "test-model",
+      usage: exactUsage
+    });
+    expect(usageEntry).not.toHaveProperty("note");
+    expect(manager.getEntry(usageEntry.id)).toEqual(usageEntry);
+  });
+
+  it("appends context edits that omit the target from model context", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "artemis-pi-session-")), "artemis.sqlite");
+    const repository = new ArtemisRepository(path);
+    repositories.push(repository);
+    const session = createSession(repository);
+    const manager = SqlitePiSessionManager.open(repository, "/app", session.id);
+
+    const messageId = manager.appendMessage(user("failed attempt"));
+    const editId = manager.appendContextEdit(messageId, null);
+
+    const editEntry = manager.getEntry(editId);
+    expect(editEntry).toMatchObject({
+      type: "context_edit",
+      id: editId,
+      parentId: messageId,
+      targetId: messageId,
+      replacement: null
+    });
+    expect(manager.getLeafId()).toBe(editId);
+
+    const reloaded = SqlitePiSessionManager.open(repository, "/app", session.id);
+    expect(reloaded.getEntry(editId)).toEqual(editEntry);
+    // The edited message is omitted from the projected model context.
+    expect(reloaded.buildSessionProjection().messages).toHaveLength(0);
+  });
+
+  it("builds a session projection with the PI 1.5.2 shape", () => {
+    const path = join(mkdtempSync(join(tmpdir(), "artemis-pi-session-")), "artemis.sqlite");
+    const repository = new ArtemisRepository(path);
+    repositories.push(repository);
+    const session = createSession(repository);
+    const manager = SqlitePiSessionManager.open(repository, "/app", session.id);
+
+    manager.appendMessage(user("question"));
+    manager.appendMessage(assistant([{ type: "text", text: "answer" }]));
+
+    const projection = manager.buildSessionProjection();
+    expect(projection.messages).toHaveLength(2);
+    expect(projection.messages[0]).toMatchObject({ role: "user", content: "question" });
+    expect(projection.messages[1]).toMatchObject({
+      role: "assistant",
+      content: [{ type: "text", text: "answer" }]
+    });
+    expect(projection.thinkingLevel).toBe("off");
+  });
+
   it("preserves native usage, tool results, compaction, and parent relationships across restart", () => {
     const path = join(mkdtempSync(join(tmpdir(), "artemis-pi-session-")), "artemis.sqlite");
     const firstRepository = new ArtemisRepository(path);
